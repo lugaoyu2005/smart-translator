@@ -282,14 +282,16 @@ mod win {
         words: Vec<OcrWordItem>,
         corrections: &[(String, String)],
     ) -> Vec<OcrLineInfo> {
-        // 词级清洗三步：纠错（乛→→，含术语管理里的用户映射）→ 剔除杂符残留 → 丢弃纯符号词
+        // 词级清洗：纠错（乛→→，含术语管理里的用户映射）→ 剔除杂符残留。
+        // 无正文的词保留为"占位盒"：不进文本、不进行矩形，
+        // 但盒宽桥接两侧间隙——否则丢弃行中杂符会人工制造大间隙，
+        // 把连续长文本误拆成左右两段（用户反馈场景）
         let words: Vec<OcrWordItem> = words
             .into_iter()
             .map(|mut w| {
                 w.text = strip_ocr_noise(&apply_symbol_corrections(&w.text, corrections));
                 w
             })
-            .filter(|w| is_meaningful_word(&w.text))
             .collect();
         if words.is_empty() {
             return vec![];
@@ -345,10 +347,14 @@ mod win {
             }
 
             for seg in segments {
+                // 拼接文本：跳过占位盒（无正文词）；拉丁词之间明显间隙→补空格
                 let mut text = String::new();
-                for (i, w) in seg.iter().enumerate() {
-                    if i > 0 {
-                        let prev = seg[i - 1];
+                let mut prev_visible: Option<&OcrWordItem> = None;
+                for w in seg.iter() {
+                    if !is_meaningful_word(&w.text) {
+                        continue;
+                    }
+                    if let Some(prev) = prev_visible {
                         let gap_x = w.x - (prev.x + prev.width);
                         let prev_latin = prev
                             .text
@@ -362,12 +368,12 @@ mod win {
                             .next()
                             .map(|c| c.is_ascii_alphanumeric())
                             .unwrap_or(false);
-                        // 拉丁词之间有明显间隙→补空格（OCR英文词本身不含空格）
                         if prev_latin && cur_latin && gap_x > max_h * 0.1 {
                             text.push(' ');
                         }
                     }
                     text.push_str(&w.text);
+                    prev_visible = Some(w);
                 }
 
                 let text = text.trim().to_string();
@@ -375,13 +381,19 @@ mod win {
                     continue;
                 }
 
-                let min_x = seg.iter().map(|w| w.x).fold(f64::MAX, f64::min);
-                let min_y = seg.iter().map(|w| w.y).fold(f64::MAX, f64::min);
-                let max_x = seg
+                // 行矩形只含可见词（杂符占位盒不参与覆盖区域）
+                let visible: Vec<&OcrWordItem> = seg
+                    .iter()
+                    .copied()
+                    .filter(|w| is_meaningful_word(&w.text))
+                    .collect();
+                let min_x = visible.iter().map(|w| w.x).fold(f64::MAX, f64::min);
+                let min_y = visible.iter().map(|w| w.y).fold(f64::MAX, f64::min);
+                let max_x = visible
                     .iter()
                     .map(|w| w.x + w.width)
                     .fold(f64::MIN, f64::max);
-                let max_y = seg
+                let max_y = visible
                     .iter()
                     .map(|w| w.y + w.height)
                     .fold(f64::MIN, f64::max);
@@ -731,6 +743,23 @@ mod tests {
         let lines = win::regroup_words_to_lines(words, &corrections);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].text, "Open→Save");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_regroup_spacer_bridges_gap() {
+        // 行中被剔除的杂符词（如孤立@）保留为占位盒桥接间隙：
+        // 连续长文本不应因杂符被丢而人工制造大间隙、误拆成左右两段
+        let words = vec![
+            win::OcrWordItem { text: "第一部分".into(), x: 0.0, y: 0.0, width: 60.0, height: 20.0 },
+            win::OcrWordItem { text: "@".into(), x: 70.0, y: 0.0, width: 30.0, height: 20.0 },
+            win::OcrWordItem { text: "第二部分".into(), x: 110.0, y: 0.0, width: 60.0, height: 20.0 },
+        ];
+        let lines = win::regroup_words_to_lines(words, &[]);
+        assert_eq!(lines.len(), 1, "杂符占位盒桥接间隙，不应拆分");
+        assert_eq!(lines[0].text, "第一部分第二部分");
+        // 矩形只含可见词（包围盒：110+60-0=170，杂符盒70~100不参与）
+        assert!((lines[0].width - 170.0).abs() < 0.01);
     }
 
     #[cfg(target_os = "windows")]
