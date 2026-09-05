@@ -329,51 +329,71 @@ mod win {
             line.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
 
             let max_h = line.iter().map(|x| x.height).fold(0.0f64, f64::max);
-            let mut text = String::new();
-            for (i, w) in line.iter().enumerate() {
-                if i > 0 {
-                    let prev = &line[i - 1];
-                    let gap_x = w.x - (prev.x + prev.width);
-                    let prev_latin = prev
-                        .text
-                        .chars()
-                        .last()
-                        .map(|c| c.is_ascii_alphanumeric())
-                        .unwrap_or(false);
-                    let cur_latin = w
-                        .text
-                        .chars()
-                        .next()
-                        .map(|c| c.is_ascii_alphanumeric())
-                        .unwrap_or(false);
-                    // 拉丁词之间有明显间隙→补空格（OCR英文词本身不含空格）
-                    if prev_latin && cur_latin && gap_x > max_h * 0.1 {
-                        text.push(' ');
-                    }
+
+            // 行内按水平间隔二次切分：间隔 > 1.5×行高 视为左右并排的独立文本
+            // （表格两列、标签+值等），不再硬拼成一行（用户反馈：间隔过大仍识别一起）
+            let mut segments: Vec<Vec<&OcrWordItem>> = vec![vec![&line[0]]];
+            for w in line.iter().skip(1) {
+                let seg = segments.last_mut().unwrap();
+                let prev = seg.last().unwrap();
+                let gap_x = w.x - (prev.x + prev.width);
+                if gap_x > max_h * 1.5 {
+                    segments.push(vec![w]);
+                } else {
+                    seg.push(w);
                 }
-                text.push_str(&w.text);
             }
 
-            let text = text.trim().to_string();
-            if text.is_empty() {
-                continue;
+            for seg in segments {
+                let mut text = String::new();
+                for (i, w) in seg.iter().enumerate() {
+                    if i > 0 {
+                        let prev = seg[i - 1];
+                        let gap_x = w.x - (prev.x + prev.width);
+                        let prev_latin = prev
+                            .text
+                            .chars()
+                            .last()
+                            .map(|c| c.is_ascii_alphanumeric())
+                            .unwrap_or(false);
+                        let cur_latin = w
+                            .text
+                            .chars()
+                            .next()
+                            .map(|c| c.is_ascii_alphanumeric())
+                            .unwrap_or(false);
+                        // 拉丁词之间有明显间隙→补空格（OCR英文词本身不含空格）
+                        if prev_latin && cur_latin && gap_x > max_h * 0.1 {
+                            text.push(' ');
+                        }
+                    }
+                    text.push_str(&w.text);
+                }
+
+                let text = text.trim().to_string();
+                if text.is_empty() {
+                    continue;
+                }
+
+                let min_x = seg.iter().map(|w| w.x).fold(f64::MAX, f64::min);
+                let min_y = seg.iter().map(|w| w.y).fold(f64::MAX, f64::min);
+                let max_x = seg
+                    .iter()
+                    .map(|w| w.x + w.width)
+                    .fold(f64::MIN, f64::max);
+                let max_y = seg
+                    .iter()
+                    .map(|w| w.y + w.height)
+                    .fold(f64::MIN, f64::max);
+
+                result.push(OcrLineInfo {
+                    text,
+                    x: min_x,
+                    y: min_y,
+                    width: max_x - min_x,
+                    height: max_y - min_y,
+                });
             }
-
-            let min_x = line.iter().map(|w| w.x).fold(f64::MAX, f64::min);
-            let min_y = line.iter().map(|w| w.y).fold(f64::MAX, f64::min);
-            let max_x = line.iter().map(|w| w.x + w.width).fold(f64::MIN, f64::max);
-            let max_y = line
-                .iter()
-                .map(|w| w.y + w.height)
-                .fold(f64::MIN, f64::max);
-
-            result.push(OcrLineInfo {
-                text,
-                x: min_x,
-                y: min_y,
-                width: max_x - min_x,
-                height: max_y - min_y,
-            });
         }
         result
     }
@@ -711,6 +731,29 @@ mod tests {
         let lines = win::regroup_words_to_lines(words, &corrections);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].text, "Open→Save");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_regroup_splits_wide_horizontal_gaps() {
+        // 同一行左右间隔过大（>1.5×行高）：拆成两条独立行（表格两列/标签+值场景）
+        let words = vec![
+            win::OcrWordItem { text: "Name".into(), x: 0.0, y: 0.0, width: 40.0, height: 12.0 },
+            win::OcrWordItem { text: "Value".into(), x: 200.0, y: 0.0, width: 40.0, height: 12.0 },
+        ];
+        let lines = win::regroup_words_to_lines(words, &[]);
+        assert_eq!(lines.len(), 2, "水平间隔160 > 1.5×12，应拆为两行");
+        assert_eq!(lines[0].text, "Name");
+        assert_eq!(lines[1].text, "Value");
+
+        // 正常句子内的小间隔（词间空隙）不拆分
+        let words = vec![
+            win::OcrWordItem { text: "hello".into(), x: 0.0, y: 0.0, width: 40.0, height: 12.0 },
+            win::OcrWordItem { text: "world".into(), x: 48.0, y: 0.0, width: 40.0, height: 12.0 },
+        ];
+        let lines = win::regroup_words_to_lines(words, &[]);
+        assert_eq!(lines.len(), 1, "间隔8 < 1.5×12，应保持一行");
+        assert_eq!(lines[0].text, "hello world");
     }
 
     #[cfg(target_os = "windows")]

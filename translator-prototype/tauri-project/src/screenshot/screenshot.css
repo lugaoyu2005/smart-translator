@@ -23,6 +23,31 @@ body,
   user-select: none;
 }
 
+/* Ctrl多选拖选模式（仅结果阶段）：箭头光标 + 根节点可选中文字（可从块外起拖） */
+.screenshot-root.ctrl-mode {
+  cursor: default;
+  user-select: text;
+}
+
+.screenshot-root.ctrl-mode .block {
+  cursor: default;
+}
+
+/* Ctrl片段计数徽标 */
+.picked-badge {
+  position: fixed;
+  top: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(25, 118, 210, 0.92);
+  color: #fff;
+  padding: 6px 16px;
+  border-radius: 999px;
+  font-size: 12px;
+  z-index: 45;
+  pointer-events: none;
+}
+
 /* ============ 选择/处理阶段 ============ */
 
 .dim-mask {

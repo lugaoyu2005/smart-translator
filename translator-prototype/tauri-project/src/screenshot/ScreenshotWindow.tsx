@@ -62,8 +62,11 @@ type CopyMode = "original" | "translated";
 
 /**
  * 行分组判定：
- * - 行间距 < 中位行高 → 同组（一段长文本换行；0.5~1.0灰区按需求默认归段落）
+ * - 行间距 < 中位行高 且 水平方向有重叠 → 同组（一段长文本换行）
  * - 行间距 ≥ 中位行高 → 分组（独立单行）
+ * - 同行（y重叠）但水平完全不相交 → 强制分组（后端拆出的左右并排文本，
+ *   如表格两列/标签+值；否则垂直间距为负会被误合并）
+ * 已知局限：多栏多行交错布局暂不做栏聚类
  */
 function groupLines(lines: OcrLineInfo[]): OcrLineInfo[][] {
   const sorted = [...lines].sort((a, b) => a.y - b.y);
@@ -76,8 +79,10 @@ function groupLines(lines: OcrLineInfo[]): OcrLineInfo[][] {
   for (let i = 1; i < sorted.length; i++) {
     const prev = sorted[i - 1];
     const cur = sorted[i];
-    const gap = cur.y - (prev.y + prev.height);
-    if (gap < medianH) {
+    const vGap = cur.y - (prev.y + prev.height);
+    const xOverlap =
+      Math.min(prev.x + prev.width, cur.x + cur.width) - Math.max(prev.x, cur.x);
+    if (vGap < medianH && xOverlap > 0) {
       groups[groups.length - 1].push(cur);
     } else {
       groups.push([cur]);
@@ -208,8 +213,11 @@ const ScreenshotWindow: React.FC = () => {
   const [engineMenuOpen, setEngineMenuOpen] = useState(false);
   const [settings, setSettings] = useState<ShotSettings>(DEFAULT_SETTINGS);
   const [copyMode, setCopyMode] = useState<CopyMode>("original");
-  // 双击选中的段落索引（Ctrl+双击多选）；复制时优先级：块内拖选文字 > 选中段落 > 全部
+  // 双击选中的段落索引（Ctrl+双击多选）；复制时优先级：拖选文字 > 选中段落 > 全部
   const [selectedSegs, setSelectedSegs] = useState<Set<number>>(new Set());
+  // Ctrl+拖动累积的文字片段（多段，复制时按拖动顺序合并）
+  const [pickedFragments, setPickedFragments] = useState<string[]>([]);
+  const [ctrlHeld, setCtrlHeld] = useState(false);
 
   // 按键组（菜单组）
   const [groupPos, setGroupPos] = useState({ x: -9999, y: -9999 });
@@ -304,6 +312,25 @@ const ScreenshotWindow: React.FC = () => {
     };
   }, [win]);
 
+  // Ctrl按住状态（多选拖选模式）
+  useEffect(() => {
+    const down = (e: KeyboardEvent) => {
+      if (e.key === "Control") setCtrlHeld(true);
+    };
+    const up = (e: KeyboardEvent) => {
+      if (e.key === "Control") setCtrlHeld(false);
+    };
+    const blur = () => setCtrlHeld(false);
+    window.addEventListener("keydown", down);
+    window.addEventListener("keyup", up);
+    window.addEventListener("blur", blur);
+    return () => {
+      window.removeEventListener("keydown", down);
+      window.removeEventListener("keyup", up);
+      window.removeEventListener("blur", blur);
+    };
+  }, []);
+
   // 处理中计时器：每秒刷新耗时显示
   useEffect(() => {
     if (phase !== "processing") return;
@@ -322,6 +349,7 @@ const ScreenshotWindow: React.FC = () => {
     setError("");
     setCopyMode("original");
     setSelectedSegs(new Set());
+    setPickedFragments([]);
     setGroupDragging(false);
     setEngineMenuOpen(false);
     groupDragged.current = false;
@@ -357,18 +385,22 @@ const ScreenshotWindow: React.FC = () => {
 
   const handleRootMouseDown = (e: React.MouseEvent) => {
     if (e.button !== 0) return; // 仅左键
+    // 双击防闪：抑制原生"双击选词"高亮（双击逻辑在onDoubleClick中处理）
+    if (e.detail >= 2) e.preventDefault();
     if (phase === "select") {
       setDragging(true);
       setError("");
       startPoint.current = { x: e.clientX, y: e.clientY };
       setSelection({ x: e.clientX, y: e.clientY, width: 0, height: 0 });
     } else if (phase === "result") {
+      // Ctrl多选拖选模式：不切换覆盖层，允许原生拖选开始
+      if (ctrlHeld) return;
       // 引擎菜单打开时：点击菜单外仅关闭菜单，不切换覆盖层
       if (engineMenuOpen) {
         setEngineMenuOpen(false);
         return;
       }
-      // 左键点击任意处：隐藏/显示翻译结果
+      // 左键点击块外：隐藏/显示翻译结果
       setOverlayVisible((v) => !v);
     }
   };
@@ -385,6 +417,20 @@ const ScreenshotWindow: React.FC = () => {
   };
 
   const handleRootMouseUp = async () => {
+    // 结果阶段：Ctrl+拖动累积片段 / 普通拖动覆盖式单选
+    if (phase === "result") {
+      const sel = window.getSelection()?.toString().trim() ?? "";
+      if (ctrlHeld) {
+        if (sel) {
+          setPickedFragments((prev) => [...prev, sel]);
+        }
+        // 清除原生选区，为下一段拖选腾位（反馈靠顶部徽标）
+        window.getSelection()?.removeAllRanges();
+      } else if (sel) {
+        setPickedFragments([]);
+      }
+      return;
+    }
     if (!dragging) return;
     setDragging(false);
     if (selection.width < 8 || selection.height < 8) {
@@ -607,11 +653,15 @@ const ScreenshotWindow: React.FC = () => {
   };
 
   /** 复制到剪贴板并退出。内容优先级：
-   *  1) 块内拖选的原生选区文字（所见即所得）
-   *  2) 双击选中的段落（Ctrl多选；按当前原/译模式）
-   *  3) 全部段落（按当前原/译模式） */
+   *  1) 块内拖选的原生选区文字（所见即所得，单段）
+   *  2) Ctrl+拖动累积的多个片段（按拖动顺序合并）
+   *  3) 双击选中的段落（Ctrl多选；按当前原/译模式）
+   *  4) 全部段落（按当前原/译模式） */
   const handleCopy = async () => {
     let text = window.getSelection()?.toString().trim() ?? "";
+    if (!text && pickedFragments.length > 0) {
+      text = pickedFragments.join("\n");
+    }
     if (!text && selectedSegs.size > 0) {
       text = blocks
         .filter((_, i) => selectedSegs.has(i))
@@ -661,7 +711,9 @@ const ScreenshotWindow: React.FC = () => {
 
   return (
     <div
-      className="screenshot-root"
+      className={`screenshot-root ${
+        phase === "result" && ctrlHeld ? "ctrl-mode" : ""
+      }`}
       onMouseDown={handleRootMouseDown}
       onMouseMove={handleRootMouseMove}
       onMouseUp={handleRootMouseUp}
@@ -746,7 +798,11 @@ const ScreenshotWindow: React.FC = () => {
           <div
             key={i}
             className={`block ${selectedSegs.has(i) ? "selected" : ""}`}
-            onMouseDown={(e) => e.stopPropagation()}
+            onMouseDown={(e) => {
+              e.stopPropagation();
+              // 双击防闪：抑制原生选词高亮
+              if (e.detail >= 2) e.preventDefault();
+            }}
             onDoubleClick={(e) => {
               e.stopPropagation();
               // 清除双击产生的原生词选区，避免干扰复制优先级
@@ -811,6 +867,13 @@ const ScreenshotWindow: React.FC = () => {
             {b.translation || "…"}
           </div>
         ))}
+
+      {/* Ctrl多选片段计数徽标（原生选区已清除，靠它反馈） */}
+      {phase === "result" && pickedFragments.length > 0 && (
+        <div className="picked-badge">
+          已选 {pickedFragments.length} 段文字（Ctrl+拖动继续加选）
+        </div>
+      )}
 
       {/* 按键组（菜单组）：底边居中下方/上方，10%→悬停100%，可拖动 */}
       {phase === "result" && !noText && (
