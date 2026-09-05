@@ -45,6 +45,7 @@ interface ShotSettings {
   overlay_opacity: number;
   overlay_transparent: boolean;
   overlay_bg_fit_text: boolean;
+  dblclick_select_word: boolean;
 }
 
 const DEFAULT_SETTINGS: ShotSettings = {
@@ -53,6 +54,7 @@ const DEFAULT_SETTINGS: ShotSettings = {
   overlay_opacity: 0.95,
   overlay_transparent: false,
   overlay_bg_fit_text: false,
+  dblclick_select_word: false,
 };
 
 type Phase = "select" | "processing" | "result";
@@ -259,6 +261,8 @@ const ScreenshotWindow: React.FC = () => {
             s?.overlay_transparent ?? DEFAULT_SETTINGS.overlay_transparent,
           overlay_bg_fit_text:
             s?.overlay_bg_fit_text ?? DEFAULT_SETTINGS.overlay_bg_fit_text,
+          dblclick_select_word:
+            s?.dblclick_select_word ?? DEFAULT_SETTINGS.dblclick_select_word,
         });
       } catch {}
 
@@ -283,6 +287,8 @@ const ScreenshotWindow: React.FC = () => {
             s?.overlay_transparent ?? DEFAULT_SETTINGS.overlay_transparent,
           overlay_bg_fit_text:
             s?.overlay_bg_fit_text ?? DEFAULT_SETTINGS.overlay_bg_fit_text,
+          dblclick_select_word:
+            s?.dblclick_select_word ?? DEFAULT_SETTINGS.dblclick_select_word,
         });
       } catch {}
       try {
@@ -791,11 +797,16 @@ const ScreenshotWindow: React.FC = () => {
             className="block"
             onMouseDown={(e) => {
               e.stopPropagation();
-              // 双击防闪：抑制原生选词高亮
-              if (e.detail >= 2) e.preventDefault();
+              // 双击防闪仅在整段模式：抑制原生选词（由双击处理器选整段）；
+              // 选词模式放行，浏览器原生双击选中一个词
+              if (e.detail >= 2 && !settings.dblclick_select_word) {
+                e.preventDefault();
+              }
             }}
             onDoubleClick={(e) => {
               e.stopPropagation();
+              // 选词模式：原生行为已选中单词，无额外处理
+              if (settings.dblclick_select_word) return;
               const el = e.currentTarget;
               if (e.ctrlKey || e.shiftKey) {
                 // Ctrl+双击：整段文字加入片段累积（与Ctrl+拖动同机制）

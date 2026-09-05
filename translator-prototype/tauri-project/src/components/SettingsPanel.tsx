@@ -359,6 +359,24 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         </div>
 
         <div className="form-group">
+          <div className="toggle-group">
+            <label className="toggle-switch">
+              <input
+                type="checkbox"
+                checked={localSettings?.dblclick_select_word || false}
+                onChange={(e) =>
+                  handleSettingChange("dblclick_select_word", e.target.checked)
+                }
+              />
+              <span className="toggle-slider"></span>
+            </label>
+            <span className="toggle-label">
+              双击只选中一个词（关闭时双击选中整段文字）
+            </span>
+          </div>
+        </div>
+
+        <div className="form-group">
           <label className="form-label">截图翻译行为</label>
           <div className="toggle-group">
             <label className="toggle-switch">

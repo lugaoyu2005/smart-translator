@@ -43,6 +43,9 @@ pub struct AppSettings {
     // 有背景时：背景块随翻译文字自适应（贴合文字消除留白）；false=固定覆盖原文区域
     #[serde(default)]
     pub overlay_bg_fit_text: bool,
+    // 双击行为：true=只选中一个词（浏览器原生行为）；false=选中整段文字
+    #[serde(default)]
+    pub dblclick_select_word: bool,
 }
 
 fn default_screenshot_components() -> Vec<String> {
@@ -97,6 +100,7 @@ impl Default for AppSettings {
             overlay_opacity: default_overlay_opacity(),
             overlay_transparent: false,
             overlay_bg_fit_text: false,
+            dblclick_select_word: false,
         }
     }
 }
