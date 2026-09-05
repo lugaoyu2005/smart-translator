@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import "./SettingsPanel.css";
+import TermsPanel from "./TermsPanel";
 
 // 菜单组组件定义（工具箱：设置里可增删、排序）
 const GROUP_COMPONENTS = [
@@ -437,6 +438,9 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         return renderHotkeySettings();
       case "about":
         return renderAbout();
+      case "terms":
+        // 术语管理：增删改即时生效，无需外层"保存设置"按钮
+        return <TermsPanel />;
       default:
         return (
           <div className="settings-section">
@@ -451,7 +455,7 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
     <div className="settings-panel">
       {renderContent()}
       
-      {activeMenu !== "about" && (
+      {activeMenu !== "about" && activeMenu !== "terms" && (
         <div className="settings-actions">
           <button className="button primary" onClick={handleSave}>
             保存设置

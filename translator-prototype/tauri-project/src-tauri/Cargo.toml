@@ -8,9 +8,12 @@ edition = "2021"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 系统集成插件：开机自启动 + 全局快捷键
+tauri-plugin-autostart = "2"
+tauri-plugin-global-shortcut = "2"
 # 在线翻译API调用
 reqwest = { version = "0.11", features = ["json"] }
 async-trait = "0.1"

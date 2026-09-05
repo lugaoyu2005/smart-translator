@@ -35,6 +35,16 @@ function App() {
     };
   }, []);
 
+  // 全局快捷键 Ctrl+Alt+T / 托盘：Rust侧已显示主窗口，这里跳转翻译测试页
+  useEffect(() => {
+    const un = listen("open-translate-page", () => {
+      setActiveMenu("translate");
+    });
+    return () => {
+      un.then((f) => f());
+    };
+  }, []);
+
   const loadSettings = async () => {
     try {
       const settings = await invoke("get_app_settings");
@@ -51,7 +61,7 @@ function App() {
       alert("设置已保存");
     } catch (error) {
       console.error("Failed to save settings:", error);
-      alert("保存设置失败");
+      alert(`设置已保存文件，但应用失败：\n${error}`);
     }
   };
 

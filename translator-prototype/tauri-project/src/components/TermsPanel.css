@@ -1,0 +1,133 @@
+/* 术语管理面板 */
+
+.terms-desc {
+  color: #6b7280;
+  font-size: 13px;
+  line-height: 1.6;
+  margin: 0 0 14px;
+}
+
+.term-add-form {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.term-add-form .form-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.term-search {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 10px;
+}
+
+.term-message {
+  color: #dc2626;
+  font-size: 13px;
+  margin: 10px 0 0;
+}
+
+.term-list {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.term-empty {
+  color: #9ca3af;
+  text-align: center;
+  padding: 24px 0;
+}
+
+.term-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: #fff;
+}
+
+.term-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.term-source {
+  font-weight: 600;
+  font-size: 15px;
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+.term-usage {
+  color: #9ca3af;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.term-translations {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.term-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #f9fafb;
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+
+.term-translation {
+  flex: 1;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.term-priority {
+  color: #6b7280;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.icon-btn {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 13px;
+  color: #6b7280;
+  padding: 2px 6px;
+  border-radius: 4px;
+  line-height: 1.4;
+}
+
+.icon-btn:hover {
+  background: #e5e7eb;
+  color: #111827;
+}
+
+.icon-btn.danger:hover {
+  background: #fee2e2;
+  color: #dc2626;
+}
+
+.button.danger {
+  background: #fee2e2;
+  color: #dc2626;
+}
+
+.button.danger:hover {
+  background: #fecaca;
+}
+
+.button.small {
+  padding: 4px 10px;
+  font-size: 12px;
+}

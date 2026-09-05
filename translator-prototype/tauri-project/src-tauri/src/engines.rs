@@ -343,6 +343,9 @@ impl TermEntry {
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct TermBase {
     pub entries: HashMap<String, TermEntry>,
+    /// 是否有未持久化的变更（自动调整计数等），由命令层检查后落盘
+    #[serde(skip)]
+    pub dirty: bool,
 }
 
 impl TermBase {
@@ -363,6 +366,59 @@ impl TermBase {
             entry.translations.push(translation.to_string());
             entry.priority.push(priority);
         }
+        self.dirty = true;
+    }
+
+    /// 新增译法（不覆盖已有译法的优先级）；返回是否确实新增
+    pub fn add_translation(&mut self, source: &str, translation: &str) -> bool {
+        let entry = self.entries.entry(source.to_string()).or_insert(TermEntry {
+            source: source.to_string(),
+            translations: vec![],
+            priority: vec![],
+            usage_count: 0,
+        });
+        let existed = entry.translations.iter().any(|t| t == translation);
+        if existed {
+            return false;
+        }
+        entry.translations.push(translation.to_string());
+        entry.priority.push(0);
+        self.dirty = true;
+        true
+    }
+
+    /// 删除术语的某个译法；若删完译法为空则整条移除。返回是否有变更
+    pub fn remove_translation(&mut self, source: &str, translation: &str) -> bool {
+        let changed = if let Some(entry) = self.entries.get_mut(source) {
+            if let Some(idx) = entry.translations.iter().position(|t| t == translation) {
+                entry.translations.remove(idx);
+                if idx < entry.priority.len() {
+                    entry.priority.remove(idx);
+                }
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if changed {
+            if self.entries.get(source).map_or(true, |e| e.translations.is_empty()) {
+                self.entries.remove(source);
+            }
+            self.dirty = true;
+        }
+        changed
+    }
+
+    /// 删除整条术语。返回是否有变更
+    pub fn remove_entry(&mut self, source: &str) -> bool {
+        if self.entries.remove(source).is_some() {
+            self.dirty = true;
+            true
+        } else {
+            false
+        }
     }
 
     /// 查询术语并增加使用次数（自动调整：常用译法优先级+1）
@@ -376,6 +432,7 @@ impl TermBase {
                 if let Some(idx) = entry.translations.iter().position(|t| *t == best) {
                     if idx < entry.priority.len() {
                         entry.priority[idx] += 1;
+                        self.dirty = true;
                     }
                 }
             }
@@ -452,6 +509,23 @@ impl TranslationManager {
     /// 获取所有术语条目
     pub fn list_terms(&self) -> Vec<TermEntry> {
         self.term_base.entries.values().cloned().collect()
+    }
+
+    /// 术语库只读访问（持久化用）
+    pub fn term_base(&self) -> &TermBase {
+        &self.term_base
+    }
+
+    /// 术语库可变访问（命令层增删改用）
+    pub fn term_base_mut(&mut self) -> &mut TermBase {
+        &mut self.term_base
+    }
+
+    /// 取出并清除自动调整脏标记（用于翻译后按需落盘）
+    pub fn take_term_dirty(&mut self) -> bool {
+        let dirty = self.term_base.dirty;
+        self.term_base.dirty = false;
+        dirty
     }
 
     /// 翻译：先应用术语库，再选择第一个可用引擎

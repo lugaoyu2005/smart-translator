@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::TcpStream;
 use std::time::Duration;
+use tauri::menu::{MenuBuilder, MenuItemBuilder};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NetworkStatus {
@@ -149,21 +153,143 @@ fn detect_network() -> NetworkStatus {
     }
 }
 
-// 设置系统托盘
-pub fn setup_system_tray(_app: &tauri::AppHandle) -> Result<(), String> {
-    // TODO: 实现系统托盘（需要 tauri tray 特性）
+// ===== 系统集成：通用动作 =====
+
+/// 显示并聚焦主窗口（托盘左键 / 翻译快捷键共用）
+pub fn show_main_window(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+    }
+}
+
+/// 触发截图翻译：显示截图窗口并通知前端重置到框选模式
+pub fn trigger_screenshot(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("screenshot") {
+        let _ = win.show();
+        let _ = win.set_focus();
+        let _ = app.emit_to("screenshot", "trigger-screenshot", ());
+    }
+}
+
+// ===== 系统托盘 =====
+
+// 设置系统托盘：显示主窗口 / 截图翻译 / 退出；左键单击托盘=显示主窗口
+pub fn setup_system_tray(app: &AppHandle) -> Result<(), String> {
+    let show = MenuItemBuilder::with_id("tray_show", "显示主窗口")
+        .build(app)
+        .map_err(|e| format!("构建托盘菜单失败: {e}"))?;
+    let screenshot = MenuItemBuilder::with_id("tray_screenshot", "截图翻译")
+        .build(app)
+        .map_err(|e| format!("构建托盘菜单失败: {e}"))?;
+    let quit = MenuItemBuilder::with_id("tray_quit", "退出")
+        .build(app)
+        .map_err(|e| format!("构建托盘菜单失败: {e}"))?;
+
+    let menu = MenuBuilder::new(app)
+        .item(&show)
+        .item(&screenshot)
+        .separator()
+        .item(&quit)
+        .build()
+        .map_err(|e| format!("构建托盘菜单失败: {e}"))?;
+
+    let icon = app
+        .default_window_icon()
+        .cloned()
+        .ok_or_else(|| "缺少应用图标，无法创建托盘".to_string())?;
+
+    TrayIconBuilder::with_id("main-tray")
+        .icon(icon)
+        .tooltip("智能翻译软件")
+        .menu(&menu)
+        .show_menu_on_left_click(false) // 左键=显示主窗口，右键=弹出菜单
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "tray_show" => show_main_window(app),
+            "tray_screenshot" => trigger_screenshot(app),
+            "tray_quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main_window(tray.app_handle());
+            }
+        })
+        .build(app)
+        .map_err(|e| format!("创建托盘失败: {e}"))?;
     Ok(())
 }
 
-// 设置开机自启动
-pub fn setup_autostart() -> Result<(), String> {
-    // TODO: Windows下写入注册表 HKCU\...\Run
-    Ok(())
+// ===== 开机自启动 =====
+
+// 应用开机自启动设置（tauri-plugin-autostart 写注册表 HKCU\...\Run）
+pub fn apply_autostart(app: &AppHandle, enabled: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt as _;
+    let autolaunch = app.autolaunch();
+    if enabled {
+        autolaunch
+            .enable()
+            .map_err(|e| format!("开启开机自启动失败: {e}"))
+    } else {
+        autolaunch
+            .disable()
+            .map_err(|e| format!("关闭开机自启动失败: {e}"))
+    }
 }
 
-// 设置全局快捷键
-pub fn setup_global_hotkeys(_app: &tauri::AppHandle) -> Result<(), String> {
-    // TODO: 使用 tauri-plugin-global-shortcut
+// ===== 全局快捷键 =====
+
+/// 解析快捷键字符串（如 "Ctrl+Alt+S"）
+fn parse_shortcut(s: &str) -> Result<Shortcut, String> {
+    s.trim()
+        .parse::<Shortcut>()
+        .map_err(|_| format!("快捷键「{s}」无法识别（示例：Ctrl+Alt+S）"))
+}
+
+// 按设置注册全局快捷键（重复调用会先注销全部再注册，用于设置变更后重注册）
+pub fn register_hotkeys(app: &AppHandle, settings: &AppSettings) -> Result<(), String> {
+    let gs = app.global_shortcut();
+    gs.unregister_all()
+        .map_err(|e| format!("注销旧快捷键失败: {e}"))?;
+
+    let hk_screenshot = settings
+        .hotkeys
+        .get("screenshot")
+        .cloned()
+        .unwrap_or_else(|| "Ctrl+Alt+S".to_string());
+    let hk_translate = settings
+        .hotkeys
+        .get("translate")
+        .cloned()
+        .unwrap_or_else(|| "Ctrl+Alt+T".to_string());
+
+    let sc_screenshot = parse_shortcut(&hk_screenshot)?;
+    let sc_translate = parse_shortcut(&hk_translate)?;
+    if sc_screenshot == sc_translate {
+        return Err("截图与翻译快捷键不能相同".to_string());
+    }
+
+    gs.on_shortcut(sc_screenshot, |app, _shortcut, event| {
+        if event.state() == ShortcutState::Pressed {
+            trigger_screenshot(app);
+        }
+    })
+    .map_err(|e| format!("注册截图快捷键「{hk_screenshot}」失败: {e}"))?;
+
+    gs.on_shortcut(sc_translate, |app, _shortcut, event| {
+        if event.state() == ShortcutState::Pressed {
+            show_main_window(app);
+            let _ = app.emit_to("main", "open-translate-page", ());
+        }
+    })
+    .map_err(|e| format!("注册翻译快捷键「{hk_translate}」失败: {e}"))?;
+
     Ok(())
 }
 
@@ -180,14 +306,30 @@ pub async fn get_app_settings() -> Result<AppSettings, String> {
     Ok(load_settings())
 }
 
-// Tauri命令：保存应用设置（持久化到JSON文件）
+// Tauri命令：保存应用设置（持久化到JSON文件，并同步应用自启动/快捷键）
 #[tauri::command]
-pub async fn save_app_settings(settings: AppSettings) -> Result<(), String> {
+pub async fn save_app_settings(
+    app: tauri::AppHandle,
+    settings: AppSettings,
+) -> Result<(), String> {
     let path = settings_path();
     let json = serde_json::to_string_pretty(&settings)
         .map_err(|e| format!("序列化设置失败: {e}"))?;
     std::fs::write(&path, json).map_err(|e| format!("写入设置文件失败: {e}"))?;
-    Ok(())
+
+    // 系统集成设置即时生效；失败信息返回给前端提示（文件已保存）
+    let mut errs: Vec<String> = Vec::new();
+    if let Err(e) = apply_autostart(&app, settings.autostart) {
+        errs.push(e);
+    }
+    if let Err(e) = register_hotkeys(&app, &settings) {
+        errs.push(e);
+    }
+    if errs.is_empty() {
+        Ok(())
+    } else {
+        Err(errs.join("；"))
+    }
 }
 
 #[cfg(test)]

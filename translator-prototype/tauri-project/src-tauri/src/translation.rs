@@ -2,8 +2,7 @@
 //! 状态管理：TranslationManager 存入 Tauri 状态，跨命令共享
 
 use crate::engines::{
-    preprocess_text, BaiduEngine, EngineInfo, TermBase, TranslationManager, TranslationResult,
-    YoudaoEngine,
+    preprocess_text, BaiduEngine, EngineInfo, TranslationManager, TranslationResult, YoudaoEngine,
 };
 use serde::{Deserialize, Serialize};
 
@@ -12,11 +11,11 @@ pub struct AppState {
     pub manager: tokio::sync::Mutex<TranslationManager>,
 }
 
-/// 从设置中的API密钥构建引擎管理器
+/// 从设置中的API密钥构建引擎管理器（术语库从 terms.json 加载）
 pub fn build_manager(settings: &crate::system::AppSettings) -> TranslationManager {
     let baidu = BaiduEngine::new(&settings.baidu_app_id, &settings.baidu_secret);
     let youdao = YoudaoEngine::new(&settings.youdao_app_key, &settings.youdao_app_secret);
-    let term_base = TermBase::default();
+    let term_base = crate::terms::load_term_base();
 
     TranslationManager::new(Some(baidu), Some(youdao), term_base)
 }
@@ -53,7 +52,7 @@ pub async fn translate_text(
 
     let mut manager = state.manager.lock().await;
 
-    manager
+    let result = manager
         .translate(&processed, &from, &to)
         .await
         .map(|mut r| {
@@ -61,7 +60,14 @@ pub async fn translate_text(
             r.from = from;
             r.to = to;
             r
-        })
+        });
+
+    // 术语库使用计数有自动调整时落盘
+    if manager.take_term_dirty() {
+        let _ = crate::terms::save_term_base(manager.term_base());
+    }
+
+    result
 }
 
 // Tauri命令：获取支持的语言列表
@@ -113,7 +119,7 @@ pub async fn reload_engines(state: tauri::State<'_, AppState>) -> Result<(), Str
     Ok(())
 }
 
-// Tauri命令：添加/更新术语优先级
+// Tauri命令：添加/更新术语优先级（并持久化到 terms.json）
 #[tauri::command]
 pub async fn set_term_priority(
     state: tauri::State<'_, AppState>,
@@ -122,10 +128,8 @@ pub async fn set_term_priority(
     priority: u32,
 ) -> Result<(), String> {
     let mut manager = state.manager.lock().await;
-
-    // 通过临时暴露的方法操作术语库
     manager.set_term_priority(&source, &translation, priority);
-    Ok(())
+    crate::terms::save_term_base(manager.term_base())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -167,6 +171,11 @@ pub async fn translate_lines(
         }
         _ => manager.translate_batch(&processed, &from, &to).await?,
     };
+
+    // 术语库使用计数有自动调整时落盘
+    if manager.take_term_dirty() {
+        let _ = crate::terms::save_term_base(manager.term_base());
+    }
 
     Ok(LinesTranslationResult {
         translations,

@@ -1,4 +1,4 @@
-当前开发进度如下（基于本会话已确立的事实）：
+当前开发进度如下（基于本会话已确立的事实，更新于 2026-09-06）：
 
 已交付功能 ✅
 功能模块	状态	说明
@@ -10,16 +10,40 @@ OCR 文字识别	✅ 完成	Windows 内置引擎，中文优先；小区域放�
 引擎菜单 UI	✅ 完成	点击向上展开垂直引擎列表，点选重译
 有道签名 bug	✅ 已修复	>20 字符截断规则，切换引擎不再 202 报错
 主页弹性布局	✅ 完成	左 30% 菜单栏 + 右 70% 详细设置
+系统托盘	✅ 完成	启动隐藏 + 点×隐藏到托盘 + 托盘菜单（显示主窗口/截图翻译/退出）+ 左键点托盘显示主窗口
+开机自启动	✅ 完成	tauri-plugin-autostart 写注册表 HKCU\...\Run（已验证注册表生效），设置页开关实时生效
+全局快捷键	✅ 完成	tauri-plugin-global-shortcut，Ctrl+Alt+S 截图 / Ctrl+Alt+T 主窗口+翻译测试页；按设置解析注册，保存后重注册，冲突/格式错误回显提示
+术语库管理	✅ 完成	terms.json 持久化（与 settings.json 同目录）+ 增删术语/译法 + 优先级调整 + 使用50次自动升级落盘 + 术语管理页 UI（搜索/添加/删除/优先级）
+工程基建	✅ 完成	git 仓库初始化（基线提交），.gitignore 排除 target/node_modules/settings.json（含密钥）；删除死代码 ScreenshotTranslation.tsx/.css；测试硬编码 API 密钥改为环境变量（BAIDU_APP_ID/BAIDU_SECRET/YOUDAO_APP_KEY/YOUDAO_APP_SECRET）
+
+自动化验证 ✅
+- npm run build（tsc + vite）通过
+- cargo test：13 通过 / 0 失败 / 1 忽略（真实 API 测试需环境变量）
+- cargo check 无错误（仅 3 个历史占位代码 dead_code 警告）
+- dev 启动日志无 [启动] 错误（快捷键注册、自启动应用均成功）
+- 启动隐藏已实测（启动后无主窗口）；注册表已实测写入
+
+待亲手验证（dev 实例运行中）🧪
+- 托盘右键菜单：显示主窗口 / 截图翻译 / 退出
+- Ctrl+Alt+S 触发截图翻译；Ctrl+Alt+T 显示主窗口并跳转翻译测试页
+- 主窗口点 × 隐藏到托盘（不退出）
+- 术语管理页：添加/搜索/优先级/删除，重启后仍在（terms.json）
+
 规划已定稿、待实施 📋
 功能模块	状态	说明
-系统托盘	📋 蓝图定稿	启动隐藏 + 点×最小化 + 托盘菜单（显示/截图/退出）
-开机自启动	📋 蓝图定稿	tauri-plugin-autostart 写注册表，autostart 生效
-全局快捷键	📋 蓝图定稿	Ctrl+Alt+S 截图 / Ctrl+Alt+T 翻译
-术语库管理	📋 蓝图定稿	terms.json 持久化 + 增删改 + 优先级 + 设置页 UI（现状已核实）
+（无）——原四项已全部完成
+
 调研完成、待实施 🔍
 功能模块	状态	说明
 离线翻译库	🔍 选型确定	CTranslate2 + Marian，int8 单方向约 80–120MB
 Win11 右键菜单	🔍 方案确定	single-instance + 注册表 shell 菜单 + 读选中文本
+划词翻译 UI	🔍 待实施	设置页"划词翻译"菜单当前为占位（可与右键菜单同期做）
+
 依赖中 / 未排期 ⏳
 功能模块	状态	说明
 网络动态切换引擎	⏳ 依赖离线库	在线用 API、离线用本地模型，待离线引擎落地后接
+
+备注 ⚠️
+- Ctrl+Alt+T 当前语义=调出主窗口到翻译测试页；划词翻译实现后可升级为划词翻译
+- settings.json / terms.json 存 exe 同目录（便携式设计）；未来安装版需迁移到 app_data_dir
+- 真实 API 密钥现仅存于 target/debug/settings.json（已被 gitignore，不入库）

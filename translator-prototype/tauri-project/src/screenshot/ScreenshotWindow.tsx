@@ -287,8 +287,8 @@ const ScreenshotWindow: React.FC = () => {
     };
   }, [win]);
 
-  /** 退出截图翻译：重置状态并隐藏窗口 */
-  const exit = useCallback(async () => {
+  /** 重置到框选模式（退出/重新触发共用） */
+  const resetState = useCallback(() => {
     setPhase("select");
     setDragging(false);
     setBlocks([]);
@@ -300,10 +300,23 @@ const ScreenshotWindow: React.FC = () => {
     setEngineMenuOpen(false);
     groupDragged.current = false;
     setSelection({ x: 0, y: 0, width: 0, height: 0 });
+  }, []);
+
+  // 托盘菜单/全局快捷键触发截图：Rust侧已显示窗口，这里重置到框选模式
+  useEffect(() => {
+    const un = listen("trigger-screenshot", () => resetState());
+    return () => {
+      un.then((f) => f());
+    };
+  }, [resetState]);
+
+  /** 退出截图翻译：重置状态并隐藏窗口 */
+  const exit = useCallback(async () => {
+    resetState();
     try {
       await win.hide();
     } catch {}
-  }, [win]);
+  }, [win, resetState]);
 
   // ESC退出
   useEffect(() => {
