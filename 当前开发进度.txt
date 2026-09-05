@@ -15,6 +15,9 @@ OCR 文字识别	✅ 完成	Windows 内置引擎，中文优先；小区域放�
 全局快捷键	✅ 完成	tauri-plugin-global-shortcut，Ctrl+Alt+S 截图 / Ctrl+Alt+T 主窗口+翻译测试页；按设置解析注册，保存后重注册，冲突/格式错误回显提示
 术语库管理	✅ 完成	terms.json 持久化（与 settings.json 同目录）+ 增删术语/译法 + 优先级调整 + 使用50次自动升级落盘 + 术语管理页 UI（搜索/添加/删除/优先级）
 工程基建	✅ 完成	git 仓库初始化（基线提交），.gitignore 排除 target/node_modules/settings.json（含密钥）；删除死代码 ScreenshotTranslation.tsx/.css；测试硬编码 API 密钥改为环境变量（BAIDU_APP_ID/BAIDU_SECRET/YOUDAO_APP_KEY/YOUDAO_APP_SECRET）
+截图等待期反馈	✅ 完成	拆分截图/OCR：截图完成立即恢复UI，OCR/翻译期间显示加载面板（转圈+阶段文字+耗时+ESC取消），选区边框全程可见
+覆盖块背景模式	✅ 完成	无背景模式（透明仅文字+白色光晕）+ 背景随文字自适应（贴合文字消除留白），设置页可开关
+OCR符号过滤	✅ 完成	剔除误识别符号（箭头→、带圈数字①③、部首笔画⺂等）及纯符号词（孤立@等）
 
 自动化验证 ✅
 - npm run build（tsc + vite）通过

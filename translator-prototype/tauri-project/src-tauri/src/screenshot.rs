@@ -4,6 +4,7 @@
 //! - 结构化返回：逐行文本 + 紧凑边界矩形（物理像素），供前端做段落判定与1:1覆盖
 //! - 小区域自动放大 + 词级行重组：修复小框选识别率低、横排误判竖排的问题
 
+use crate::translation::AppState;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
@@ -230,18 +231,39 @@ mod win {
     /// 词级行重组：按y范围重叠率≥50%判定同一视觉行
     /// 修复OCR行分割错误（横排文字被拆成多个"行"导致误判竖排）
     /// 行内按x排序；拉丁词间有明显间隙加空格，CJK直接拼接
-    /// 剔除OCR常见误识别的特殊符号（按需求：直接忽略）
-    /// - 箭头及逻辑符号 ←↑→↓⇒（U+2190–21FF）
+    /// 内置符号纠错表：OCR高频误识别（穷举于用户反馈，术语管理里可追加）
+    /// 例：→ 被识别为 乛/⺂/⺡（部首）、← 被识别为 乁
+    const BUILTIN_SYMBOL_FIXES: &[(&str, &str)] = &[
+        ("乛", "→"),
+        ("⺂", "→"),
+        ("⺡", "→"),
+        ("乁", "←"),
+    ];
+
+    /// 应用符号纠错：先内置表，再用户术语映射（术语管理中 1-2 字非字母数字源词）
+    fn apply_symbol_corrections(text: &str, corrections: &[(String, String)]) -> String {
+        let mut result = text.to_string();
+        for (from, to) in BUILTIN_SYMBOL_FIXES {
+            result = result.replace(from, to);
+        }
+        for (from, to) in corrections {
+            result = result.replace(from.as_str(), to.as_str());
+        }
+        result
+    }
+
+    /// 剔除OCR常见误识别的特殊符号残留（在纠错之后执行，未被映射的杂符直接忽略）
     /// - 带圈字母数字 ①②③⑴Ⓐ（U+2460–24FF）
     /// - CJK部首补充 ⺂⺡（U+2E80–2EFF，误产重灾区）
     /// - 康熙部首（U+2F00–2FDF）与CJK笔画 乀乁（U+31C0–31EF）
+    /// 注：箭头（U+2190–21FF）不再剔除——纠错映射的目标符号（如→）需要保留，
+    ///     未被纠错的孤立箭头词由"纯符号词丢弃"规则兜底
     fn strip_ocr_noise(text: &str) -> String {
         text.chars()
             .filter(|c| {
                 let u = *c as u32;
                 !matches!(u,
-                    0x2190..=0x21FF
-                    | 0x2460..=0x24FF
+                    0x2460..=0x24FF
                     | 0x2E80..=0x2EFF
                     | 0x2F00..=0x2FDF
                     | 0x31C0..=0x31EF
@@ -250,17 +272,24 @@ mod win {
             .collect()
     }
 
-    pub(crate) fn regroup_words_to_lines(words: Vec<OcrWordItem>) -> Vec<OcrLineInfo> {
-        // 先剔除误识别的杂符号词：Windows OCR常把 →← 箭头、①③ 带圈数字、
-        // ⺂ 等部首/笔画误识别为杂符（用户反馈：③→@、→→⺂）。
-        // 这些符号对翻译几乎没有信息量，按需求直接忽略；纯符号词（如孤立@、——）同样剔除
+    /// 有信息量的词：含字母/数字/汉字，或含纠错/原生箭头（如 "Open→Save"）
+    fn is_meaningful_word(text: &str) -> bool {
+        text.chars()
+            .any(|c| c.is_alphanumeric() || matches!(c as u32, 0x2190..=0x21FF))
+    }
+
+    pub(crate) fn regroup_words_to_lines(
+        words: Vec<OcrWordItem>,
+        corrections: &[(String, String)],
+    ) -> Vec<OcrLineInfo> {
+        // 词级清洗三步：纠错（乛→→，含术语管理里的用户映射）→ 剔除杂符残留 → 丢弃纯符号词
         let words: Vec<OcrWordItem> = words
             .into_iter()
             .map(|mut w| {
-                w.text = strip_ocr_noise(&w.text);
+                w.text = strip_ocr_noise(&apply_symbol_corrections(&w.text, corrections));
                 w
             })
-            .filter(|w| w.text.chars().any(|c| c.is_alphanumeric()))
+            .filter(|w| is_meaningful_word(&w.text))
             .collect();
         if words.is_empty() {
             return vec![];
@@ -352,7 +381,12 @@ mod win {
     /// Windows内置OCR：从BGRA像素识别文字
     /// 返回结构化行数据（文本+紧凑矩形，物理像素，相对截图区域原点）
     /// 优先中文引擎（zh-Hans-CN），fallback到用户配置文件语言
-    pub fn ocr_from_pixels(pixels: &[u8], width: i32, height: i32) -> Result<OcrResult, String> {
+    pub fn ocr_from_pixels(
+        pixels: &[u8],
+        width: i32,
+        height: i32,
+        corrections: &[(String, String)],
+    ) -> Result<OcrResult, String> {
         use windows::Graphics::Imaging::{
             BitmapAlphaMode, BitmapDecoder, BitmapEncoder, BitmapPixelFormat,
         };
@@ -451,7 +485,7 @@ mod win {
         }
 
         // 词级行重组（修复横排被拆成多行的误判）
-        let lines = regroup_words_to_lines(all_words);
+        let lines = regroup_words_to_lines(all_words, corrections);
 
         Ok(OcrResult {
             lines,
@@ -493,7 +527,7 @@ pub async fn capture_region_ocr(
     {
         tauri::async_runtime::spawn_blocking(move || {
             let data = win::capture_region(x, y, width, height)?;
-            win::ocr_from_pixels(&data.pixels, data.width, data.height)
+            win::ocr_from_pixels(&data.pixels, data.width, data.height, &[])
         })
         .await
         .map_err(|e| format!("OCR任务执行失败: {e}"))?
@@ -526,23 +560,42 @@ pub fn capture_region_store(x: i32, y: i32, width: i32, height: i32) -> Result<(
 }
 
 /// 对暂存的截图执行OCR（OCR较慢，异步执行，取走即清空缓存）
+/// 符号纠错映射来自术语管理（1-2字非字母数字源词的术语），如 乛→→
 #[tauri::command]
-pub async fn ocr_stored_capture() -> Result<OcrResult, String> {
+pub async fn ocr_stored_capture(
+    state: tauri::State<'_, AppState>,
+) -> Result<OcrResult, String> {
     #[cfg(target_os = "windows")]
     {
-        tauri::async_runtime::spawn_blocking(|| {
+        // 从术语库提取符号映射（短源词且不含字母数字，避免把普通术语误当符号）
+        let corrections: Vec<(String, String)> = {
+            let manager = state.manager.lock().await;
+            manager
+                .list_terms()
+                .into_iter()
+                .filter(|t| {
+                    t.source.chars().count() <= 2
+                        && !t.source.chars().any(|c| c.is_ascii_alphanumeric())
+                })
+                .filter_map(|t| {
+                    t.best_translation().map(|b| (t.source.clone(), b.to_string()))
+                })
+                .collect()
+        };
+        tauri::async_runtime::spawn_blocking(move || {
             let data = LAST_CAPTURE
                 .lock()
                 .map_err(|_| "截图缓存锁不可用".to_string())?
                 .take()
                 .ok_or_else(|| "没有已暂存的截图".to_string())?;
-            win::ocr_from_pixels(&data.pixels, data.width, data.height)
+            win::ocr_from_pixels(&data.pixels, data.width, data.height, &corrections)
         })
         .await
         .map_err(|e| format!("OCR任务执行失败: {e}"))?
     }
     #[cfg(not(target_os = "windows"))]
     {
+        let _ = state;
         Err("当前平台暂不支持截图OCR".to_string())
     }
 }
@@ -566,7 +619,7 @@ pub fn capture_region(x: i32, y: i32, width: i32, height: i32) -> Result<Screens
 pub fn perform_ocr(pixels: Vec<u8>, width: i32, height: i32) -> Result<OcrResult, String> {
     #[cfg(target_os = "windows")]
     {
-        win::ocr_from_pixels(&pixels, width, height)
+        win::ocr_from_pixels(&pixels, width, height, &[])
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -631,17 +684,33 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn test_regroup_strips_ocr_noise_symbols() {
-        // 误识别符号（→识别为部首、③识别为带圈字符等）应被剔除；
-        // 纯符号词整体丢弃，混合词保留正文部分
+        // 内置纠错：⺂（→的误识别）还原为→并保留（⺂⺂→→→）；
+        // 无映射的带圈字符③剔除；纯符号词（孤立@）丢弃
         let words = vec![
             win::OcrWordItem { text: "Click".into(), x: 0.0, y: 0.0, width: 40.0, height: 12.0 },
-            win::OcrWordItem { text: "\u{2E82}\u{2E82}".into(), x: 44.0, y: 0.0, width: 20.0, height: 12.0 }, // ⺂⺂ 部首杂符
+            win::OcrWordItem { text: "\u{2E82}\u{2E82}".into(), x: 44.0, y: 0.0, width: 20.0, height: 12.0 }, // ⺂⺂ → →→
             win::OcrWordItem { text: "here\u{2462}".into(), x: 68.0, y: 0.0, width: 60.0, height: 12.0 }, // here③ → here
             win::OcrWordItem { text: "@".into(), x: 132.0, y: 0.0, width: 10.0, height: 12.0 }, // 孤立@（③误识别产物）
+            win::OcrWordItem { text: "\u{2E82}".into(), x: 146.0, y: 0.0, width: 10.0, height: 12.0 }, // ⺂ → 内置纠错为→
         ];
-        let lines = win::regroup_words_to_lines(words);
+        let lines = win::regroup_words_to_lines(words, &[]);
         assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].text, "Click here");
+        assert_eq!(lines[0].text, "Click→→here→");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_regroup_term_symbol_correction() {
+        // 术语管理符号映射：乛→→（用户在术语库中穷举维护）
+        let words = vec![
+            win::OcrWordItem { text: "Open".into(), x: 0.0, y: 0.0, width: 40.0, height: 12.0 },
+            win::OcrWordItem { text: "乛".into(), x: 44.0, y: 0.0, width: 10.0, height: 12.0 },
+            win::OcrWordItem { text: "Save".into(), x: 58.0, y: 0.0, width: 40.0, height: 12.0 },
+        ];
+        let corrections = vec![("乛".to_string(), "→".to_string())];
+        let lines = win::regroup_words_to_lines(words, &corrections);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "Open→Save");
     }
 
     #[cfg(target_os = "windows")]
@@ -654,7 +723,7 @@ mod tests {
             win::OcrWordItem { text: "beautiful".into(), x: 44.0, y: 10.5, width: 60.0, height: 12.0 },
             win::OcrWordItem { text: "world".into(), x: 106.0, y: 10.2, width: 35.0, height: 12.0 },
         ];
-        let lines = win::regroup_words_to_lines(words);
+        let lines = win::regroup_words_to_lines(words, &[]);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].text, "hello beautiful world");
         assert!((lines[0].width - 141.0).abs() < 0.01);
@@ -670,7 +739,7 @@ mod tests {
             win::OcrWordItem { text: "line".into(), x: 0.0, y: 30.0, width: 30.0, height: 12.0 },
             win::OcrWordItem { text: "two".into(), x: 32.0, y: 30.0, width: 24.0, height: 12.0 },
         ];
-        let lines = win::regroup_words_to_lines(words);
+        let lines = win::regroup_words_to_lines(words, &[]);
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].text, "line one");
         assert_eq!(lines[1].text, "line two");

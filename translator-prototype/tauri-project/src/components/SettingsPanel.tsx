@@ -37,7 +37,9 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
   };
 
   const handleSave = async () => {
-    onSaveSettings(localSettings);
+    // 先等设置落盘，再重载引擎：两者并发时 reload_engines 可能读到旧配置，
+    // 导致截图窗口引擎列表与设置不同步
+    await onSaveSettings(localSettings);
     // 保存后重新加载引擎（应用新的API密钥）
     try {
       await invoke("reload_engines");

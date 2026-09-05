@@ -208,6 +208,8 @@ const ScreenshotWindow: React.FC = () => {
   const [engineMenuOpen, setEngineMenuOpen] = useState(false);
   const [settings, setSettings] = useState<ShotSettings>(DEFAULT_SETTINGS);
   const [copyMode, setCopyMode] = useState<CopyMode>("original");
+  // 双击选中的段落索引（Ctrl+双击多选）；复制时优先级：块内拖选文字 > 选中段落 > 全部
+  const [selectedSegs, setSelectedSegs] = useState<Set<number>>(new Set());
 
   // 按键组（菜单组）
   const [groupPos, setGroupPos] = useState({ x: -9999, y: -9999 });
@@ -319,6 +321,7 @@ const ScreenshotWindow: React.FC = () => {
     setNoText(false);
     setError("");
     setCopyMode("original");
+    setSelectedSegs(new Set());
     setGroupDragging(false);
     setEngineMenuOpen(false);
     groupDragged.current = false;
@@ -401,6 +404,7 @@ const ScreenshotWindow: React.FC = () => {
     setPhase("processing");
     setProcStage("ocr");
     setProcSeconds(0);
+    setSelectedSegs(new Set());
     const sf = scaleFactor.current || 1;
     const physX = Math.round(monitorPos.current.x + sel.x * sf);
     const physY = Math.round(monitorPos.current.y + sel.y * sf);
@@ -602,11 +606,23 @@ const ScreenshotWindow: React.FC = () => {
     await retranslate(engines[idx]?.name ?? null);
   };
 
-  /** 复制当前模式对应文本到剪贴板，并退出截图 */
+  /** 复制到剪贴板并退出。内容优先级：
+   *  1) 块内拖选的原生选区文字（所见即所得）
+   *  2) 双击选中的段落（Ctrl多选；按当前原/译模式）
+   *  3) 全部段落（按当前原/译模式） */
   const handleCopy = async () => {
-    const text = blocks
-      .map((b) => (copyMode === "original" ? b.original : b.translation))
-      .join("\n");
+    let text = window.getSelection()?.toString().trim() ?? "";
+    if (!text && selectedSegs.size > 0) {
+      text = blocks
+        .filter((_, i) => selectedSegs.has(i))
+        .map((b) => (copyMode === "original" ? b.original : b.translation))
+        .join("\n");
+    }
+    if (!text) {
+      text = blocks
+        .map((b) => (copyMode === "original" ? b.original : b.translation))
+        .join("\n");
+    }
     try {
       try {
         await navigator.clipboard.writeText(text);
@@ -721,13 +737,40 @@ const ScreenshotWindow: React.FC = () => {
         />
       )}
 
-      {/* 翻译色块（1:1覆盖原文区域） */}
+      {/* 翻译色块（1:1覆盖原文区域）
+          交互：块外左键单击=隐藏/显示覆盖层；块内拖选=选中文字（原生选区）；
+                双击=选中该段（Ctrl+双击多选）；复制按钮按优先级取内容 */}
       {phase === "result" &&
         overlayVisible &&
         blocks.map((b, i) => (
           <div
             key={i}
-            className="block"
+            className={`block ${selectedSegs.has(i) ? "selected" : ""}`}
+            onMouseDown={(e) => e.stopPropagation()}
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              // 清除双击产生的原生词选区，避免干扰复制优先级
+              window.getSelection()?.removeAllRanges();
+              setSelectedSegs((prev) => {
+                const next = new Set(prev);
+                if (e.ctrlKey || e.shiftKey) {
+                  // Ctrl/Shift+双击：多选切换
+                  if (next.has(i)) {
+                    next.delete(i);
+                  } else {
+                    next.add(i);
+                  }
+                } else if (prev.size === 1 && prev.has(i)) {
+                  // 再次双击唯一选中段：取消
+                  next.clear();
+                } else {
+                  // 普通双击：仅选中该段
+                  next.clear();
+                  next.add(i);
+                }
+                return next;
+              });
+            }}
             style={{
               left: b.x,
               top: b.y,
@@ -761,6 +804,8 @@ const ScreenshotWindow: React.FC = () => {
               alignItems: b.translation.includes("\n")
                 ? "flex-start"
                 : "center",
+              userSelect: "text",
+              cursor: "text",
             }}
           >
             {b.translation || "…"}
@@ -818,9 +863,13 @@ const ScreenshotWindow: React.FC = () => {
             <>
               <button
                 className="group-item"
-                onMouseDown={(e) => e.stopPropagation()}
+                onMouseDown={(e) => {
+                  // 阻止点击按钮时浏览器清除原生文字选区
+                  e.stopPropagation();
+                  e.preventDefault();
+                }}
                 onClick={handleCopy}
-                title={`复制${copyMode === "original" ? "原文" : "译文"}并退出`}
+                title={`复制（拖选文字/选中段落/全部，当前${copyMode === "original" ? "原文" : "译文"}）`}
               >
                 ⧉
               </button>

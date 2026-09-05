@@ -137,6 +137,15 @@ body,
   white-space: pre-wrap;
   z-index: 6;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+  /* 块内文字可拖选（覆盖根节点的 user-select:none） */
+  cursor: text;
+  user-select: text;
+}
+
+/* 双击选中的段落（Ctrl+双击多选） */
+.block.selected {
+  outline: 2px solid #1976d2;
+  outline-offset: -1px;
 }
 
 /* ============ 按键组（菜单组） ============ */
