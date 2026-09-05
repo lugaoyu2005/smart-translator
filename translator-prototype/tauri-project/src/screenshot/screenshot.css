@@ -108,7 +108,7 @@ body,
 /* 拖动中的选区框 */
 .drag-selection {
   position: fixed;
-  border: 2px solid #1976d2;
+  border: 1px solid #1976d2;
   background: rgba(25, 118, 210, 0.08);
   pointer-events: none;
   z-index: 5;
@@ -117,7 +117,7 @@ body,
 /* 结果阶段：选区描边常驻（暗幕已移除） */
 .selection-border {
   position: fixed;
-  border: 2px solid #1976d2;
+  border: 1px solid #1976d2;
   pointer-events: none;
   z-index: 4;
 }

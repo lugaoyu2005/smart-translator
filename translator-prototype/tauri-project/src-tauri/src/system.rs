@@ -40,6 +40,9 @@ pub struct AppSettings {
     // 覆盖块无背景（透明模式：不画色块仅显示文字，加白色光晕保证可读）
     #[serde(default)]
     pub overlay_transparent: bool,
+    // 有背景时：背景块随翻译文字自适应（贴合文字消除留白）；false=固定覆盖原文区域
+    #[serde(default)]
+    pub overlay_bg_fit_text: bool,
 }
 
 fn default_screenshot_components() -> Vec<String> {
@@ -93,6 +96,7 @@ impl Default for AppSettings {
             overlay_bg_color: default_overlay_bg_color(),
             overlay_opacity: default_overlay_opacity(),
             overlay_transparent: false,
+            overlay_bg_fit_text: false,
         }
     }
 }

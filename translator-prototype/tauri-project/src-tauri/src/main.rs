@@ -61,6 +61,8 @@ fn main() {
             terms::delete_term,
             terms::delete_term_translation,
             screenshot::capture_region_ocr,
+            screenshot::capture_region_store,
+            screenshot::ocr_stored_capture,
             screenshot::capture_region,
             screenshot::perform_ocr,
             screenshot::capture_screenshot,

@@ -5,6 +5,11 @@
 //! - 小区域自动放大 + 词级行重组：修复小框选识别率低、横排误判竖排的问题
 
 use serde::{Deserialize, Serialize};
+use std::sync::Mutex;
+
+/// 最近一次截图的暂存区：配合 capture_region_store + ocr_stored_capture
+/// 把"截图"与"OCR"拆成两步，让前端在较慢的OCR期间恢复UI显示
+static LAST_CAPTURE: Mutex<Option<ScreenshotData>> = Mutex::new(None);
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ScreenshotRegion {
@@ -225,7 +230,38 @@ mod win {
     /// 词级行重组：按y范围重叠率≥50%判定同一视觉行
     /// 修复OCR行分割错误（横排文字被拆成多个"行"导致误判竖排）
     /// 行内按x排序；拉丁词间有明显间隙加空格，CJK直接拼接
+    /// 剔除OCR常见误识别的特殊符号（按需求：直接忽略）
+    /// - 箭头及逻辑符号 ←↑→↓⇒（U+2190–21FF）
+    /// - 带圈字母数字 ①②③⑴Ⓐ（U+2460–24FF）
+    /// - CJK部首补充 ⺂⺡（U+2E80–2EFF，误产重灾区）
+    /// - 康熙部首（U+2F00–2FDF）与CJK笔画 乀乁（U+31C0–31EF）
+    fn strip_ocr_noise(text: &str) -> String {
+        text.chars()
+            .filter(|c| {
+                let u = *c as u32;
+                !matches!(u,
+                    0x2190..=0x21FF
+                    | 0x2460..=0x24FF
+                    | 0x2E80..=0x2EFF
+                    | 0x2F00..=0x2FDF
+                    | 0x31C0..=0x31EF
+                )
+            })
+            .collect()
+    }
+
     pub(crate) fn regroup_words_to_lines(words: Vec<OcrWordItem>) -> Vec<OcrLineInfo> {
+        // 先剔除误识别的杂符号词：Windows OCR常把 →← 箭头、①③ 带圈数字、
+        // ⺂ 等部首/笔画误识别为杂符（用户反馈：③→@、→→⺂）。
+        // 这些符号对翻译几乎没有信息量，按需求直接忽略；纯符号词（如孤立@、——）同样剔除
+        let words: Vec<OcrWordItem> = words
+            .into_iter()
+            .map(|mut w| {
+                w.text = strip_ocr_noise(&w.text);
+                w
+            })
+            .filter(|w| w.text.chars().any(|c| c.is_alphanumeric()))
+            .collect();
         if words.is_empty() {
             return vec![];
         }
@@ -469,6 +505,48 @@ pub async fn capture_region_ocr(
     }
 }
 
+/// 捕获屏幕指定区域并暂存于后端内存（不跨IPC传像素）
+/// 配合 ocr_stored_capture 使用：截图（百毫秒级）完成后前端立即恢复UI，
+/// 较慢的OCR在窗口可见状态下执行，消除"松手后纯空白"的等待期
+#[tauri::command]
+pub fn capture_region_store(x: i32, y: i32, width: i32, height: i32) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let data = win::capture_region(x, y, width, height)?;
+        *LAST_CAPTURE
+            .lock()
+            .map_err(|_| "截图缓存锁不可用".to_string())? = Some(data);
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (x, y, width, height);
+        Err("当前平台暂不支持截图".to_string())
+    }
+}
+
+/// 对暂存的截图执行OCR（OCR较慢，异步执行，取走即清空缓存）
+#[tauri::command]
+pub async fn ocr_stored_capture() -> Result<OcrResult, String> {
+    #[cfg(target_os = "windows")]
+    {
+        tauri::async_runtime::spawn_blocking(|| {
+            let data = LAST_CAPTURE
+                .lock()
+                .map_err(|_| "截图缓存锁不可用".to_string())?
+                .take()
+                .ok_or_else(|| "没有已暂存的截图".to_string())?;
+            win::ocr_from_pixels(&data.pixels, data.width, data.height)
+        })
+        .await
+        .map_err(|e| format!("OCR任务执行失败: {e}"))?
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("当前平台暂不支持截图OCR".to_string())
+    }
+}
+
 /// 捕获屏幕指定区域（BGRA像素）
 #[tauri::command]
 pub fn capture_region(x: i32, y: i32, width: i32, height: i32) -> Result<ScreenshotData, String> {
@@ -548,6 +626,22 @@ mod tests {
         let (_, y) = calculate_extract_button_position(&selection, &screen);
         // 底边y=1100，上方对齐：1100 - 10 - 40 = 1050
         assert_eq!(y, 1050.0);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_regroup_strips_ocr_noise_symbols() {
+        // 误识别符号（→识别为部首、③识别为带圈字符等）应被剔除；
+        // 纯符号词整体丢弃，混合词保留正文部分
+        let words = vec![
+            win::OcrWordItem { text: "Click".into(), x: 0.0, y: 0.0, width: 40.0, height: 12.0 },
+            win::OcrWordItem { text: "\u{2E82}\u{2E82}".into(), x: 44.0, y: 0.0, width: 20.0, height: 12.0 }, // ⺂⺂ 部首杂符
+            win::OcrWordItem { text: "here\u{2462}".into(), x: 68.0, y: 0.0, width: 60.0, height: 12.0 }, // here③ → here
+            win::OcrWordItem { text: "@".into(), x: 132.0, y: 0.0, width: 10.0, height: 12.0 }, // 孤立@（③误识别产物）
+        ];
+        let lines = win::regroup_words_to_lines(words);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "Click here");
     }
 
     #[cfg(target_os = "windows")]

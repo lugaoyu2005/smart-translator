@@ -44,6 +44,7 @@ interface ShotSettings {
   overlay_bg_color: string;
   overlay_opacity: number;
   overlay_transparent: boolean;
+  overlay_bg_fit_text: boolean;
 }
 
 const DEFAULT_SETTINGS: ShotSettings = {
@@ -51,6 +52,7 @@ const DEFAULT_SETTINGS: ShotSettings = {
   overlay_bg_color: "#ffffff",
   overlay_opacity: 0.95,
   overlay_transparent: false,
+  overlay_bg_fit_text: false,
 };
 
 type Phase = "select" | "processing" | "result";
@@ -246,6 +248,8 @@ const ScreenshotWindow: React.FC = () => {
           overlay_opacity: s?.overlay_opacity ?? DEFAULT_SETTINGS.overlay_opacity,
           overlay_transparent:
             s?.overlay_transparent ?? DEFAULT_SETTINGS.overlay_transparent,
+          overlay_bg_fit_text:
+            s?.overlay_bg_fit_text ?? DEFAULT_SETTINGS.overlay_bg_fit_text,
         });
       } catch {}
 
@@ -268,6 +272,8 @@ const ScreenshotWindow: React.FC = () => {
           overlay_opacity: s?.overlay_opacity ?? DEFAULT_SETTINGS.overlay_opacity,
           overlay_transparent:
             s?.overlay_transparent ?? DEFAULT_SETTINGS.overlay_transparent,
+          overlay_bg_fit_text:
+            s?.overlay_bg_fit_text ?? DEFAULT_SETTINGS.overlay_bg_fit_text,
         });
       } catch {}
       try {
@@ -406,16 +412,24 @@ const ScreenshotWindow: React.FC = () => {
       await win.hide();
       await new Promise((r) => setTimeout(r, 250));
 
-      // 截图+OCR一体（后端返回结构化行：文本+物理像素紧凑矩形）
-      const ocr = await invoke<{
-        lines: OcrLineInfo[];
-        language: string;
-      }>("capture_region_ocr", {
+      // 第一步：纯截图（百毫秒级，后端暂存像素）
+      await invoke("capture_region_store", {
         x: physX,
         y: physY,
         width: physW,
         height: physH,
       });
+
+      // 立即恢复UI：选区边框+加载面板在OCR/翻译期间全程可见
+      // （OCR与翻译才是耗时大头，此前窗口全程隐藏导致纯空白等待）
+      await win.show();
+      await win.setFocus();
+
+      // 第二步：OCR（较慢，但面板已可见）
+      const ocr = await invoke<{
+        lines: OcrLineInfo[];
+        language: string;
+      }>("ocr_stored_capture");
 
       // 物理像素（相对截图区域）→ 窗口CSS坐标
       const cssLines: OcrLineInfo[] = ocr.lines.map((l) => ({
@@ -456,11 +470,8 @@ const ScreenshotWindow: React.FC = () => {
       });
       setBlocks(newBlocks);
 
-      // 截图与OCR已完成：立即重新显示窗口，让加载面板在翻译期间可见
-      //（此前窗口全程隐藏，翻译1-3秒内用户看到的是无任何UI的空白）
+      // 窗口已恢复可见（截图完成后），只需切换到翻译阶段文案
       setProcStage("translate");
-      await win.show();
-      await win.setFocus();
 
       // 逐组翻译（百度合并\n一次请求，按行拆分重组）
       const engineName = engines[engineIdx]?.name;
@@ -720,8 +731,20 @@ const ScreenshotWindow: React.FC = () => {
             style={{
               left: b.x,
               top: b.y,
-              width: b.width,
-              height: b.height,
+              // 背景自适应模式：色块贴合翻译文字（宽度自动、超过原文宽度换行）；
+              // 默认模式/无背景模式：固定覆盖原文矩形
+              width:
+                settings.overlay_bg_fit_text && !settings.overlay_transparent
+                  ? "fit-content"
+                  : b.width,
+              maxWidth:
+                settings.overlay_bg_fit_text && !settings.overlay_transparent
+                  ? b.width
+                  : undefined,
+              height:
+                settings.overlay_bg_fit_text && !settings.overlay_transparent
+                  ? "auto"
+                  : b.height,
               background: settings.overlay_transparent
                 ? "transparent"
                 : hexToRgba(

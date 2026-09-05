@@ -339,6 +339,24 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         </div>
 
         <div className="form-group">
+          <div className="toggle-group">
+            <label className="toggle-switch">
+              <input
+                type="checkbox"
+                checked={localSettings?.overlay_bg_fit_text || false}
+                onChange={(e) =>
+                  handleSettingChange("overlay_bg_fit_text", e.target.checked)
+                }
+              />
+              <span className="toggle-slider"></span>
+            </label>
+            <span className="toggle-label">
+              背景随文字自适应（有背景时色块贴合翻译文字，消除留白）
+            </span>
+          </div>
+        </div>
+
+        <div className="form-group">
           <label className="form-label">截图翻译行为</label>
           <div className="toggle-group">
             <label className="toggle-switch">
