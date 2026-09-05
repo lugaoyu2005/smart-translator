@@ -45,7 +45,6 @@ interface ShotSettings {
   overlay_opacity: number;
   overlay_transparent: boolean;
   overlay_bg_fit_text: boolean;
-  dblclick_select_word: boolean;
 }
 
 const DEFAULT_SETTINGS: ShotSettings = {
@@ -54,7 +53,6 @@ const DEFAULT_SETTINGS: ShotSettings = {
   overlay_opacity: 0.95,
   overlay_transparent: false,
   overlay_bg_fit_text: false,
-  dblclick_select_word: false,
 };
 
 type Phase = "select" | "processing" | "result";
@@ -261,8 +259,6 @@ const ScreenshotWindow: React.FC = () => {
             s?.overlay_transparent ?? DEFAULT_SETTINGS.overlay_transparent,
           overlay_bg_fit_text:
             s?.overlay_bg_fit_text ?? DEFAULT_SETTINGS.overlay_bg_fit_text,
-          dblclick_select_word:
-            s?.dblclick_select_word ?? DEFAULT_SETTINGS.dblclick_select_word,
         });
       } catch {}
 
@@ -287,8 +283,6 @@ const ScreenshotWindow: React.FC = () => {
             s?.overlay_transparent ?? DEFAULT_SETTINGS.overlay_transparent,
           overlay_bg_fit_text:
             s?.overlay_bg_fit_text ?? DEFAULT_SETTINGS.overlay_bg_fit_text,
-          dblclick_select_word:
-            s?.dblclick_select_word ?? DEFAULT_SETTINGS.dblclick_select_word,
         });
       } catch {}
       try {
@@ -797,16 +791,11 @@ const ScreenshotWindow: React.FC = () => {
             className="block"
             onMouseDown={(e) => {
               e.stopPropagation();
-              // 双击防闪仅在整段模式：抑制原生选词（由双击处理器选整段）；
-              // 选词模式放行，浏览器原生双击选中一个词
-              if (e.detail >= 2 && !settings.dblclick_select_word) {
-                e.preventDefault();
-              }
+              // 双击防闪：抑制原生选词高亮（双击整段选中在onDoubleClick中处理）
+              if (e.detail >= 2) e.preventDefault();
             }}
             onDoubleClick={(e) => {
               e.stopPropagation();
-              // 选词模式：原生行为已选中单词，无额外处理
-              if (settings.dblclick_select_word) return;
               const el = e.currentTarget;
               if (e.ctrlKey || e.shiftKey) {
                 // Ctrl+双击：整段文字加入片段累积（与Ctrl+拖动同机制）
@@ -863,13 +852,6 @@ const ScreenshotWindow: React.FC = () => {
             {b.translation || "…"}
           </div>
         ))}
-
-      {/* Ctrl多选片段计数徽标（原生选区已清除，靠它反馈） */}
-      {phase === "result" && pickedFragments.length > 0 && (
-        <div className="picked-badge">
-          已选 {pickedFragments.length} 段文字（Ctrl+拖动继续加选）
-        </div>
-      )}
 
       {/* 按键组（菜单组）：底边居中下方/上方，10%→悬停100%，可拖动 */}
       {phase === "result" && !noText && (
