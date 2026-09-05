@@ -214,16 +214,14 @@ const ScreenshotWindow: React.FC = () => {
   const [settings, setSettings] = useState<ShotSettings>(DEFAULT_SETTINGS);
   const [copyMode, setCopyMode] = useState<CopyMode>("original");
   // Ctrl+拖动 / Ctrl+双击累积的文字片段（多段，复制时按操作顺序合并）；
-  // block=来源块索引（null=从块外起拖），whole=双击整段拾取（可再次Ctrl+双击取消），
-  // 已选块描边标记提供可见反馈
+  // whole=双击整段拾取（可再次Ctrl+双击取消）；range=拾取时的选区快照，
+  // 供 Custom Highlight API 多范围同时高亮（观感与原生选区一致）
   const [picked, setPicked] = useState<
-    { text: string; block: number | null; whole: boolean }[]
+    { text: string; block: number | null; whole: boolean; range: Range }[]
   >([]);
   const [ctrlHeld, setCtrlHeld] = useState(false);
   // 本次按下的拖拽是否带Ctrl（mousedown时快照，避免先松Ctrl再松鼠标导致误清空）
   const dragWasCtrl = useRef(false);
-  // 拖选起始块索引（null=块外起拖）
-  const dragStartBlock = useRef<number | null>(null);
 
   // 按键组（菜单组）
   const [groupPos, setGroupPos] = useState({ x: -9999, y: -9999 });
@@ -337,6 +335,27 @@ const ScreenshotWindow: React.FC = () => {
     };
   }, []);
 
+  // 多片段同时高亮：Custom Highlight API 可同时绘制多个选区范围，
+  // 观感与原生选中一致（无Ctrl时原生选区只有一个，无法同时显示多段）
+  useEffect(() => {
+    const css = window.CSS as any;
+    if (!css?.highlights) return;
+    if (picked.length === 0) {
+      css.highlights.delete("picked");
+      return;
+    }
+    const ranges = picked.map((p) => p.range).filter(Boolean);
+    try {
+      const HighlightCtor = (window as any).Highlight;
+      if (HighlightCtor && ranges.length > 0) {
+        css.highlights.set("picked", new HighlightCtor(...ranges));
+      }
+    } catch {}
+    return () => {
+      css.highlights.delete("picked");
+    };
+  }, [picked]);
+
   // 处理中计时器：每秒刷新耗时显示
   useEffect(() => {
     if (phase !== "processing") return;
@@ -398,9 +417,8 @@ const ScreenshotWindow: React.FC = () => {
       startPoint.current = { x: e.clientX, y: e.clientY };
       setSelection({ x: e.clientX, y: e.clientY, width: 0, height: 0 });
     } else if (phase === "result") {
-      // 快照本次按下的修饰键与起始块（mouseup阶段使用）
+      // 快照本次按下的修饰键（mouseup阶段使用）
       dragWasCtrl.current = ctrlHeld;
-      dragStartBlock.current = null;
       // Ctrl多选拖选模式：不切换覆盖层，允许原生拖选开始
       if (ctrlHeld) return;
       // 引擎菜单打开时：点击菜单外仅关闭菜单，不切换覆盖层
@@ -427,15 +445,21 @@ const ScreenshotWindow: React.FC = () => {
   const handleRootMouseUp = async () => {
     // 结果阶段：Ctrl+拖动累积片段 / 普通拖动覆盖式单选
     if (phase === "result") {
-      const sel = window.getSelection()?.toString().trim() ?? "";
+      const selection = window.getSelection();
+      const sel = selection?.toString().trim() ?? "";
       if (dragWasCtrl.current) {
-        if (sel) {
+        if (sel && selection && selection.rangeCount > 0) {
           setPicked((prev) => [
             ...prev,
-            { text: sel, block: dragStartBlock.current, whole: false },
+            {
+              text: sel,
+              block: null,
+              whole: false,
+              range: selection.getRangeAt(0).cloneRange(),
+            },
           ]);
         }
-        // 原生选区保留可见；已选块以描边持续标记
+        // 原生选区保留可见；累积片段由 Custom Highlight 多范围持续高亮
       } else if (sel) {
         // 普通拖动=覆盖式单选，清空之前累积
         setPicked([]);
@@ -804,8 +828,7 @@ const ScreenshotWindow: React.FC = () => {
             key={i}
             className="block"
             onMouseDown={(e) => {
-              // 记录起始块与修饰键快照（供mouseup累积片段用）
-              dragStartBlock.current = i;
+              // 记录修饰键快照（供mouseup累积片段用）
               dragWasCtrl.current = ctrlHeld;
               e.stopPropagation();
               // 双击防闪：抑制原生选词高亮（双击整段选中在onDoubleClick中处理）
@@ -829,7 +852,10 @@ const ScreenshotWindow: React.FC = () => {
                   setPicked((prev) => {
                     const idx = prev.findIndex((p) => p.whole && p.block === i);
                     if (idx >= 0) return prev.filter((_, k) => k !== idx);
-                    return [...prev, { text: t, block: i, whole: true }];
+                    return [
+                      ...prev,
+                      { text: t, block: i, whole: true, range: range.cloneRange() },
+                    ];
                   });
                 }
               }

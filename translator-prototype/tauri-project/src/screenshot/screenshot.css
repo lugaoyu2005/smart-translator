@@ -115,6 +115,13 @@ body,
   border-left: 1px solid rgba(255, 255, 255, 0.25);
 }
 
+/* Ctrl多选累积片段的持久高亮：Custom Highlight API 多范围绘制，
+   颜色用系统选区色（Highlight/HighlightText），与原生选中观感一致 */
+::highlight(picked) {
+  background-color: Highlight;
+  color: HighlightText;
+}
+
 /* 拖动中的选区框 */
 .drag-selection {
   position: fixed;
