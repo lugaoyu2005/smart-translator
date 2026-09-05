@@ -231,16 +231,66 @@ mod win {
     /// 词级行重组：按y范围重叠率≥50%判定同一视觉行
     /// 修复OCR行分割错误（横排文字被拆成多个"行"导致误判竖排）
     /// 行内按x排序；拉丁词间有明显间隙加空格，CJK直接拼接
-    /// 内置符号纠错表：OCR高频误识别（穷举于用户反馈，术语管理里可追加）
-    /// 例：→ 被识别为 乛/⺂/⺡（部首）、← 被识别为 乁
+    /// 内置符号纠错表（穷举常用误识别，术语管理里可继续追加用户映射）：
+    /// OCR输出字符 → 正确字符。只收录"正常文本几乎不会出现"的形近字/变体，
+    /// 避免误伤正文（如 一/丁 等常用字绝不收录）
     const BUILTIN_SYMBOL_FIXES: &[(&str, &str)] = &[
+        // 箭头：部首/笔画形近字（→ ← ↑ ↓ 的常见误识别产物）
         ("乛", "→"),
         ("⺂", "→"),
         ("⺡", "→"),
         ("乁", "←"),
+        // 箭头变体统一为基本箭头
+        ("⇒", "→"),
+        ("⇨", "→"),
+        ("➔", "→"),
+        ("➜", "→"),
+        ("➤", "→"),
+        ("⇐", "←"),
+        ("⇑", "↑"),
+        ("⇓", "↓"),
+        // 竖线形近字/全角
+        ("丨", "|"),
+        ("︱", "|"),
+        ("｜", "|"),
+        // 省略号/艾特
+        ("⋯", "…"),
+        ("＠", "@"),
+        // 带圈数字 → 阿拉伯数字（引擎对纯数字的处理与排版更稳）
+        ("①", "1"),
+        ("②", "2"),
+        ("③", "3"),
+        ("④", "4"),
+        ("⑤", "5"),
+        ("⑥", "6"),
+        ("⑦", "7"),
+        ("⑧", "8"),
+        ("⑨", "9"),
+        ("⑩", "10"),
+        ("⑪", "11"),
+        ("⑫", "12"),
+        ("⑬", "13"),
+        ("⑭", "14"),
+        ("⑮", "15"),
+        ("⑯", "16"),
+        ("⑰", "17"),
+        ("⑱", "18"),
+        ("⑲", "19"),
+        ("⑳", "20"),
+        // 带括号数字
+        ("⑴", "(1)"),
+        ("⑵", "(2)"),
+        ("⑶", "(3)"),
+        ("⑷", "(4)"),
+        ("⑸", "(5)"),
+        ("⑹", "(6)"),
+        ("⑺", "(7)"),
+        ("⑻", "(8)"),
+        ("⑼", "(9)"),
+        ("⑽", "(10)"),
     ];
 
-    /// 应用符号纠错：先内置表，再用户术语映射（术语管理中 1-2 字非字母数字源词）
+    /// 应用符号纠错：先内置穷举表，再用户术语映射（术语管理中 1-2 字非字母数字源词）
     fn apply_symbol_corrections(text: &str, corrections: &[(String, String)]) -> String {
         let mut result = text.to_string();
         for (from, to) in BUILTIN_SYMBOL_FIXES {
@@ -252,44 +302,16 @@ mod win {
         result
     }
 
-    /// 剔除OCR常见误识别的特殊符号残留（在纠错之后执行，未被映射的杂符直接忽略）
-    /// - 带圈字母数字 ①②③⑴Ⓐ（U+2460–24FF）
-    /// - CJK部首补充 ⺂⺡（U+2E80–2EFF，误产重灾区）
-    /// - 康熙部首（U+2F00–2FDF）与CJK笔画 乀乁（U+31C0–31EF）
-    /// 注：箭头（U+2190–21FF）不再剔除——纠错映射的目标符号（如→）需要保留，
-    ///     未被纠错的孤立箭头词由"纯符号词丢弃"规则兜底
-    fn strip_ocr_noise(text: &str) -> String {
-        text.chars()
-            .filter(|c| {
-                let u = *c as u32;
-                !matches!(u,
-                    0x2460..=0x24FF
-                    | 0x2E80..=0x2EFF
-                    | 0x2F00..=0x2FDF
-                    | 0x31C0..=0x31EF
-                )
-            })
-            .collect()
-    }
-
-    /// 有信息量的词：含字母/数字/汉字，或含纠错/原生箭头（如 "Open→Save"）
-    fn is_meaningful_word(text: &str) -> bool {
-        text.chars()
-            .any(|c| c.is_alphanumeric() || matches!(c as u32, 0x2190..=0x21FF))
-    }
-
     pub(crate) fn regroup_words_to_lines(
         words: Vec<OcrWordItem>,
         corrections: &[(String, String)],
     ) -> Vec<OcrLineInfo> {
-        // 词级清洗：纠错（乛→→，含术语管理里的用户映射）→ 剔除杂符残留。
-        // 无正文的词保留为"占位盒"：不进文本、不进行矩形，
-        // 但盒宽桥接两侧间隙——否则丢弃行中杂符会人工制造大间隙，
-        // 把连续长文本误拆成左右两段（用户反馈场景）
+        // 词级纠错：内置穷举表 + 术语管理用户映射（如 乛→→、③→3）。
+        // 不再做任何剔除：未命中的符号原样保留，交给翻译引擎处理
         let words: Vec<OcrWordItem> = words
             .into_iter()
             .map(|mut w| {
-                w.text = strip_ocr_noise(&apply_symbol_corrections(&w.text, corrections));
+                w.text = apply_symbol_corrections(&w.text, corrections);
                 w
             })
             .collect();
@@ -347,14 +369,10 @@ mod win {
             }
 
             for seg in segments {
-                // 拼接文本：跳过占位盒（无正文词）；拉丁词之间明显间隙→补空格
                 let mut text = String::new();
-                let mut prev_visible: Option<&OcrWordItem> = None;
-                for w in seg.iter() {
-                    if !is_meaningful_word(&w.text) {
-                        continue;
-                    }
-                    if let Some(prev) = prev_visible {
+                for (i, w) in seg.iter().enumerate() {
+                    if i > 0 {
+                        let prev = seg[i - 1];
                         let gap_x = w.x - (prev.x + prev.width);
                         let prev_latin = prev
                             .text
@@ -368,12 +386,12 @@ mod win {
                             .next()
                             .map(|c| c.is_ascii_alphanumeric())
                             .unwrap_or(false);
+                        // 拉丁词之间有明显间隙→补空格（OCR英文词本身不含空格）
                         if prev_latin && cur_latin && gap_x > max_h * 0.1 {
                             text.push(' ');
                         }
                     }
                     text.push_str(&w.text);
-                    prev_visible = Some(w);
                 }
 
                 let text = text.trim().to_string();
@@ -381,19 +399,13 @@ mod win {
                     continue;
                 }
 
-                // 行矩形只含可见词（杂符占位盒不参与覆盖区域）
-                let visible: Vec<&OcrWordItem> = seg
-                    .iter()
-                    .copied()
-                    .filter(|w| is_meaningful_word(&w.text))
-                    .collect();
-                let min_x = visible.iter().map(|w| w.x).fold(f64::MAX, f64::min);
-                let min_y = visible.iter().map(|w| w.y).fold(f64::MAX, f64::min);
-                let max_x = visible
+                let min_x = seg.iter().map(|w| w.x).fold(f64::MAX, f64::min);
+                let min_y = seg.iter().map(|w| w.y).fold(f64::MAX, f64::min);
+                let max_x = seg
                     .iter()
                     .map(|w| w.x + w.width)
                     .fold(f64::MIN, f64::max);
-                let max_y = visible
+                let max_y = seg
                     .iter()
                     .map(|w| w.y + w.height)
                     .fold(f64::MIN, f64::max);
@@ -716,18 +728,17 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn test_regroup_strips_ocr_noise_symbols() {
-        // 内置纠错：⺂（→的误识别）还原为→并保留（⺂⺂→→→）；
-        // 无映射的带圈字符③剔除；纯符号词（孤立@）丢弃
+        // 内置纠错：⺂（→的误识别）还原为→；③ 映射为 3；
+        // 未映射符号（♠）原样保留不再剔除，交给翻译引擎处理
         let words = vec![
             win::OcrWordItem { text: "Click".into(), x: 0.0, y: 0.0, width: 40.0, height: 12.0 },
             win::OcrWordItem { text: "\u{2E82}\u{2E82}".into(), x: 44.0, y: 0.0, width: 20.0, height: 12.0 }, // ⺂⺂ → →→
-            win::OcrWordItem { text: "here\u{2462}".into(), x: 68.0, y: 0.0, width: 60.0, height: 12.0 }, // here③ → here
-            win::OcrWordItem { text: "@".into(), x: 132.0, y: 0.0, width: 10.0, height: 12.0 }, // 孤立@（③误识别产物）
-            win::OcrWordItem { text: "\u{2E82}".into(), x: 146.0, y: 0.0, width: 10.0, height: 12.0 }, // ⺂ → 内置纠错为→
+            win::OcrWordItem { text: "here\u{2462}".into(), x: 68.0, y: 0.0, width: 60.0, height: 12.0 }, // here③ → here3
+            win::OcrWordItem { text: "\u{2660}".into(), x: 132.0, y: 0.0, width: 10.0, height: 12.0 }, // ♠ 未映射，透传
         ];
         let lines = win::regroup_words_to_lines(words, &[]);
         assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].text, "Click→→here→");
+        assert_eq!(lines[0].text, "Click→→here3♠");
     }
 
     #[cfg(target_os = "windows")]
@@ -748,17 +759,15 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn test_regroup_spacer_bridges_gap() {
-        // 行中被剔除的杂符词（如孤立@）保留为占位盒桥接间隙：
-        // 连续长文本不应因杂符被丢而人工制造大间隙、误拆成左右两段
+        // 行中的符号词不再被剔除（符号透传）：连续文本保持一行不拆
         let words = vec![
             win::OcrWordItem { text: "第一部分".into(), x: 0.0, y: 0.0, width: 60.0, height: 20.0 },
             win::OcrWordItem { text: "@".into(), x: 70.0, y: 0.0, width: 30.0, height: 20.0 },
             win::OcrWordItem { text: "第二部分".into(), x: 110.0, y: 0.0, width: 60.0, height: 20.0 },
         ];
         let lines = win::regroup_words_to_lines(words, &[]);
-        assert_eq!(lines.len(), 1, "杂符占位盒桥接间隙，不应拆分");
-        assert_eq!(lines[0].text, "第一部分第二部分");
-        // 矩形只含可见词（包围盒：110+60-0=170，杂符盒70~100不参与）
+        assert_eq!(lines.len(), 1, "符号词透传，不应拆分");
+        assert_eq!(lines[0].text, "第一部分@第二部分");
         assert!((lines[0].width - 170.0).abs() < 0.01);
     }
 
