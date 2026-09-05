@@ -227,9 +227,11 @@ impl TranslationEngine for YoudaoEngine {
     }
 
     async fn translate(&self, text: &str, from: &str, to: &str) -> Result<String, String> {
+        // salt必须每次请求唯一（纳秒级）：秒级时间戳在同一秒的多段翻译请求中
+        // 会重复，有道判定为重放攻击返回207（签名错误）
         let salt = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs().to_string())
+            .map(|d| d.as_nanos().to_string())
             .unwrap_or_else(|_| "0".to_string());
         let curtime = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -283,6 +285,9 @@ impl TranslationEngine for YoudaoEngine {
 
         if let Some(code) = body.get("errorCode").and_then(|v| v.as_str()) {
             if code != "0" {
+                eprintln!(
+                    "[youdao-debug] code={code} q={text:?} input={input:?} salt={salt:?} curtime={curtime:?} sign={sign}"
+                );
                 let msg = match code {
                     "101" => "缺少必填参数",
                     "102" => "不支持的语言类型",
@@ -291,6 +296,7 @@ impl TranslationEngine for YoudaoEngine {
                     "110" => "无可用次数/余额",
                     "111" => "开发者账号异常",
                     "202" => "签名校验失败（检查有道密钥）",
+                    "207" => "签名错误（salt重复或密钥不匹配）",
                     "301" => "词典查询失败",
                     "302" => "翻译查询失败",
                     "303" => "服务异常，请稍后重试",
@@ -800,5 +806,23 @@ mod tests {
         // 两组结果都非空（内容是否相同取决于引擎，不强制）
         assert!(r1.iter().all(|s| !s.is_empty()));
         assert!(r2.iter().all(|s| !s.is_empty()));
+    }
+
+    /// 临时诊断：逐行定位有道失败原因（需 YOUDAO_APP_KEY/YOUDAO_APP_SECRET 环境变量）
+    #[ignore]
+    #[tokio::test]
+    async fn test_youdao_debug() {
+        let key = std::env::var("YOUDAO_APP_KEY").unwrap_or_default();
+        let secret = std::env::var("YOUDAO_APP_SECRET").unwrap_or_default();
+        let e = YoudaoEngine::new(&key, &secret);
+        for q in [
+            "hello world",
+            "The quick brown fox jumps over the lazy dog",
+        ] {
+            match e.translate(q, "auto", "zh").await {
+                Ok(r) => println!("[OK] {q} => {r}"),
+                Err(err) => println!("[ERR] {q} => {err}"),
+            }
+        }
     }
 }
