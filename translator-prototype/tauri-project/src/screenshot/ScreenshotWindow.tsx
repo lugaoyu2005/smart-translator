@@ -176,9 +176,9 @@ function fitFontSize(text: string, blockW: number, blockH: number): number {
     return total;
   };
 
-  let lo = 8;
+  let lo = 10; // 字号下限：过小不可读（用户反馈：下限再大一点）
   let hi = 48;
-  let best = 8;
+  let best = 10;
   while (lo <= hi) {
     const mid = Math.floor((lo + hi) / 2);
     if (wrappedLineCount(mid) * mid * lh <= usableH) {
@@ -213,9 +213,8 @@ const ScreenshotWindow: React.FC = () => {
   const [engineMenuOpen, setEngineMenuOpen] = useState(false);
   const [settings, setSettings] = useState<ShotSettings>(DEFAULT_SETTINGS);
   const [copyMode, setCopyMode] = useState<CopyMode>("original");
-  // 双击选中的段落索引（Ctrl+双击多选）；复制时优先级：拖选文字 > 选中段落 > 全部
-  const [selectedSegs, setSelectedSegs] = useState<Set<number>>(new Set());
-  // Ctrl+拖动累积的文字片段（多段，复制时按拖动顺序合并）
+  // Ctrl+拖动 / Ctrl+双击累积的文字片段（多段，复制时按操作顺序合并）；
+  // 双击（无Ctrl）与拖动同款：原生选中整段文字
   const [pickedFragments, setPickedFragments] = useState<string[]>([]);
   const [ctrlHeld, setCtrlHeld] = useState(false);
 
@@ -348,7 +347,6 @@ const ScreenshotWindow: React.FC = () => {
     setNoText(false);
     setError("");
     setCopyMode("original");
-    setSelectedSegs(new Set());
     setPickedFragments([]);
     setGroupDragging(false);
     setEngineMenuOpen(false);
@@ -450,7 +448,6 @@ const ScreenshotWindow: React.FC = () => {
     setPhase("processing");
     setProcStage("ocr");
     setProcSeconds(0);
-    setSelectedSegs(new Set());
     const sf = scaleFactor.current || 1;
     const physX = Math.round(monitorPos.current.x + sel.x * sf);
     const physY = Math.round(monitorPos.current.y + sel.y * sf);
@@ -653,20 +650,13 @@ const ScreenshotWindow: React.FC = () => {
   };
 
   /** 复制到剪贴板并退出。内容优先级：
-   *  1) 块内拖选的原生选区文字（所见即所得，单段）
-   *  2) Ctrl+拖动累积的多个片段（按拖动顺序合并）
-   *  3) 双击选中的段落（Ctrl多选；按当前原/译模式）
-   *  4) 全部段落（按当前原/译模式） */
+   *  1) 当前原生选区文字（拖动单选 / 双击整段，所见即所得）
+   *  2) Ctrl累积的多个片段（Ctrl+拖动、Ctrl+双击；按操作顺序合并）
+   *  3) 全部段落（按当前原/译模式） */
   const handleCopy = async () => {
     let text = window.getSelection()?.toString().trim() ?? "";
     if (!text && pickedFragments.length > 0) {
       text = pickedFragments.join("\n");
-    }
-    if (!text && selectedSegs.size > 0) {
-      text = blocks
-        .filter((_, i) => selectedSegs.has(i))
-        .map((b) => (copyMode === "original" ? b.original : b.translation))
-        .join("\n");
     }
     if (!text) {
       text = blocks
@@ -791,13 +781,14 @@ const ScreenshotWindow: React.FC = () => {
 
       {/* 翻译色块（1:1覆盖原文区域）
           交互：块外左键单击=隐藏/显示覆盖层；块内拖选=选中文字（原生选区）；
-                双击=选中该段（Ctrl+双击多选）；复制按钮按优先级取内容 */}
+                双击=原生选中整段文字（与拖动同款选字）；Ctrl+双击=该段文字加入
+                片段累积；复制按钮按优先级取内容 */}
       {phase === "result" &&
         overlayVisible &&
         blocks.map((b, i) => (
           <div
             key={i}
-            className={`block ${selectedSegs.has(i) ? "selected" : ""}`}
+            className="block"
             onMouseDown={(e) => {
               e.stopPropagation();
               // 双击防闪：抑制原生选词高亮
@@ -805,27 +796,21 @@ const ScreenshotWindow: React.FC = () => {
             }}
             onDoubleClick={(e) => {
               e.stopPropagation();
-              // 清除双击产生的原生词选区，避免干扰复制优先级
-              window.getSelection()?.removeAllRanges();
-              setSelectedSegs((prev) => {
-                const next = new Set(prev);
-                if (e.ctrlKey || e.shiftKey) {
-                  // Ctrl/Shift+双击：多选切换
-                  if (next.has(i)) {
-                    next.delete(i);
-                  } else {
-                    next.add(i);
-                  }
-                } else if (prev.size === 1 && prev.has(i)) {
-                  // 再次双击唯一选中段：取消
-                  next.clear();
-                } else {
-                  // 普通双击：仅选中该段
-                  next.clear();
-                  next.add(i);
-                }
-                return next;
-              });
+              const el = e.currentTarget;
+              if (e.ctrlKey || e.shiftKey) {
+                // Ctrl+双击：整段文字加入片段累积（与Ctrl+拖动同机制）
+                const t = el.textContent?.trim() ?? "";
+                if (t) setPickedFragments((prev) => [...prev, t]);
+                window.getSelection()?.removeAllRanges();
+              } else {
+                // 双击：原生选中整段文字（拖选同款高亮，可继续拖动调整）
+                const sel = window.getSelection();
+                if (!sel) return;
+                sel.removeAllRanges();
+                const range = document.createRange();
+                range.selectNodeContents(el);
+                sel.addRange(range);
+              }
             }}
             style={{
               left: b.x,
