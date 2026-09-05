@@ -214,9 +214,16 @@ const ScreenshotWindow: React.FC = () => {
   const [settings, setSettings] = useState<ShotSettings>(DEFAULT_SETTINGS);
   const [copyMode, setCopyMode] = useState<CopyMode>("original");
   // Ctrl+拖动 / Ctrl+双击累积的文字片段（多段，复制时按操作顺序合并）；
-  // 双击（无Ctrl）与拖动同款：原生选中整段文字
-  const [pickedFragments, setPickedFragments] = useState<string[]>([]);
+  // block=来源块索引（null=从块外起拖），whole=双击整段拾取（可再次Ctrl+双击取消），
+  // 已选块描边标记提供可见反馈
+  const [picked, setPicked] = useState<
+    { text: string; block: number | null; whole: boolean }[]
+  >([]);
   const [ctrlHeld, setCtrlHeld] = useState(false);
+  // 本次按下的拖拽是否带Ctrl（mousedown时快照，避免先松Ctrl再松鼠标导致误清空）
+  const dragWasCtrl = useRef(false);
+  // 拖选起始块索引（null=块外起拖）
+  const dragStartBlock = useRef<number | null>(null);
 
   // 按键组（菜单组）
   const [groupPos, setGroupPos] = useState({ x: -9999, y: -9999 });
@@ -347,7 +354,7 @@ const ScreenshotWindow: React.FC = () => {
     setNoText(false);
     setError("");
     setCopyMode("original");
-    setPickedFragments([]);
+    setPicked([]);
     setGroupDragging(false);
     setEngineMenuOpen(false);
     groupDragged.current = false;
@@ -391,6 +398,9 @@ const ScreenshotWindow: React.FC = () => {
       startPoint.current = { x: e.clientX, y: e.clientY };
       setSelection({ x: e.clientX, y: e.clientY, width: 0, height: 0 });
     } else if (phase === "result") {
+      // 快照本次按下的修饰键与起始块（mouseup阶段使用）
+      dragWasCtrl.current = ctrlHeld;
+      dragStartBlock.current = null;
       // Ctrl多选拖选模式：不切换覆盖层，允许原生拖选开始
       if (ctrlHeld) return;
       // 引擎菜单打开时：点击菜单外仅关闭菜单，不切换覆盖层
@@ -418,14 +428,17 @@ const ScreenshotWindow: React.FC = () => {
     // 结果阶段：Ctrl+拖动累积片段 / 普通拖动覆盖式单选
     if (phase === "result") {
       const sel = window.getSelection()?.toString().trim() ?? "";
-      if (ctrlHeld) {
+      if (dragWasCtrl.current) {
         if (sel) {
-          setPickedFragments((prev) => [...prev, sel]);
+          setPicked((prev) => [
+            ...prev,
+            { text: sel, block: dragStartBlock.current, whole: false },
+          ]);
         }
-        // 清除原生选区，为下一段拖选腾位（反馈靠顶部徽标）
-        window.getSelection()?.removeAllRanges();
+        // 原生选区保留可见；已选块以描边持续标记
       } else if (sel) {
-        setPickedFragments([]);
+        // 普通拖动=覆盖式单选，清空之前累积
+        setPicked([]);
       }
       return;
     }
@@ -448,6 +461,7 @@ const ScreenshotWindow: React.FC = () => {
     setPhase("processing");
     setProcStage("ocr");
     setProcSeconds(0);
+    setPicked([]);
     const sf = scaleFactor.current || 1;
     const physX = Math.round(monitorPos.current.x + sel.x * sf);
     const physY = Math.round(monitorPos.current.y + sel.y * sf);
@@ -655,8 +669,8 @@ const ScreenshotWindow: React.FC = () => {
    *  3) 全部段落（按当前原/译模式） */
   const handleCopy = async () => {
     let text = window.getSelection()?.toString().trim() ?? "";
-    if (!text && pickedFragments.length > 0) {
-      text = pickedFragments.join("\n");
+    if (!text && picked.length > 0) {
+      text = picked.map((p) => p.text).join("\n");
     }
     if (!text) {
       text = blocks
@@ -788,8 +802,11 @@ const ScreenshotWindow: React.FC = () => {
         blocks.map((b, i) => (
           <div
             key={i}
-            className="block"
+            className={`block ${picked.some((p) => p.block === i) ? "picked" : ""}`}
             onMouseDown={(e) => {
+              // 记录起始块与修饰键快照（供mouseup累积片段用）
+              dragStartBlock.current = i;
+              dragWasCtrl.current = ctrlHeld;
               e.stopPropagation();
               // 双击防闪：抑制原生选词高亮（双击整段选中在onDoubleClick中处理）
               if (e.detail >= 2) e.preventDefault();
@@ -798,9 +815,15 @@ const ScreenshotWindow: React.FC = () => {
               e.stopPropagation();
               const el = e.currentTarget;
               if (e.ctrlKey || e.shiftKey) {
-                // Ctrl+双击：整段文字加入片段累积（与Ctrl+拖动同机制）
+                // Ctrl+双击：整段加入片段累积（再次操作同块=取消）
                 const t = el.textContent?.trim() ?? "";
-                if (t) setPickedFragments((prev) => [...prev, t]);
+                if (t) {
+                  setPicked((prev) => {
+                    const idx = prev.findIndex((p) => p.whole && p.block === i);
+                    if (idx >= 0) return prev.filter((_, k) => k !== idx);
+                    return [...prev, { text: t, block: i, whole: true }];
+                  });
+                }
                 window.getSelection()?.removeAllRanges();
               } else {
                 // 双击：原生选中整段文字（拖选同款高亮，可继续拖动调整）
