@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智能翻译软件 - 原型</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background-color: #f5f5f5;
+            height: 100vh;
+            overflow: hidden;
+        }
+        
+        .app-container {
+            display: flex;
+            height: 100vh;
+        }
+        
+        .sidebar {
+            width: 30%;
+            background-color: #ffffff;
+            border-right: 1px solid #e0e0e0;
+            padding: 20px;
+            overflow-y: auto;
+        }
+        
+        .main-content {
+            width: 70%;
+            padding: 30px;
+            overflow-y: auto;
+        }
+        
+        .sidebar-title {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 20px;
+            color: #333;
+        }
+        
+        .menu-item {
+            padding: 12px 15px;
+            margin-bottom: 8px;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        
+        .menu-item:hover {
+            background-color: #f0f0f0;
+        }
+        
+        .menu-item.active {
+            background-color: #e3f2fd;
+            color: #1976d2;
+            font-weight: 500;
+        }
+        
+        .settings-section {
+            background-color: white;
+            border-radius: 8px;
+            padding: 25px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+        
+        .section-title {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 15px;
+            color: #333;
+        }
+        
+        .form-group {
+            margin-bottom: 15px;
+        }
+        
+        .form-label {
+            display: block;
+            margin-bottom: 6px;
+            font-size: 14px;
+            color: #555;
+        }
+        
+        .form-input, .form-select {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        
+        .form-input:focus, .form-select:focus {
+            outline: none;
+            border-color: #1976d2;
+            box-shadow: 0 0 0 2px rgba(25, 118, 210, 0.2);
+        }
+        
+        .toggle-switch {
+            position: relative;
+            display: inline-block;
+            width: 44px;
+            height: 24px;
+        }
+        
+        .toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        
+        .toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: .4s;
+            border-radius: 24px;
+        }
+        
+        .toggle-slider:before {
+            position: absolute;
+            content: "";
+            height: 18px;
+            width: 18px;
+            left: 3px;
+            bottom: 3px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+        
+        input:checked + .toggle-slider {
+            background-color: #1976d2;
+        }
+        
+        input:checked + .toggle-slider:before {
+            transform: translateX(20px);
+        }
+        
+        .toggle-label {
+            display: inline-block;
+            margin-left: 10px;
+            font-size: 14px;
+            color: #555;
+        }
+        
+        .button {
+            background-color: #1976d2;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        
+        .button:hover {
+            background-color: #1565c0;
+        }
+        
+        .button-secondary {
+            background-color: #f5f5f5;
+            color: #333;
+            border: 1px solid #ddd;
+        }
+        
+        .button-secondary:hover {
+            background-color: #e0e0e0;
+        }
+        
+        .screenshot-preview {
+            border: 2px dashed #ddd;
+            border-radius: 8px;
+            padding: 40px;
+            text-align: center;
+            margin-top: 20px;
+            background-color: #fafafa;
+        }
+        
+        .extract-button {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background-color: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.3s;
+            opacity: 0.1;
+        }
+        
+        .extract-button:hover {
+            opacity: 1;
+            background-color: rgba(255, 255, 255, 0.9);
+        }
+        
+        .translation-result {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background-color: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 20px;
+            border-radius: 8px;
+            max-width: 400px;
+            display: none;
+        }
+        
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="app-container">
+        <div class="sidebar">
+            <h2 class="sidebar-title">设置菜单</h2>
+            <div class="menu-item active">基本设置</div>
+            <div class="menu-item">翻译引擎</div>
+            <div class="menu-item">截图翻译</div>
+            <div class="menu-item">划词翻译</div>
+            <div class="menu-item">术语管理</div>
+            <div class="menu-item">快捷键</div>
+            <div class="menu-item">高级设置</div>
+            <div class="menu-item">关于</div>
+        </div>
+        
+        <div class="main-content">
+            <div class="settings-section">
+                <h3 class="section-title">基本设置</h3>
+                
+                <div class="form-group">
+                    <label class="form-label">开机自启动</label>
+                    <label class="toggle-switch">
+                        <input type="checkbox" checked>
+                        <span class="toggle-slider"></span>
+                    </label>
+                    <span class="toggle-label">启用开机自启动</span>
+                </div>
+                
+                <div class="form-group">
+                    <label class="form-label">默认翻译方向</label>
+                    <select class="form-select">
+                        <option>自动检测 → 中文</option>
+                        <option>中文 → 英文</option>
+                        <option>英文 → 中文</option>
+                        <option>中文 → 日文</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label class="form-label">网络状态</label>
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <div style="width: 10px; height: 10px; background-color: #4caf50; border-radius: 50%;"></div>
+                        <span>在线状态 - 使用在线翻译</span>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="settings-section">
+                <h3 class="section-title">翻译引擎</h3>
+                
+                <div class="form-group">
+                    <label class="form-label">离线翻译引擎</label>
+                    <select class="form-select">
+                        <option>Marian/NMT (推荐)</option>
+                        <option>Argos Translate</option>
+                        <option>禁用离线翻译</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label class="form-label">在线翻译API</label>
+                    <div style="display: flex; gap: 10px; margin-bottom: 10px;">
+                        <label class="toggle-switch">
+                            <input type="checkbox" checked>
+                            <span class="toggle-slider"></span>
+                        </label>
+                        <span class="toggle-label">百度翻译 (免费额度)</span>
+                    </div>
+                    <div style="display: flex; gap: 10px;">
+                        <label class="toggle-switch">
+                            <input type="checkbox" checked>
+                            <span class="toggle-slider"></span>
+                        </label>
+                        <span class="toggle-label">有道智云 (免费额度)</span>
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    <label class="form-label">术语优先级调整</label>
+                    <select class="form-select">
+                        <option>自动调整 + 手动微调</option>
+                        <option>仅自动调整</option>
+                        <option>仅手动调整</option>
+                    </select>
+                </div>
+            </div>
+            
+            <div class="settings-section">
+                <h3 class="section-title">截图翻译</h3>
+                
+                <div class="form-group">
+                    <label class="form-label">OCR引擎</label>
+                    <select class="form-select">
+                        <option>Tesseract OCR (推荐)</option>
+                        <option>Windows内置OCR</option>
+                        <option>百度OCR (有免费额度)</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label class="form-label">截图翻译行为</label>
+                    <div style="display: flex; gap: 10px; margin-bottom: 10px;">
+                        <label class="toggle-switch">
+                            <input type="checkbox" checked>
+                            <span class="toggle-slider"></span>
+                        </label>
+                        <span class="toggle-label">默认覆盖原文显示翻译</span>
+                    </div>
+                    <div style="display: flex; gap: 10px; margin-bottom: 10px;">
+                        <label class="toggle-switch">
+                            <input type="checkbox" checked>
+                            <span class="toggle-slider"></span>
+                        </label>
+                        <span class="toggle-label">左键隐藏/显示翻译结果</span>
+                    </div>
+                    <div style="display: flex; gap: 10px;">
+                        <label class="toggle-switch">
+                            <input type="checkbox" checked>
+                            <span class="toggle-slider"></span>
+                        </label>
+                        <span class="toggle-label">右键退出截图翻译</span>
+                    </div>
+                </div>
+                
+                <div class="screenshot-preview">
+                    <p>截图翻译预览区域</p>
+                    <p style="font-size: 14px; color: #666; margin-top: 10px;">在此区域可以预览截图翻译效果</p>
+                </div>
+            </div>
+            
+            <div class="settings-section">
+                <h3 class="section-title">快捷键设置</h3>
+                
+                <div class="form-group">
+                    <label class="form-label">全局快捷键</label>
+                    <input type="text" class="form-input" value="Ctrl + Alt + T" placeholder="设置全局快捷键">
+                </div>
+                
+                <div class="form-group">
+                    <label class="form-label">截图翻译快捷键</label>
+                    <input type="text" class="form-input" value="Ctrl + Alt + S" placeholder="设置截图翻译快捷键">
+                </div>
+                
+                <div style="margin-top: 20px;">
+                    <button class="button">保存设置</button>
+                    <button class="button button-secondary" style="margin-left: 10px;">恢复默认</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="extract-button" id="extractButton">
+        提取按钮 (不透明度10%，悬停时100%)
+    </div>
+    
+    <div class="translation-result" id="translationResult">
+        <h4>翻译结果</h4>
+        <p>这是一个翻译结果的预览。在实际应用中，这里会显示翻译后的内容。</p>
+        <p style="margin-top: 10px; font-size: 12px; color: #aaa;">左键隐藏/显示 | 右键退出</p>
+    </div>
+    
+    <script>
+        // 模拟提取按钮的不透明度变化
+        const extractButton = document.getElementById('extractButton');
+        
+        // 模拟翻译结果显示
+        const translationResult = document.getElementById('translationResult');
+        
+        // 点击菜单项切换
+        document.querySelectorAll('.menu-item').forEach(item => {
+            item.addEventListener('click', function() {
+                document.querySelectorAll('.menu-item').forEach(i => i.classList.remove('active'));
+                this.classList.add('active');
+            });
+        });
+        
+        // 模拟截图翻译功能
+        document.querySelector('.screenshot-preview').addEventListener('click', function() {
+            translationResult.style.display = 'block';
+            setTimeout(() => {
+                translationResult.style.display = 'none';
+            }, 3000);
+        });
+        
+        // 提取按钮点击事件
+        extractButton.addEventListener('click', function() {
+            alert('提取功能：可以提取原始文本或翻译结果');
+        });
+    </script>
+</body>
+</html>

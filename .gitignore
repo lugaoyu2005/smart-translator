@@ -1,0 +1,13 @@
+# 依赖与构建产物
+node_modules/
+dist/
+**/src-tauri/target/
+**/src-tauri/gen/schemas/
+
+# 运行时产物（含 API 密钥，严禁入库）
+settings.json
+terms.json
+
+# 其它
+*.exe
+build_err.txt

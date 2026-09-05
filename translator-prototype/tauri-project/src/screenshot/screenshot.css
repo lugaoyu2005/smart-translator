@@ -1,0 +1,247 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Microsoft YaHei", sans-serif;
+}
+
+.screenshot-root {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  cursor: crosshair;
+  user-select: none;
+}
+
+/* ============ 选择/处理阶段 ============ */
+
+.dim-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.hint {
+  position: fixed;
+  top: 40px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.75);
+  color: #fff;
+  padding: 14px 24px;
+  border-radius: 8px;
+  text-align: center;
+  z-index: 10;
+  pointer-events: none;
+}
+
+.hint-main {
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.hint-sub {
+  font-size: 12px;
+  margin-top: 6px;
+  color: #ccc;
+}
+
+.processing-hint {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: rgba(0, 0, 0, 0.8);
+  color: #fff;
+  padding: 16px 28px;
+  border-radius: 8px;
+  font-size: 15px;
+  z-index: 20;
+}
+
+/* 拖动中的选区框 */
+.drag-selection {
+  position: fixed;
+  border: 2px solid #1976d2;
+  background: rgba(25, 118, 210, 0.08);
+  pointer-events: none;
+  z-index: 5;
+}
+
+/* 结果阶段：选区描边常驻（暗幕已移除） */
+.selection-border {
+  position: fixed;
+  border: 2px solid #1976d2;
+  pointer-events: none;
+  z-index: 4;
+}
+
+/* ============ 翻译色块（1:1覆盖原文区域） ============ */
+
+.block {
+  position: fixed;
+  display: flex;
+  justify-content: flex-start;
+  border-radius: 3px;
+  padding: 4px 6px;
+  line-height: 1.3;
+  color: #111;
+  overflow: hidden;
+  word-break: break-word;
+  white-space: pre-wrap;
+  z-index: 6;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+}
+
+/* ============ 按键组（菜单组） ============ */
+/* 整组：低透明度背景+圆角，10%→悬停100%，可拖动 */
+
+.menu-group {
+  position: fixed;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 12px;
+  background: rgba(30, 32, 36, 0.6);
+  opacity: 0.1;
+  transition: opacity 0.2s;
+  z-index: 30;
+  cursor: grab;
+}
+
+.menu-group:hover,
+.menu-group.dragging,
+.menu-group.menu-open {
+  opacity: 1;
+}
+
+.menu-group.dragging {
+  cursor: grabbing;
+}
+
+/* 引擎菜单：点击向上展开的垂直引擎选择栏 */
+.engine-wrap {
+  position: relative;
+}
+
+.engine-menu {
+  position: absolute;
+  bottom: calc(100% + 8px); /* 向上展开 */
+  left: 0;
+  display: flex;
+  flex-direction: column; /* 垂直布局 */
+  gap: 2px;
+  min-width: 150px;
+  padding: 6px;
+  border-radius: 10px;
+  background: rgba(30, 32, 36, 0.94);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.4);
+  z-index: 50;
+}
+
+.engine-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #ddd;
+  font-size: 13px;
+  font-family: inherit;
+  padding: 7px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.engine-menu-item:hover {
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+}
+
+.engine-menu-item.active {
+  color: #8ecbff;
+  background: rgba(33, 150, 243, 0.18);
+}
+
+.engine-check {
+  font-size: 12px;
+}
+
+.engine-menu-empty {
+  color: #999;
+  font-size: 12px;
+  padding: 6px 10px;
+  white-space: nowrap;
+}
+
+/* 组内组件：同样式，透明度略高一点 */
+.group-item {
+  border: none;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.16);
+  color: #eee;
+  font-size: 13px;
+  font-family: inherit;
+  padding: 6px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.group-item:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.group-item.engine {
+  min-width: 64px;
+}
+
+.group-item.toggle {
+  font-weight: 700;
+  color: #8ecbff;
+  min-width: 32px;
+  text-align: center;
+}
+
+.group-item.close {
+  font-size: 16px;
+  line-height: 1;
+  padding: 6px 12px;
+}
+
+.group-item.close:hover {
+  background: rgba(220, 60, 60, 0.5);
+}
+
+/* ============ 提示 ============ */
+
+.toast {
+  position: fixed;
+  bottom: 30px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.8);
+  color: #fff;
+  padding: 10px 20px;
+  border-radius: 6px;
+  font-size: 13px;
+  z-index: 40;
+}
+
+.toast.error {
+  background: #c62828;
+  cursor: pointer;
+}
