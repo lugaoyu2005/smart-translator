@@ -37,6 +37,9 @@ pub struct AppSettings {
     pub overlay_bg_color: String,
     #[serde(default = "default_overlay_opacity")]
     pub overlay_opacity: f64,
+    // 覆盖块无背景（透明模式：不画色块仅显示文字，加白色光晕保证可读）
+    #[serde(default)]
+    pub overlay_transparent: bool,
 }
 
 fn default_screenshot_components() -> Vec<String> {
@@ -89,6 +92,7 @@ impl Default for AppSettings {
             screenshot_components: default_screenshot_components(),
             overlay_bg_color: default_overlay_bg_color(),
             overlay_opacity: default_overlay_opacity(),
+            overlay_transparent: false,
         }
     }
 }

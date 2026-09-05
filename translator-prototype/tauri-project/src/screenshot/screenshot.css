@@ -56,17 +56,53 @@ body,
   color: #ccc;
 }
 
-.processing-hint {
+/* 处理中面板：跟随选区中心，转圈 + 阶段文字 + 耗时 + 取消提示 */
+.processing-panel {
   position: fixed;
-  top: 50%;
-  left: 50%;
   transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
   background: rgba(0, 0, 0, 0.8);
   color: #fff;
-  padding: 16px 28px;
-  border-radius: 8px;
-  font-size: 15px;
+  padding: 12px 18px;
+  border-radius: 10px;
+  white-space: nowrap;
   z-index: 20;
+  pointer-events: none;
+}
+
+.processing-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.processing-text {
+  font-size: 14px;
+}
+
+.processing-elapsed {
+  font-size: 12px;
+  color: #9ecbff;
+}
+
+.processing-sub {
+  font-size: 11px;
+  color: #bbb;
+  margin-left: 4px;
+  padding-left: 10px;
+  border-left: 1px solid rgba(255, 255, 255, 0.25);
 }
 
 /* 拖动中的选区框 */

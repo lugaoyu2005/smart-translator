@@ -43,12 +43,14 @@ interface ShotSettings {
   screenshot_components: string[];
   overlay_bg_color: string;
   overlay_opacity: number;
+  overlay_transparent: boolean;
 }
 
 const DEFAULT_SETTINGS: ShotSettings = {
   screenshot_components: ["engine", "copy", "close", "settings"],
   overlay_bg_color: "#ffffff",
   overlay_opacity: 0.95,
+  overlay_transparent: false,
 };
 
 type Phase = "select" | "processing" | "result";
@@ -188,6 +190,9 @@ const ScreenshotWindow: React.FC = () => {
   const win = getCurrentWebviewWindow();
 
   const [phase, setPhase] = useState<Phase>("select");
+  // 处理阶段反馈：当前子阶段 + 已耗时（秒）
+  const [procStage, setProcStage] = useState<"ocr" | "translate">("ocr");
+  const [procSeconds, setProcSeconds] = useState(0);
   const [dragging, setDragging] = useState(false);
   const [selection, setSelection] = useState({ x: 0, y: 0, width: 0, height: 0 });
   const [blocks, setBlocks] = useState<Block[]>([]);
@@ -239,6 +244,8 @@ const ScreenshotWindow: React.FC = () => {
             s?.screenshot_components ?? DEFAULT_SETTINGS.screenshot_components,
           overlay_bg_color: s?.overlay_bg_color ?? DEFAULT_SETTINGS.overlay_bg_color,
           overlay_opacity: s?.overlay_opacity ?? DEFAULT_SETTINGS.overlay_opacity,
+          overlay_transparent:
+            s?.overlay_transparent ?? DEFAULT_SETTINGS.overlay_transparent,
         });
       } catch {}
 
@@ -259,6 +266,8 @@ const ScreenshotWindow: React.FC = () => {
             s?.screenshot_components ?? DEFAULT_SETTINGS.screenshot_components,
           overlay_bg_color: s?.overlay_bg_color ?? DEFAULT_SETTINGS.overlay_bg_color,
           overlay_opacity: s?.overlay_opacity ?? DEFAULT_SETTINGS.overlay_opacity,
+          overlay_transparent:
+            s?.overlay_transparent ?? DEFAULT_SETTINGS.overlay_transparent,
         });
       } catch {}
       try {
@@ -286,6 +295,14 @@ const ScreenshotWindow: React.FC = () => {
       un.then((f) => f());
     };
   }, [win]);
+
+  // 处理中计时器：每秒刷新耗时显示
+  useEffect(() => {
+    if (phase !== "processing") return;
+    setProcSeconds(0);
+    const t = setInterval(() => setProcSeconds((s) => s + 1), 1000);
+    return () => clearInterval(t);
+  }, [phase]);
 
   /** 重置到框选模式（退出/重新触发共用） */
   const resetState = useCallback(() => {
@@ -376,6 +393,8 @@ const ScreenshotWindow: React.FC = () => {
     height: number;
   }) => {
     setPhase("processing");
+    setProcStage("ocr");
+    setProcSeconds(0);
     const sf = scaleFactor.current || 1;
     const physX = Math.round(monitorPos.current.x + sel.x * sf);
     const physY = Math.round(monitorPos.current.y + sel.y * sf);
@@ -436,6 +455,12 @@ const ScreenshotWindow: React.FC = () => {
         return { ...r, original: groupTexts[gi], translation: "" };
       });
       setBlocks(newBlocks);
+
+      // 截图与OCR已完成：立即重新显示窗口，让加载面板在翻译期间可见
+      //（此前窗口全程隐藏，翻译1-3秒内用户看到的是无任何UI的空白）
+      setProcStage("translate");
+      await win.show();
+      await win.setFocus();
 
       // 逐组翻译（百度合并\n一次请求，按行拆分重组）
       const engineName = engines[engineIdx]?.name;
@@ -627,7 +652,34 @@ const ScreenshotWindow: React.FC = () => {
             </div>
           )}
           {phase === "processing" && (
-            <div className="processing-hint">正在识别与翻译...</div>
+            <div
+              className="processing-panel"
+              style={{
+                left:
+                  selection.width > 0
+                    ? Math.min(
+                        Math.max(selection.x + selection.width / 2, 130),
+                        window.innerWidth - 130
+                      )
+                    : window.innerWidth / 2,
+                top:
+                  selection.height > 0
+                    ? Math.min(
+                        Math.max(selection.y + selection.height / 2, 70),
+                        window.innerHeight - 70
+                      )
+                    : window.innerHeight / 2,
+              }}
+            >
+              <span className="processing-spinner" />
+              <span className="processing-text">
+                {procStage === "ocr" ? "正在识别文字…" : "正在翻译…"}
+              </span>
+              {procSeconds > 0 && (
+                <span className="processing-elapsed">{procSeconds}s</span>
+              )}
+              <span className="processing-sub">ESC 取消</span>
+            </div>
           )}
         </div>
       )}
@@ -645,8 +697,8 @@ const ScreenshotWindow: React.FC = () => {
         />
       )}
 
-      {/* 结果阶段：选区描边常驻 */}
-      {phase === "result" && selection.width > 0 && (
+      {/* 结果/处理阶段：选区描边常驻（处理中给用户视觉锚点） */}
+      {(phase === "result" || phase === "processing") && selection.width > 0 && (
         <div
           className="selection-border"
           style={{
@@ -670,10 +722,18 @@ const ScreenshotWindow: React.FC = () => {
               top: b.y,
               width: b.width,
               height: b.height,
-              background: hexToRgba(
-                settings.overlay_bg_color,
-                settings.overlay_opacity
-              ),
+              background: settings.overlay_transparent
+                ? "transparent"
+                : hexToRgba(
+                    settings.overlay_bg_color,
+                    settings.overlay_opacity
+                  ),
+              boxShadow: settings.overlay_transparent
+                ? "none"
+                : undefined,
+              textShadow: settings.overlay_transparent
+                ? "0 0 3px rgba(255,255,255,0.95), 0 0 6px rgba(255,255,255,0.7)"
+                : undefined,
               fontSize: fitFontSize(b.translation, b.width, b.height),
               alignItems: b.translation.includes("\n")
                 ? "flex-start"

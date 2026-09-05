@@ -321,6 +321,24 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         </div>
 
         <div className="form-group">
+          <div className="toggle-group">
+            <label className="toggle-switch">
+              <input
+                type="checkbox"
+                checked={localSettings?.overlay_transparent || false}
+                onChange={(e) =>
+                  handleSettingChange("overlay_transparent", e.target.checked)
+                }
+              />
+              <span className="toggle-slider"></span>
+            </label>
+            <span className="toggle-label">
+              无背景模式（覆盖块透明，仅显示翻译文字 + 白色光晕）
+            </span>
+          </div>
+        </div>
+
+        <div className="form-group">
           <label className="form-label">截图翻译行为</label>
           <div className="toggle-group">
             <label className="toggle-switch">
