@@ -802,7 +802,7 @@ const ScreenshotWindow: React.FC = () => {
         blocks.map((b, i) => (
           <div
             key={i}
-            className={`block ${picked.some((p) => p.block === i) ? "picked" : ""}`}
+            className="block"
             onMouseDown={(e) => {
               // 记录起始块与修饰键快照（供mouseup累积片段用）
               dragStartBlock.current = i;
@@ -814,8 +814,16 @@ const ScreenshotWindow: React.FC = () => {
             onDoubleClick={(e) => {
               e.stopPropagation();
               const el = e.currentTarget;
+              // 双击（含Ctrl+双击）：原生选中整段文字——
+              // 所有选中态统一用原生贴字高亮，无描边/徽标等额外样式
+              const sel = window.getSelection();
+              if (!sel) return;
+              sel.removeAllRanges();
+              const range = document.createRange();
+              range.selectNodeContents(el);
+              sel.addRange(range);
               if (e.ctrlKey || e.shiftKey) {
-                // Ctrl+双击：整段加入片段累积（再次操作同块=取消）
+                // Ctrl+双击：整段加入片段累积（再次同块操作=取消）
                 const t = el.textContent?.trim() ?? "";
                 if (t) {
                   setPicked((prev) => {
@@ -824,15 +832,6 @@ const ScreenshotWindow: React.FC = () => {
                     return [...prev, { text: t, block: i, whole: true }];
                   });
                 }
-                window.getSelection()?.removeAllRanges();
-              } else {
-                // 双击：原生选中整段文字（拖选同款高亮，可继续拖动调整）
-                const sel = window.getSelection();
-                if (!sel) return;
-                sel.removeAllRanges();
-                const range = document.createRange();
-                range.selectNodeContents(el);
-                sel.addRange(range);
               }
             }}
             style={{

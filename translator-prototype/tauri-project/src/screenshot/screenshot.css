@@ -152,12 +152,6 @@ body,
   user-select: text;
 }
 
-/* Ctrl多选已拾取的块：蓝色描边持续标记（Ctrl+双击/拖选来源） */
-.block.picked {
-  outline: 2px solid #1976d2;
-  outline-offset: -1px;
-}
-
 /* ============ 按键组（菜单组） ============ */
 /* 整组：低透明度背景+圆角，10%→悬停100%，可拖动 */
 
