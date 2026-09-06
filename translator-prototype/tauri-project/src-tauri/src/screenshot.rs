@@ -672,7 +672,7 @@ pub async fn ocr_stored_capture(
 }
 
 /// 有道OCR（云）：区域截图 BGRA → PNG → Base64 → ocrapi
-/// 签名按有道OCR规范：input = sha256(q的Base64字符串)，sha256(appKey+input+salt+curtime+secret)
+/// 签名按官方规范：input = img前10字符 + img长度 + img后10字符（>20时截断）
 async fn youdao_ocr_pixels(
     data: &ScreenshotData,
     app_key: &str,
@@ -691,10 +691,10 @@ async fn youdao_ocr_pixels(
     for px in rgba.chunks_exact_mut(4) {
         px.swap(0, 2);
     }
-    let img = image::RgbaImage::from_raw(data.width as u32, data.height as u32, rgba)
+    let img_img = image::RgbaImage::from_raw(data.width as u32, data.height as u32, rgba)
         .ok_or_else(|| "图像数据无效".to_string())?;
     let mut png = Vec::new();
-    image::DynamicImage::ImageRgba8(img)
+    image::DynamicImage::ImageRgba8(img_img)
         .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
         .map_err(|e| format!("PNG编码失败: {e}"))?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
@@ -708,23 +708,36 @@ async fn youdao_ocr_pixels(
         .map(|d| d.as_secs().to_string())
         .unwrap_or_else(|_| "0".to_string());
 
-    let q_hash = format!("{:x}", Sha256::digest(b64.as_bytes()));
-    let sign_raw = format!("{}{}{}{}{}", app_key, q_hash, salt, curtime, app_secret);
+    // 官方签名规则：input = img前10字符 + img长度 + img后10字符（>20时），否则 = img全文
+    let chars: Vec<char> = b64.chars().collect();
+    let n = chars.len();
+    let input = if n <= 20 {
+        b64.clone()
+    } else {
+        let first: String = chars[..10].iter().collect();
+        let last: String = chars[n - 10..].iter().collect();
+        format!("{first}{n}{last}")
+    };
+    let sign_raw = format!("{}{}{}{}{}", app_key, input, salt, curtime, app_secret);
     let sign = format!("{:x}", Sha256::digest(sign_raw.as_bytes()));
+
+    let params = [
+        ("img", b64),
+        ("langType", "auto".to_string()), // 支持语言列表含 auto
+        ("detectType", "10012".to_string()), // 按行识别
+        ("imageType", "1".to_string()),   // Base64
+        ("appKey", app_key.to_string()),
+        ("salt", salt),
+        ("curtime", curtime),
+        ("docType", "json".to_string()),
+        ("signType", "v3".to_string()),
+        ("sign", sign),
+    ];
 
     let client = reqwest::Client::new();
     let resp: serde_json::Value = client
         .post("https://openapi.youdao.com/ocrapi")
-        .form(&[
-            ("type", "1".to_string()),
-            ("q", b64),
-            ("langType", "auto".to_string()),
-            ("appKey", app_key.to_string()),
-            ("salt", salt),
-            ("curtime", curtime),
-            ("signType", "v3".to_string()),
-            ("sign", sign),
-        ])
+        .form(&params)
         .send()
         .await
         .map_err(|e| format!("有道OCR请求失败: {e}"))?
@@ -738,39 +751,54 @@ async fn youdao_ocr_pixels(
         }
     }
 
-    // 解析 lines：boundingBox 内递归收集所有 (x,y) 点，取包围盒
-    let empty = Vec::new();
-    let raw_lines = resp
-        .get("lines")
-        .and_then(|v| v.as_array())
-        .unwrap_or(&empty);
+    // 结果结构：Result.regions[].lines[].{text, boundingBox:"x1,y1,...x4,y4"}
     let mut lines = Vec::new();
-    for l in raw_lines {
-        let text = win::apply_symbol_corrections(
-            l.get("text").and_then(|v| v.as_str()).unwrap_or(""),
-            corrections,
-        );
-        if text.trim().is_empty() {
-            continue;
+    if let Some(regions) = resp
+        .pointer("/Result/regions")
+        .and_then(|v| v.as_array())
+    {
+        for region in regions {
+            if let Some(ls) = region.get("lines").and_then(|v| v.as_array()) {
+                for l in ls {
+                    let text = win::apply_symbol_corrections(
+                        l.get("text").and_then(|v| v.as_str()).unwrap_or(""),
+                        corrections,
+                    );
+                    if text.trim().is_empty() {
+                        continue;
+                    }
+                    // boundingBox: 8个逗号分隔数值（四角x/y），取包围盒
+                    let nums: Vec<f64> = l
+                        .get("boundingBox")
+                        .and_then(|v| v.as_str())
+                        .map(|s| {
+                            s.split(',')
+                                .filter_map(|t| t.trim().parse::<f64>().ok())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if nums.len() < 8 {
+                        continue;
+                    }
+                    let xs = [nums[0], nums[2], nums[4], nums[6]];
+                    let ys = [nums[1], nums[3], nums[5], nums[7]];
+                    lines.push(OcrLineInfo {
+                        text,
+                        x: xs.iter().cloned().fold(f64::MAX, f64::min),
+                        y: ys.iter().cloned().fold(f64::MAX, f64::min),
+                        width: xs.iter().cloned().fold(f64::MIN, f64::max)
+                            - xs.iter().cloned().fold(f64::MAX, f64::min),
+                        height: ys.iter().cloned().fold(f64::MIN, f64::max)
+                            - ys.iter().cloned().fold(f64::MAX, f64::min),
+                    });
+                }
+            }
         }
-        let mut pts: Vec<(f64, f64)> = Vec::new();
-        collect_points(l.get("boundingBox").unwrap_or(&serde_json::Value::Null), &mut pts);
-        if pts.is_empty() {
-            continue;
-        }
-        let min_x = pts.iter().map(|p| p.0).fold(f64::MAX, f64::min);
-        let min_y = pts.iter().map(|p| p.1).fold(f64::MAX, f64::min);
-        let max_x = pts.iter().map(|p| p.0).fold(f64::MIN, f64::max);
-        let max_y = pts.iter().map(|p| p.1).fold(f64::MIN, f64::max);
-        lines.push(OcrLineInfo {
-            text,
-            x: min_x,
-            y: min_y,
-            width: max_x - min_x,
-            height: max_y - min_y,
-        });
     }
-    Ok(OcrResult { lines, language: "auto".to_string() })
+    Ok(OcrResult {
+        lines,
+        language: "auto".to_string(),
+    })
 }
 
 /// RapidOCR 本地引擎（PaddleOCR PP-OCRv6 模型 + ONNX Runtime）：
@@ -926,7 +954,7 @@ mod tests {
     /// 首次运行需联网下载约15MB模型；白图无文字应返回空结果
     #[test]
     #[ignore]
-    fn test_rapidocr_model_and_inference() {
+    fn test_rapidocr_model_and_inference() -> Result<(), Box<dyn std::error::Error>> {
         use rapidocr_core::config::{PipelineConfig, RapidOcrConfig};
 
         let dir = std::env::temp_dir().join("rapidocr-model-verify");
@@ -945,6 +973,36 @@ mod tests {
         let img = image::RgbImage::new(160, 60);
         let out = ocr.run_image(&img).expect("推理失败");
         assert!(out.lines.is_empty(), "白图不应识别出文字");
+
+        // 用GDI渲染已知文本，验证对真实文字的识别质量
+        let rendered = render_text_image("Hello World 123", 420, 90)?;
+        let corrections2: Vec<(String, String)> = Vec::new();
+        let out2 = rapidocr_ocr_pixels(&rendered, &corrections2)?;
+        let joined: String = out2.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join(" ");
+        println!("[RapidOCR识别] {}", joined);
+        assert!(joined.contains("Hello"), "RapidOCR应识别出Hello，实际: {}", joined);
+        assert!(joined.contains("123"), "RapidOCR应识别出123，实际: {}", joined);
+
+        Ok(())
+    }
+
+    /// 有道OCR云接口验证（消耗少量体验金；密钥从环境变量读取）
+    #[tokio::test]
+    #[ignore]
+    async fn test_youdao_ocr_cloud() -> Result<(), Box<dyn std::error::Error>> {
+        let key = std::env::var("YOUDAO_APP_KEY")?;
+        let secret = std::env::var("YOUDAO_APP_SECRET")?;
+        let rendered = render_text_image("Hello World 123", 420, 90)?;
+        let out = youdao_ocr_pixels(&rendered, &key, &secret, &[]).await?;
+        let joined: String = out
+            .lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!("[有道OCR识别] {}", joined);
+        assert!(!joined.trim().is_empty(), "有道OCR未识别到内容");
+        Ok(())
     }
 
     #[test]
@@ -1076,4 +1134,66 @@ mod tests {
         assert_eq!(lines[0].text, "line one");
         assert_eq!(lines[1].text, "line two");
     }
+    /// GDI 渲染文本到 BGRA 像素（测试用：生成已知内容的"截图"）
+    #[cfg(target_os = "windows")]
+    fn render_text_image(text: &str, w: i32, h: i32) -> Result<ScreenshotData, String> {
+        use windows::Win32::Graphics::Gdi::*;
+        unsafe {
+            let hdc_screen = GetDC(None);
+            let mem_dc = CreateCompatibleDC(Some(hdc_screen));
+
+            let mut bmi = BITMAPINFO::default();
+            bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+            bmi.bmiHeader.biWidth = w;
+            bmi.bmiHeader.biHeight = -h; // top-down
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 32;
+            bmi.bmiHeader.biCompression = BI_RGB.0;
+            let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+            let hbmp = CreateDIBSection(Some(mem_dc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0)
+                .map_err(|e| format!("CreateDIBSection失败: {e}"))?;
+            let old_bmp = SelectObject(mem_dc, hbmp.into());
+
+            // 白底
+            let white = CreateSolidBrush(windows::Win32::Foundation::COLORREF(0x00FF_FFFF));
+            let rect = windows::Win32::Foundation::RECT { left: 0, top: 0, right: w, bottom: h };
+            FillRect(mem_dc, &rect, white);
+            DeleteObject(white.into());
+
+            // 黑字 48px
+            let font = CreateFontW(
+                48, 0, 0, 0, 400, 0, 0, 0,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY, (DEFAULT_PITCH.0 | 0) as u32,
+                windows::core::w!("Segoe UI"),
+            );
+            let old_font = SelectObject(mem_dc, font.into());
+            SetTextColor(mem_dc, windows::Win32::Foundation::COLORREF(0x00000000));
+            SetBkMode(mem_dc, TRANSPARENT);
+
+            let mut buf: Vec<u16> = text.encode_utf16().collect();
+            let mut rect2 = windows::Win32::Foundation::RECT { left: 4, top: 0, right: w - 4, bottom: h };
+            DrawTextW(
+                mem_dc,
+                &mut buf,
+                &mut rect2,
+                DT_SINGLELINE | DT_CENTER | DT_VCENTER,
+            );
+
+            // 读取像素（BGRA）
+            let len = (w * h) as usize;
+            let slice = std::slice::from_raw_parts(bits as *const u8, len * 4);
+            let pixels = slice.to_vec();
+
+            SelectObject(mem_dc, old_bmp);
+            SelectObject(mem_dc, old_font);
+            DeleteObject(font.into());
+            DeleteObject(hbmp.into());
+            DeleteDC(mem_dc);
+            ReleaseDC(None, hdc_screen);
+
+            Ok(ScreenshotData { pixels, width: w, height: h })
+        }
+    }
+
 }

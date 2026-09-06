@@ -72,3 +72,9 @@ RapidOCR本地OCR	✅ 完成	PaddleOCR PP-OCRv6 模型+ONNX Runtime推理，完�
 划词翻译	✅ 完成	全局热键Ctrl+Alt+X（可配置/可禁用）：任意应用选中文本→模拟Ctrl+C捕获（剪贴板自动还原）→主窗口翻译页自动翻译；限制：禁用复制功能的应用不支持
 单实例	✅ 完成	tauri-plugin-single-instance：二次启动唤起已有主窗口
 右键菜单	⚠️ 系统限制	Windows无法为任意应用的选中文本添加右键菜单项（注册表仅支持文件/文件夹），以全局快捷键方案替代；如需文件右键翻译可后续加注册表项
+
+## 2026-09-06 有道OCR云接口调通（第七轮收尾）
+- 有道通用OCR（ocrapi）正式接入：抓官方文档修正三处关键参数——签名规则改为 img前10字符+img长度+img后10字符 截断拼接（非 sha256(q)）；参数名 imageType/docType/detectType=10012（按行识别）；langType 用 "auto"
+- 响应解析按官方结构：Result.regions[].lines[].{text, boundingBox}（逗号分隔8值四角坐标 → 包围盒 → OcrLineInfo）
+- GDI渲染"Hello World 123"实测云端识别通过；全量 cargo test 18 通过；npm run build 通过
+- 至此 OCR 引擎三选齐备：Windows内置 / RapidOCR本地（PP-OCRv6离线免费）/ 有道OCR云端
