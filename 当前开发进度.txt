@@ -85,3 +85,16 @@ RapidOCR本地OCR	✅ 完成	PaddleOCR PP-OCRv6 模型+ONNX Runtime推理，完�
 - 修复：复制优先级——Ctrl累积片段优先于残留原生选区（此前Ctrl多选后复制只得到最后一段）；普通双击与普通拖动对齐为覆盖式单选（清空累积）
 - 清理：删除死代码 collect_points/TranslationRequest；GDI清理调用显式处理返回值（编译警告清零）；history锁中毒时into_inner恢复
 - 全量 cargo test 18 通过；npm run build 通过
+
+## 2026-09-06 离线翻译引擎落地（第九轮）
+- 技术栈：ort 2.0-rc.13（与 RapidOCR 复用同一 ONNX Runtime）+ HuggingFace tokenizers 纯Rust，零C++工具链依赖
+- 模型：Helsinki-NLP OPUS-MT int8量化（Xenova ONNX镜像），中↔英专门模型直达；日/韩/俄/法/德/西/葡经英语中转（两次解码）
+- 分发：按需自动下载（hf-mirror.com优先、huggingface.co兜底），每语言对约30-80MB，存exe同目录models/mt/；下载进度经offline-mt-status事件推送
+- 新模块 offline_mt.rs：模型目录catalog、多源下载器（断点目录+8MB节流进度）、tokenizer/双会话懒加载缓存、贪心解码（no_repeat_ngram=3 + repetition_penalty=1.2 抑制复读循环）、脚本启发式auto检测（谚文→韩/假名→日/汉字→中/西里尔→俄/拉丁→英）、pivot路由
+- 接入：OfflineMtEngine 实现TranslationEngine（名称"离线翻译"）append在引擎列表末尾——在线全失败自动兜底，截图菜单/当前翻译源可手动选中；翻译历史自动记录
+- 设置：复用offline_engine字段（marian=启用[默认]/disabled=禁用），migrate把argos归一为marian；设置页下拉改造+说明；当前翻译源下拉加入"离线翻译（本地模型）"
+- 修复既有不一致：migrate的current_engine校验只认百度/有道两个名（腾讯/阿里/小牛/DeepL/自定义会被误回落）→ 全量7引擎名映射；前端自定义引擎label与后端名不一致（自定义（OpenAI兼容）vs 自定义AI）→ 存储统一用后端名（ONLINE_PROVIDERS加engine字段）
+- 修Xenova tokenizer.json兼容：precompiled_charsmap为null时剥掉Precompiled normalizer再加载
+- 端到端实测通过：en→zh / zh→en / ja→zh(pivot) 三方向真实下载+推理（模型缓存后单段约1-3秒）
+- 已知局限（后续项）：en→zh输出偏繁体（OPUS-MT语料倾向，可加简繁转换表）；贪心解码偶有"park park"级复读（beam search可根治）；截图翻译多段文本逐段解码偏慢
+- 全量 cargo test 20 通过；npm run build 通过

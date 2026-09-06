@@ -28,6 +28,10 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 base64 = "0.22"
 # RapidOCR 本地OCR（PaddleOCR 模型，ONNX Runtime 推理，首次使用自动下载模型）
 rapidocr-core = "0.2"
+# 离线翻译（OPUS-MT 本地模型）：ort 与 rapidocr-core 同版本，复用同一 ONNX Runtime
+ort = "2.0.0-rc.12"
+
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
 # 单实例：二次启动唤起已有窗口
 tauri-plugin-single-instance = "2"
 # 截图与OCR（Windows内置OCR，无需外部安装）

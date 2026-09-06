@@ -16,13 +16,14 @@ const GROUP_COMPONENTS = [
 
 // 在线翻译引擎清单：status 非空 = 框架阶段（翻译实现后续接入）
 const ONLINE_PROVIDERS = [
-  { id: "baidu", label: "百度翻译", status: "" },
-  { id: "youdao", label: "有道智云", status: "" },
-  { id: "niutrans", label: "小牛翻译", status: "已接入" },
-  { id: "deepl", label: "DeepL", status: "已接入" },
-  { id: "tencent", label: "腾讯云翻译", status: "已接入" },
-  { id: "ali", label: "阿里云翻译", status: "已接入" },
-  { id: "custom", label: "自定义（OpenAI兼容）", status: "已接入" },
+  { id: "baidu", label: "百度翻译", engine: "百度翻译", status: "" },
+  { id: "youdao", label: "有道智云", engine: "有道智云", status: "" },
+  { id: "niutrans", label: "小牛翻译", engine: "小牛翻译", status: "已接入" },
+  { id: "deepl", label: "DeepL", engine: "DeepL", status: "已接入" },
+  { id: "tencent", label: "腾讯云翻译", engine: "腾讯云翻译", status: "已接入" },
+  { id: "ali", label: "阿里云翻译", engine: "阿里云翻译", status: "已接入" },
+  // engine=后端引擎名（current_engine 存储/截图菜单匹配用），label=界面显示
+  { id: "custom", label: "自定义（OpenAI兼容）", engine: "自定义AI", status: "已接入" },
 ];
 
 // OCR 引擎清单：ready=true 当前可用
@@ -241,20 +242,28 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         <p className="form-hint">启用的引擎（已接入的）会出现在截图翻译的引擎菜单中</p>
       </div>
 
-      {enabledRealProviders.length > 0 && (
+      {(enabledRealProviders.length > 0 || localSettings?.offline_engine !== "disabled") && (
         <div className="form-group">
           <label className="form-label">当前翻译源（默认引擎）</label>
           <select
             className="form-select"
-            value={localSettings?.current_engine || enabledRealProviders[0].label}
+            value={
+              localSettings?.current_engine ||
+              enabledRealProviders[0]?.engine ||
+              "离线翻译"
+            }
             onChange={(e) => handleSettingChange("current_engine", e.target.value)}
           >
             {enabledRealProviders.map((p) => (
-              <option key={p.id} value={p.label}>
+              <option key={p.id} value={p.engine}>
                 {p.label}
               </option>
             ))}
+            {localSettings?.offline_engine !== "disabled" && (
+              <option value="离线翻译">离线翻译（本地模型）</option>
+            )}
           </select>
+          <div className="form-hint">与截图翻译菜单双向绑定；离线翻译作为默认源时完全无需联网</div>
         </div>
       )}
 
@@ -429,13 +438,17 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         <label className="form-label">离线翻译引擎</label>
         <select
           className="form-select"
-          value={localSettings?.offline_engine || "marian"}
+          value={localSettings?.offline_engine === "disabled" ? "disabled" : "marian"}
           onChange={(e) => handleSettingChange("offline_engine", e.target.value)}
         >
-          <option value="marian">Marian/NMT (推荐)</option>
-          <option value="argos">Argos Translate</option>
+          <option value="marian">离线翻译 OPUS-MT（本地模型，免费无网络）</option>
           <option value="disabled">禁用离线翻译</option>
         </select>
+        <div className="form-hint">
+          排在在线引擎之后自动兜底：所有在线API失败时改用离线翻译，也可在截图菜单手动选中。
+          首次使用某语言对时自动下载模型（每个约30-80MB，存于程序目录 models/mt/），此后完全离线。
+          中↔英为专门模型直达；日/韩/俄/法/德/西/葡经英语中转。
+        </div>
       </div>
 
       <div className="form-group">

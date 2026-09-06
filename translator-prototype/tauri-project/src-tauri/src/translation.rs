@@ -59,6 +59,11 @@ pub fn build_manager(settings: &crate::system::AppSettings) -> TranslationManage
             &providers.custom_openai_model,
         )));
     }
+    // 离线翻译（OPUS-MT 本地模型）排在末尾：在线引擎优先，全部失败时自动兜底；
+    // 截图菜单/当前翻译源也可手动选中
+    if settings.offline_engine != "disabled" {
+        engines.push(Box::new(crate::offline_mt::OfflineMtEngine::new()));
+    }
 
     let term_base = crate::terms::load_term_base();
     TranslationManager::new(engines, term_base)

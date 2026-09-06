@@ -2,6 +2,7 @@
 
 mod engines;
 mod history;
+mod offline_mt;
 mod screenshot;
 mod selection;
 mod system;
@@ -44,6 +45,9 @@ fn main() {
         .setup(|app| {
             // 先加载设置（自启动/快捷键/引擎都依赖它）
             let settings = system::load_settings();
+
+            // 离线翻译下载进度推送给前端（测试等无GUI场景不注入则静默跳过）
+            let _ = offline_mt::APP_HANDLE.set(app.handle().clone());
 
             // 主窗口尺寸：按"上次大小/固定大小"模式应用
             if let Some(main_win) = app.get_webview_window("main") {

@@ -195,6 +195,8 @@ const ScreenshotWindow: React.FC = () => {
   const [noText, setNoText] = useState(false);
   const [error, setError] = useState("");
   const [retranslating, setRetranslating] = useState(false);
+  // 离线翻译模型下载/加载进度（offline-mt-status 事件推送）
+  const [mtStatus, setMtStatus] = useState("");
 
   const [engines, setEngines] = useState<EngineInfo[]>([]);
   const [engineIdx, setEngineIdx] = useState(0);
@@ -375,6 +377,7 @@ const ScreenshotWindow: React.FC = () => {
     setOverlayVisible(true);
     setNoText(false);
     setError("");
+    setMtStatus("");
     setCopyMode("original");
     setPicked([]);
     setGroupDragging(false);
@@ -397,9 +400,11 @@ const ScreenshotWindow: React.FC = () => {
   useEffect(() => {
     const u1 = listen("screenshot-warmup", () => setWarming(true));
     const u2 = listen("screenshot-warmup-done", () => setWarming(false));
+    const u3 = listen<string>("offline-mt-status", (e) => setMtStatus(e.payload));
     return () => {
       u1.then((f) => f());
       u2.then((f) => f());
+      u3.then((f) => f());
     };
   }, []);
 
@@ -930,6 +935,7 @@ const ScreenshotWindow: React.FC = () => {
                 <span className="processing-elapsed">{procSeconds}s</span>
               )}
               <span className="processing-sub">ESC 取消</span>
+              {mtStatus && <div className="processing-sub mt-status">{mtStatus}</div>}
             </div>
           )}
         </div>

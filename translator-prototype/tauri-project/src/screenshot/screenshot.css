@@ -365,3 +365,8 @@ body,
   background: #c62828;
   cursor: pointer;
 }
+/* 离线翻译下载/加载进度行 */
+.mt-status {
+  margin-top: 4px;
+  opacity: 0.85;
+}

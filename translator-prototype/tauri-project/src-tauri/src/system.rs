@@ -178,6 +178,10 @@ fn migrate(settings: &mut AppSettings) {
     if settings.ocr_engine == "tesseract" {
         settings.ocr_engine = "windows".to_string();
     }
+    // 离线翻译已定案为 OPUS-MT 本地模型；旧下拉中的 argos 选项归一为 marian（启用）
+    if settings.offline_engine == "argos" {
+        settings.offline_engine = "marian".to_string();
+    }
     // 划词翻译热键（历史配置缺失时补默认值）
     if !settings.hotkeys.contains_key("select") {
         settings
@@ -189,15 +193,24 @@ fn migrate(settings: &mut AppSettings) {
         settings.overlay_mode = Some("none".to_string());
     }
     // 当前翻译源不在启用列表时，回落到第一个启用的引擎（名称↔ID映射）
+    // 名称↔ID全量映射（与 engines.rs 各引擎 name() 对应）
     let enabled_name = |name: &str| {
         let id = match name {
             "百度翻译" => "baidu",
             "有道智云" => "youdao",
+            "小牛翻译" => "niutrans",
+            "DeepL" => "deepl",
+            "腾讯云翻译" => "tencent",
+            "阿里云翻译" => "ali",
+            "自定义AI" => "custom",
             _ => "",
         };
         settings.online_apis.iter().any(|a| a == id)
     };
-    if !enabled_name(&settings.current_engine) {
+    // 离线翻译启用时也是合法的当前翻译源
+    let offline_selected =
+        settings.offline_engine != "disabled" && settings.current_engine == "离线翻译";
+    if !enabled_name(&settings.current_engine) && !offline_selected {
         settings.current_engine = settings
             .online_apis
             .first()
