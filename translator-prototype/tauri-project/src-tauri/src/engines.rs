@@ -16,6 +16,8 @@ pub enum EngineType {
     Youdao,       // 有道智云
     Niutrans,     // 小牛翻译
     DeepL,        // DeepL
+    Tencent,      // 腾讯云翻译
+    Ali,          // 阿里云翻译
     OpenAICompat, // 自定义（OpenAI 兼容接口）
 }
 
@@ -74,6 +76,8 @@ fn lang_code(engine: &EngineType, code: &str) -> String {
         },
         // 小牛与内部码一致（zh/en/ja/ko/ru/fr/de/es/pt）
         EngineType::Niutrans => code.to_string(),
+        // 腾讯/阿里语言码与内部码基本一致（zh/en/ja/ko/ru/fr/de/es/pt）
+        EngineType::Tencent | EngineType::Ali => code.to_string(),
         EngineType::DeepL => match code {
             "zh" => "ZH".to_string(),
             "en" => "EN".to_string(),
@@ -618,6 +622,280 @@ Output ONLY the translation, keeping line breaks. No explanations.",
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .ok_or_else(|| "自定义AI响应格式异常".to_string())
+    }
+}
+
+// ============ 腾讯云翻译引擎（TC3-HMAC-SHA256 签名） ============
+
+pub struct TencentEngine {
+    secret_id: String,
+    secret_key: String,
+    client: reqwest::Client,
+}
+
+impl TencentEngine {
+    pub fn new(secret_id: &str, secret_key: &str) -> Self {
+        Self {
+            secret_id: secret_id.to_string(),
+            secret_key: secret_key.to_string(),
+            client: reqwest::Client::new(),
+        }
+    }
+
+    fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
+        use hmac::{Hmac, Mac};
+        let mut mac = Hmac::<sha2::Sha256>::new_from_slice(key).expect("HMAC接受任意长度密钥");
+        mac.update(data);
+        mac.finalize().into_bytes().to_vec()
+    }
+
+    fn sha256_hex(data: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(data))
+    }
+
+    /// Unix秒 → UTC日期（YYYY-MM-DD），Howard Hinnant 民用历算法
+    fn utc_date(secs: u64) -> String {
+        let z = (secs / 86400) as i64 + 719468;
+        let era = z.div_euclid(146097);
+        let doe = z.rem_euclid(146097);
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        let y = if m <= 2 { y + 1 } else { y };
+        format!("{:04}-{:02}-{:02}", y, m, d)
+    }
+}
+
+#[async_trait::async_trait]
+impl TranslationEngine for TencentEngine {
+    fn name(&self) -> &str {
+        "腾讯云翻译"
+    }
+
+    fn engine_type(&self) -> EngineType {
+        EngineType::Tencent
+    }
+
+    fn is_configured(&self) -> bool {
+        !self.secret_id.is_empty() && !self.secret_key.is_empty()
+    }
+
+    async fn translate(&self, text: &str, from: &str, to: &str) -> Result<String, String> {
+        let host = "tmt.tencentcloudapi.com";
+        let action = "TextTranslate";
+        let version = "2018-03-21";
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let date = Self::utc_date(timestamp);
+
+        let body = serde_json::json!({
+            "ProjectId": 0,
+            "Source": if from == "auto" { "auto".to_string() } else { lang_code(&EngineType::Tencent, from) },
+            "SourceText": text,
+            "Target": lang_code(&EngineType::Tencent, to),
+        });
+        // 签名必须基于实际发送的报文字节，先序列化定稿
+        let payload = serde_json::to_string(&body).map_err(|e| e.to_string())?;
+
+        let canonical_request = format!(
+            "POST\n/\n\ncontent-type:application/json\nhost:{}\nx-tc-action:{}\n\ncontent-type;host;x-tc-action\n{}",
+            host,
+            action.to_lowercase(),
+            Self::sha256_hex(payload.as_bytes())
+        );
+        let string_to_sign = format!(
+            "TC3-HMAC-SHA256\n{}\n{}\n{}",
+            timestamp,
+            date,
+            Self::sha256_hex(canonical_request.as_bytes())
+        );
+        let k_date = Self::hmac_sha256(format!("TC3{}", self.secret_key).as_bytes(), date.as_bytes());
+        let k_service = Self::hmac_sha256(&k_date, b"tmt");
+        let k_signing = Self::hmac_sha256(&k_service, b"tc3_request");
+        let signature: String = Self::hmac_sha256(&k_signing, string_to_sign.as_bytes())
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
+        let authorization = format!(
+            "TC3-HMAC-SHA256 Credential={}/{}/tmt/tc3_request, SignedHeaders=content-type;host;x-tc-action, Signature={}",
+            self.secret_id, date, signature
+        );
+
+        let resp: serde_json::Value = self
+            .client
+            .post(format!("https://{}", host))
+            .header("X-TC-Action", action)
+            .header("X-TC-Version", version)
+            .header("X-TC-Timestamp", timestamp.to_string())
+            .header("Content-Type", "application/json")
+            .header("Host", host)
+            .header("Authorization", authorization)
+            .body(payload)
+            .send()
+            .await
+            .map_err(|e| format!("腾讯云翻译请求失败: {e}"))?
+            .json()
+            .await
+            .map_err(|e| format!("腾讯云翻译响应解析失败: {e}"))?;
+
+        if let Some(err) = resp.get("Error") {
+            let code = err.get("Code").and_then(|v| v.as_str()).unwrap_or("");
+            let message = err.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+            return Err(format!("腾讯云翻译失败: {message}（{code}）"));
+        }
+
+        resp.get("TargetText")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| "腾讯云翻译响应格式异常".to_string())
+    }
+}
+
+// ============ 阿里云翻译引擎（RPC HMAC-SHA1 签名） ============
+
+pub struct AliEngine {
+    access_key_id: String,
+    access_key_secret: String,
+    client: reqwest::Client,
+}
+
+impl AliEngine {
+    pub fn new(access_key_id: &str, access_key_secret: &str) -> Self {
+        Self {
+            access_key_id: access_key_id.to_string(),
+            access_key_secret: access_key_secret.to_string(),
+            client: reqwest::Client::new(),
+        }
+    }
+
+    /// RFC3986 百分号编码（POST表单签名专用）
+    fn percent_encode(s: &str) -> String {
+        let mut out = String::new();
+        for b in s.bytes() {
+            match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    out.push(b as char)
+                }
+                _ => out.push_str(&format!("%{:02X}", b)),
+            }
+        }
+        out
+    }
+
+    fn hmac_sha1(key: &[u8], data: &[u8]) -> Vec<u8> {
+        use hmac::{Hmac, Mac};
+        type Sha1Hmac = Hmac<sha1::Sha1>;
+        let mut mac = Sha1Hmac::new_from_slice(key).expect("HMAC接受任意长度密钥");
+        mac.update(data);
+        mac.finalize().into_bytes().to_vec()
+    }
+}
+
+#[async_trait::async_trait]
+impl TranslationEngine for AliEngine {
+    fn name(&self) -> &str {
+        "阿里云翻译"
+    }
+
+    fn engine_type(&self) -> EngineType {
+        EngineType::Ali
+    }
+
+    fn is_configured(&self) -> bool {
+        !self.access_key_id.is_empty() && !self.access_key_secret.is_empty()
+    }
+
+    async fn translate(&self, text: &str, from: &str, to: &str) -> Result<String, String> {
+        use base64::Engine as _;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let nonce = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos().to_string())
+            .unwrap_or_else(|_| "0".to_string());
+
+        let mut params: Vec<(String, String)> = vec![
+            ("AccessKeyId".to_string(), self.access_key_id.clone()),
+            ("Action".to_string(), "TranslateGeneral".to_string()),
+            ("Format".to_string(), "JSON".to_string()),
+            ("Scene".to_string(), "general".to_string()),
+            ("SignatureMethod".to_string(), "HMAC-SHA1".to_string()),
+            ("SignatureNonce".to_string(), nonce),
+            ("SignatureVersion".to_string(), "1.0".to_string()),
+            ("SourceLanguage".to_string(), from.to_string()),
+            ("SourceText".to_string(), text.to_string()),
+            ("TargetLanguage".to_string(), to.to_string()),
+            (
+                "Timestamp".to_string(),
+                format!("{}T{:02}:{:02}:{:02}Z", Self::utc_date(now), now % 86400 / 3600, now % 3600 / 60, now % 60),
+            ),
+            ("Version".to_string(), "2018-10-12".to_string()),
+        ];
+        params.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // 签名：POST&%2F&percentEncode(规范查询串)
+        let canonical: String = params
+            .iter()
+            .map(|(k, v)| {
+                format!(
+                    "{}={}",
+                    Self::percent_encode(k),
+                    Self::percent_encode(v)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("&");
+        let string_to_sign = format!(
+            "POST&{}&{}",
+            Self::percent_encode("/"),
+            Self::percent_encode(&canonical)
+        );
+        let signature = base64::engine::general_purpose::STANDARD.encode(Self::hmac_sha1(
+            format!("{}&", self.access_key_secret).as_bytes(),
+            string_to_sign.as_bytes(),
+        ));
+        params.push(("Signature".to_string(), signature));
+
+        let resp: serde_json::Value = self
+            .client
+            .post("https://mt.aliyuncs.com")
+            .form(&params)
+            .send()
+            .await
+            .map_err(|e| format!("阿里云翻译请求失败: {e}"))?
+            .json()
+            .await
+            .map_err(|e| format!("阿里云翻译响应解析失败: {e}"))?;
+
+        if resp.get("Data").is_none() {
+            let code = resp.get("Code").map(|v| v.to_string()).unwrap_or_default();
+            let message = resp
+                .get("Message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("未知错误");
+            return Err(format!("阿里云翻译失败: {message}（{code}）"));
+        }
+
+        resp.pointer("/Data/Translated")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| "阿里云翻译响应格式异常".to_string())
+    }
+}
+
+// 腾讯/阿里共用的UTC日期（YYYY-MM-DD）
+impl AliEngine {
+    fn utc_date(secs: u64) -> String {
+        TencentEngine::utc_date(secs)
     }
 }
 

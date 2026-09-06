@@ -2,8 +2,8 @@
 //! 状态管理：TranslationManager 存入 Tauri 状态，跨命令共享
 
 use crate::engines::{
-    preprocess_text, BaiduEngine, DeepLEngine, EngineInfo, NiutransEngine, OpenAICompatEngine,
-    TranslationManager, TranslationResult, YoudaoEngine,
+    preprocess_text, AliEngine, BaiduEngine, DeepLEngine, EngineInfo, NiutransEngine,
+    OpenAICompatEngine, TencentEngine, TranslationManager, TranslationResult, YoudaoEngine,
 };
 use serde::{Deserialize, Serialize};
 
@@ -14,7 +14,7 @@ pub struct AppState {
 
 /// 从设置中的API密钥构建引擎管理器（术语库从 terms.json 加载）；
 /// 只构建「在线翻译引擎」多选框中启用的引擎（优先级=列表顺序），与截图菜单双向同步。
-/// 小牛/DeepL/自定义OpenAI兼容为本轮接入的供应商；腾讯/阿里等待后续实现
+/// 已接入：百度/有道/腾讯云/阿里云/小牛/DeepL/自定义OpenAI兼容
 pub fn build_manager(settings: &crate::system::AppSettings) -> TranslationManager {
     let enabled = |id: &str| settings.online_apis.iter().any(|s| s == id);
     let providers = &settings.providers;
@@ -30,6 +30,18 @@ pub fn build_manager(settings: &crate::system::AppSettings) -> TranslationManage
         engines.push(Box::new(YoudaoEngine::new(
             &settings.youdao_app_key,
             &settings.youdao_app_secret,
+        )));
+    }
+    if enabled("tencent") {
+        engines.push(Box::new(TencentEngine::new(
+            &providers.tencent_secret_id,
+            &providers.tencent_secret_key,
+        )));
+    }
+    if enabled("ali") {
+        engines.push(Box::new(AliEngine::new(
+            &providers.ali_access_key_id,
+            &providers.ali_access_key_secret,
         )));
     }
     if enabled("niutrans") {

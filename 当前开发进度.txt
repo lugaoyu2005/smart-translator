@@ -65,3 +65,6 @@ Win11 右键菜单	🔍 方案确定	single-instance + 注册表 shell 菜单 + 
 菜单顺序修复	✅ 完成	截图菜单按components数组顺序渲染（原按JSX写死顺序导致排序不生效）；设置页按保存顺序显示
 保存弹窗	✅ 完成	保存成功改GUI提示（遮罩点击关闭，仅居中标题"设置已保存"）；失败仍alert
 官网链接	✅ 完成	百度/有道API标题旁大号→按钮，默认浏览器打开官网（open_external命令，仅http/https）
+供应商翻译实现	✅ 完成	小牛翻译（REST，注册有免费额度）、DeepL（Free版每月50万字符，fx密钥自动区分域名）、自定义OpenAI兼容（Base URL+Key+模型名，可接DeepSeek/Kimi/Ollama等）；TranslationManager重构为通用引擎列表，与在线引擎多选框/截图菜单打通
+RapidOCR本地OCR	✅ 完成	PaddleOCR PP-OCRv6 模型+ONNX Runtime推理，完全离线免费无限量；首次使用自动下载模型(约15MB)到 models/；关方向分类提速；设置页已转"已接入"
+待接入供应商	📋 框架就绪	腾讯云(TC3签名)/阿里云(RPC签名)/火山引擎——签名复杂，框架和配置已就绪，翻译实现待后续

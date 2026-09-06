@@ -19,8 +19,8 @@ const ONLINE_PROVIDERS = [
   { id: "youdao", label: "有道智云", status: "" },
   { id: "niutrans", label: "小牛翻译", status: "已接入" },
   { id: "deepl", label: "DeepL", status: "已接入" },
-  { id: "tencent", label: "腾讯云翻译", status: "未接入" },
-  { id: "ali", label: "阿里云翻译", status: "未接入" },
+  { id: "tencent", label: "腾讯云翻译", status: "已接入" },
+  { id: "ali", label: "阿里云翻译", status: "已接入" },
   { id: "custom", label: "自定义（OpenAI兼容）", status: "已接入" },
 ];
 
