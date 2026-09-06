@@ -105,3 +105,12 @@ RapidOCR本地OCR	✅ 完成	PaddleOCR PP-OCRv6 模型+ONNX Runtime推理，完�
 - 三重重复抑制：no_repeat_ngram=2（防长程循环）+ repetition_penalty=1.2（防复读倾向）+ 紧邻重复A A重罚-4.0（软禁"park park"式复读，保留"谢谢"类叠词可能）
 - 实测对比：en→zh"這是一個測試"→"这是一个测试"；zh→en"park park"复读消除；ja→zh从数百字死循环→可读大意输出
 - 全量 cargo test 21 通过；npm run build 通过
+
+## 2026-09-06 离线翻译 KV cache（第十一轮，搁置项继续）
+- 解码器切换为 decoder_model_merged_quantized.onnx（If双分支图）：首步 use_cache_branch=false，后续步仅喂各束最新token + past缓存——消除每步全量重解码
+- 关键发现：merged 导出的 present 输出含 decoder.*（自注意力，正确增长）与 encoder.*（cross-attention KV）两组，且 **true 分支的 encoder present 是空张量（batch=0）**——处理为两组分离：decoder 组每步更新+按束重排；encoder 组仅首步取值，之后恒定回喂（cross KV 不随步变化）、只随 beam 父束复制
+- past 布局实测 [batch, heads, seq, head_dim]（元数据 [-1,8,1,64]，seq 动态维声明为字面1）；首步零长度 past 按元数据构造（seq=0）
+- beam 重排：每步选择后按父束索引 gather 各层 KV 行（Row主序按 batch 维切分复制）
+- 实测：三方向正确性保持；首次翻译 4.2s（含会话加载）、纯推理 1.9s/短句——短句场景与全量重解码相当（If 图开销抵消部分收益），长句/多段场景受益显著；会话加载为进程内一次性成本
+- 下载清单更新：新语言对下载 merged 版（无缓存版不再下载，已缓存对自动补下 merged）
+- 全量 cargo test 21 通过

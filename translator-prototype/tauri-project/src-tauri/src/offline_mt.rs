@@ -236,8 +236,8 @@ async fn ensure_pair_models(from: &str, to: &str) -> Result<PathBuf, String> {
             dir.join("encoder_model_quantized.onnx"),
         ),
         (
-            "onnx/decoder_model_quantized.onnx",
-            dir.join("decoder_model_quantized.onnx"),
+            "onnx/decoder_model_merged_quantized.onnx",
+            dir.join("decoder_model_merged_quantized.onnx"),
         ),
     ];
     for (src, dest) in files {
@@ -268,6 +268,10 @@ struct MtPair {
     dec_in_mask: String,
     dec_in_hidden: String,
     dec_out: String,
+    /// KV cache（decoder_model_merged）：use_cache_branch 开关输入
+    cache_flag_in: String,
+    /// (past输入名, present输出名)，按层排序一一对应
+    past_io: Vec<(String, String)>,
     pad_id: u32, // Marian decoder 起始 token
     eos_id: u32,
 }
@@ -318,12 +322,39 @@ fn load_pair(dir: &PathBuf) -> Result<Arc<Mutex<MtPair>>, String> {
             .map_err(|e| format!("ORT模型加载失败（{}）: {e}", path.display()))
     };
     let encoder = build(&dir.join("encoder_model_quantized.onnx"))?;
-    let decoder = build(&dir.join("decoder_model_quantized.onnx"))?;
+    let decoder = build(&dir.join("decoder_model_merged_quantized.onnx"))?;
 
     let enc_inputs: Vec<String> = encoder.inputs().iter().map(|i| i.name().to_string()).collect();
     let enc_outputs: Vec<String> = encoder.outputs().iter().map(|o| o.name().to_string()).collect();
     let dec_inputs: Vec<String> = decoder.inputs().iter().map(|i| i.name().to_string()).collect();
     let dec_outputs: Vec<String> = decoder.outputs().iter().map(|o| o.name().to_string()).collect();
+
+    // KV cache 必需输入：use_cache_branch 开关 + past_key_values.N.*（与 present.N.* 成对）
+    let cache_flag_in = find_input(&dec_inputs, "use_cache_branch")?;
+    let mut past_in: Vec<String> = dec_inputs
+        .iter()
+        .filter(|n| n.starts_with("past_key_values"))
+        .cloned()
+        .collect();
+    past_in.sort();
+    let mut past_io: Vec<(String, String)> = Vec::with_capacity(past_in.len());
+    for n in past_in {
+        let suffix = &n["past_key_values.".len()..];
+        let out = format!("present.{suffix}");
+        if !dec_outputs.contains(&out) {
+            return Err(format!("解码器缺少 past 对应输出 {out}（模型格式异常）"));
+        }
+        past_io.push((n, out));
+    }
+    if past_io.is_empty() {
+        return Err("解码器没有 past_key_values 输入（非 merged 格式，无法启用 KV cache）".to_string());
+    }
+    // logits 输出 = 非 present 输出的第一个
+    let dec_out_name = dec_outputs
+        .iter()
+        .find(|o| !o.starts_with("present"))
+        .cloned()
+        .ok_or("解码器没有 logits 输出（模型文件异常）")?;
 
     Ok(Arc::new(Mutex::new(MtPair {
         tokenizer,
@@ -339,10 +370,9 @@ fn load_pair(dir: &PathBuf) -> Result<Arc<Mutex<MtPair>>, String> {
         dec_in_ids: find_input(&dec_inputs, "input_ids")?,
         dec_in_mask: find_input(&dec_inputs, "mask")?,
         dec_in_hidden: find_input(&dec_inputs, "hidden_states")?,
-        dec_out: dec_outputs
-            .first()
-            .cloned()
-            .ok_or("解码器没有输出（模型文件异常）")?,
+        dec_out: dec_out_name,
+        cache_flag_in,
+        past_io,
         pad_id,
         eos_id,
     })))
@@ -389,53 +419,210 @@ fn run_encoder(
     Ok((data[..total].to_vec(), l, d))
 }
 
-/// 解码器批量前向：decoder_input_ids=[B,t]（各束长度相同，同步推进），
-/// 返回各束最后一步的 logits [B,V]
-fn run_decoder_batch(
+/// 自注意力 KV cache（跨步携带，免全量重解码）：
+/// shapes/data 按 past_io 顺序一一对应，data 为扁平行主序
+struct PastTensors {
+    shapes: Vec<Vec<usize>>,
+    data: Vec<Vec<f32>>,
+}
+
+impl PastTensors {
+    /// 按 beam 重组：新第 r 束继承父束 parents[r] 的缓存（束被选择/淘汰时调用）
+    fn reordered(&self, parents: &[usize]) -> PastTensors {
+        let mut shapes = Vec::with_capacity(self.shapes.len());
+        let mut data = Vec::with_capacity(self.data.len());
+        for (shape, tensor) in self.shapes.iter().zip(&self.data) {
+            let b = shape[0].max(1);
+            let row: usize = shape.iter().product::<usize>() / b;
+            let mut nd = Vec::with_capacity(parents.len() * row);
+            for &p in parents {
+                nd.extend_from_slice(&tensor[p * row..(p + 1) * row]);
+            }
+            let mut nshape = shape.clone();
+            nshape[0] = parents.len();
+            shapes.push(nshape);
+            data.push(nd);
+        }
+        PastTensors { shapes, data }
+    }
+}
+
+/// 从会话元数据读 past 输入的静态形状构造零长度缓存（首步喂给 merged 模型的空 past）。
+/// 动态维（-1）：第0维=批大小，其余（自注意力序列长度）=0；读不到元数据时退回 Marian 标准 8头×64维
+fn zero_past(pair: &MtPair, b: usize) -> PastTensors {
+    let mut shapes = Vec::with_capacity(pair.past_io.len());
+    let mut data = Vec::with_capacity(pair.past_io.len());
+    for (in_name, _) in &pair.past_io {
+        let meta: Vec<i64> = pair
+            .decoder
+            .inputs()
+            .iter()
+            .find(|o| o.name() == in_name)
+            .and_then(|o| match o.dtype() {
+                ort::value::ValueType::Tensor { shape, .. } => {
+                    Some(shape.iter().map(|&d| d).collect::<Vec<i64>>())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| vec![-1, 8, -1, 64]);
+        // optimum/Xenova merged 导出的 self-attn past 固定布局 [batch, heads, seq, head_dim]
+        // （实测元数据 [-1, 8, 1, 64]，seq 动态维声明为字面1）：首维=当前批大小，seq 置0，其余保留
+        let shape: Vec<usize> = meta
+            .iter()
+            .enumerate()
+            .map(|(i, &d)| {
+                if i == 0 {
+                    b
+                } else if i == 2 {
+                    0
+                } else {
+                    d.max(1) as usize
+                }
+            })
+            .collect();
+        let total: usize = shape.iter().product();
+        shapes.push(shape);
+        data.push(vec![0.0; total]);
+    }
+    PastTensors { shapes, data }
+}
+
+/// 解码器前向（缓存模式）：只喂各束最新 token + 上一步 past，返回各束 logits [V] 与新 past
+fn run_decoder_cached(
+    pair: &mut MtPair,
+    dec_last: &[i64],
+    dec_past: PastTensors,
+    enc_past: &PastTensors,
+    enc_hidden: &[f32],
+    enc_len: usize,
+    enc_dim: usize,
+    attn: &[i64],
+) -> Result<(Vec<Vec<f32>>, PastTensors, PastTensors), String> {
+    let b = dec_last.len();
+    let dec_in = ort::value::Tensor::from_array((vec![b, 1usize], dec_last.to_vec()))
+        .map_err(|e| e.to_string())?;
+    let mut hidden = Vec::with_capacity(b * enc_len * enc_dim);
+    let mut attn_b = Vec::with_capacity(b * enc_len);
+    for _ in 0..b {
+        hidden.extend_from_slice(enc_hidden);
+        attn_b.extend_from_slice(attn);
+    }
+    let dec_hidden = ort::value::Tensor::from_array((vec![b, enc_len, enc_dim], hidden))
+        .map_err(|e| e.to_string())?;
+    let dec_attn = ort::value::Tensor::from_array((vec![b, enc_len], attn_b))
+        .map_err(|e| e.to_string())?;
+    let flag = ort::value::Tensor::from_array((vec![1usize], vec![true])).map_err(|e| e.to_string())?;
+
+    let mut inputs: Vec<(&str, ort::session::SessionInputValue)> = Vec::new();
+    inputs.push((pair.dec_in_ids.as_str(), dec_in.into()));
+    inputs.push((pair.dec_in_mask.as_str(), dec_attn.into()));
+    inputs.push((pair.dec_in_hidden.as_str(), dec_hidden.into()));
+    inputs.push((pair.cache_flag_in.as_str(), flag.into()));
+    // past_io 顺序含 decoder/encoder 混排；按名字路由到对应组取数
+    let mut dec_i = 0usize;
+    let mut enc_i = 0usize;
+    for (in_name, _) in pair.past_io.iter() {
+        let is_enc = in_name.contains(".encoder.");
+        let src_past = if is_enc { &enc_past } else { &dec_past };
+        let i = if is_enc { enc_i } else { dec_i };
+        let t = ort::value::Tensor::from_array((src_past.shapes[i].clone(), src_past.data[i].clone()))
+            .map_err(|e| e.to_string())?;
+        inputs.push((in_name.as_str(), t.into()));
+        if is_enc { enc_i += 1; } else { dec_i += 1; }
+    }
+    // outputs 借用 session：先把只读元数据取出，避免与 &mut pair 冲突
+    let dec_out = pair.dec_out.clone();
+    let past_io = pair.past_io.clone();
+    let outputs = pair
+        .decoder
+        .run(inputs)
+        .map_err(|e| format!("解码器推理失败: {e}"))?;
+    read_logits_and_past(&dec_out, &past_io, &outputs, b)
+}
+
+/// 解码器前向（首步）：use_cache_branch=false 走全量分支（仅1个起始token），拿到首份past
+fn run_decoder_first(
     pair: &mut MtPair,
     dec_ids: &[Vec<i64>],
     enc_hidden: &[f32],
     enc_len: usize,
     enc_dim: usize,
     attn: &[i64],
-) -> Result<Vec<Vec<f32>>, String> {
+) -> Result<(Vec<Vec<f32>>, PastTensors, PastTensors), String> {
     let b = dec_ids.len();
-    let t = dec_ids[0].len();
-    let dec_flat: Vec<i64> = dec_ids.concat();
-    // 编码器输出对全部束广播（B 份相同 hidden）
+    let flat: Vec<i64> = dec_ids.concat();
     let mut hidden = Vec::with_capacity(b * enc_len * enc_dim);
-    for _ in 0..b {
-        hidden.extend_from_slice(enc_hidden);
-    }
     let mut attn_b = Vec::with_capacity(b * enc_len);
     for _ in 0..b {
+        hidden.extend_from_slice(enc_hidden);
         attn_b.extend_from_slice(attn);
     }
-    let dec_in = ort::value::Tensor::from_array((vec![b, t], dec_flat))
-        .map_err(|e| e.to_string())?;
+    let dec_in =
+        ort::value::Tensor::from_array((vec![b, dec_ids[0].len()], flat)).map_err(|e| e.to_string())?;
     let dec_hidden = ort::value::Tensor::from_array((vec![b, enc_len, enc_dim], hidden))
         .map_err(|e| e.to_string())?;
     let dec_attn = ort::value::Tensor::from_array((vec![b, enc_len], attn_b))
         .map_err(|e| e.to_string())?;
+    let flag = ort::value::Tensor::from_array((vec![1usize], vec![false])).map_err(|e| e.to_string())?;
+
+    let mut inputs: Vec<(&str, ort::session::SessionInputValue)> = Vec::new();
+    inputs.push((pair.dec_in_ids.as_str(), dec_in.into()));
+    inputs.push((pair.dec_in_mask.as_str(), dec_attn.into()));
+    inputs.push((pair.dec_in_hidden.as_str(), dec_hidden.into()));
+    inputs.push((pair.cache_flag_in.as_str(), flag.into()));
+    // outputs 借用 session：先把只读元数据取出，避免与 &mut pair 冲突
+    let dec_out = pair.dec_out.clone();
+    let past_io = pair.past_io.clone();
+    let zero = zero_past(pair, b);
+    for (i, (in_name, _)) in past_io.iter().enumerate() {
+        let t = ort::value::Tensor::from_array((zero.shapes[i].clone(), zero.data[i].clone()))
+            .map_err(|e| e.to_string())?;
+        inputs.push((in_name.as_str(), t.into()));
+    }
     let outputs = pair
         .decoder
-        .run(ort::inputs![
-            pair.dec_in_ids.as_str() => dec_in,
-            pair.dec_in_mask.as_str() => dec_attn,
-            pair.dec_in_hidden.as_str() => dec_hidden,
-        ])
+        .run(inputs)
         .map_err(|e| format!("解码器推理失败: {e}"))?;
-    let (shape, data) = outputs[pair.dec_out.as_str()]
+    read_logits_and_past(&dec_out, &past_io, &outputs, b)
+}
+
+/// 从输出提取各束最后一步 logits 与 present KV cache
+fn read_logits_and_past(
+    dec_out: &str,
+    past_io: &[(String, String)],
+    outputs: &ort::session::SessionOutputs,
+    b: usize,
+) -> Result<(Vec<Vec<f32>>, PastTensors, PastTensors), String> {
+    let (shape, data) = outputs[dec_out]
         .try_extract_tensor::<f32>()
         .map_err(|e| format!("解码器输出提取失败: {e}"))?;
     let v = *shape.last().ok_or("logits维度异常")? as usize;
-    // [B, t, V]：取各批次的最后一步
-    let mut rows = Vec::with_capacity(b);
+    // [B, t, V]：各束最后一步
+    let steps = shape.iter().map(|&d| d as usize).product::<usize>() / v / b.max(1);
+    let mut logits = Vec::with_capacity(b);
     for bi in 0..b {
-        let start = (bi * t + (t - 1)) * v;
-        rows.push(data[start..start + v].to_vec());
+        let start = (bi * steps + (steps - 1)) * v;
+        logits.push(data[start..start + v].to_vec());
     }
-    Ok(rows)
+    // 拆两组：decoder.*（自注意力，每步增长）与 encoder.*（cross-attention KV，
+    // 仅首步输出有效；true分支的encoder present是空张量，需沿用首步值恒定回喂）
+    let mut dec = (Vec::new(), Vec::new());
+    let mut enc = (Vec::new(), Vec::new());
+    for (_, out_name) in past_io {
+        let (pshape, pdata) = outputs[out_name.as_str()]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| format!("past输出提取失败({out_name}): {e}"))?;
+        let shape: Vec<usize> = pshape.iter().map(|&d| d as usize).collect();
+        let data = pdata.to_vec();
+        let target = if out_name.contains(".encoder.") { &mut enc } else { &mut dec };
+        target.0.push(shape);
+        target.1.push(data);
+    }
+    Ok((
+        logits,
+        PastTensors { shapes: dec.0, data: dec.1 },
+        PastTensors { shapes: enc.0, data: enc.1 },
+    ))
 }
 
 /// 繁→简转换：OPUS-MT en→zh 语料偏繁体，目标语言为中文时统一转简体。
@@ -535,14 +722,34 @@ fn beam_decode(pair: &mut MtPair, text: &str) -> Result<String, String> {
     let start = pair.pad_id as i64;
     let mut beams = vec![Hypo { tokens: vec![start], logprob: 0.0 }];
     let mut completed: Vec<Hypo> = Vec::new();
+    // 自注意力缓存（每步更新）+ cross-attention缓存（首步取值后恒定，仅随束复制）
+    let mut dec_past: Option<PastTensors> = None;
+    let mut enc_past: Option<PastTensors> = None;
 
     for _step in 0..MAX_NEW_TOKENS {
         if beams.is_empty() {
             break;
         }
-        let dec_ids: Vec<Vec<i64>> = beams.iter().map(|b| b.tokens.clone()).collect();
-        let logits_batch =
-            run_decoder_batch(pair, &dec_ids, &hidden, enc_len, enc_dim, &attn)?;
+        // 首步走全量分支（仅起始token），并取回有效的 cross-attention KV；
+        // 之后只喂各束最新token + 上步缓存（encoder 输出为空，忽略）
+        let is_first = dec_past.is_none();
+        let (logits_batch, new_dec) = if is_first {
+            let dec_ids: Vec<Vec<i64>> = beams.iter().map(|b| b.tokens.clone()).collect();
+            let (l, nd, ne) = run_decoder_first(pair, &dec_ids, &hidden, enc_len, enc_dim, &attn)?;
+            enc_past = Some(ne);
+            (l, nd)
+        } else {
+            let dp = dec_past
+                .take()
+                .ok_or_else(|| "解码缓存状态异常".to_string())?;
+            let ep = enc_past
+                .as_ref()
+                .ok_or_else(|| "解码缓存状态异常".to_string())?;
+            let last: Vec<i64> = beams.iter().map(|b| *b.tokens.last().unwrap()).collect();
+            let (l, nd, _ne_empty) =
+                run_decoder_cached(pair, &last, dp, ep, &hidden, enc_len, enc_dim, &attn)?;
+            (l, nd)
+        };
 
         // 每束 log_softmax 后取局部 top-K，再合并全局排序
         let k = (NUM_BEAMS * 2).min(logits_batch[0].len());
@@ -577,6 +784,7 @@ fn beam_decode(pair: &mut MtPair, text: &str) -> Result<String, String> {
         });
 
         let mut next_beams: Vec<Hypo> = Vec::new();
+        let mut parents: Vec<usize> = Vec::new();
         for c in cands {
             if next_beams.len() >= NUM_BEAMS {
                 break;
@@ -586,9 +794,13 @@ fn beam_decode(pair: &mut MtPair, text: &str) -> Result<String, String> {
             if c.token == pair.eos_id {
                 completed.push(Hypo { tokens, logprob: c.score });
             } else {
+                parents.push(c.parent);
                 next_beams.push(Hypo { tokens, logprob: c.score });
             }
         }
+        // 缓存按"谁被保留"重排；encoder 组仅按父束复制（内容恒定），供下一步使用
+        dec_past = Some(new_dec.reordered(&parents));
+        enc_past = Some(enc_past.take().ok_or("解码缓存状态异常")?.reordered(&parents));
         beams = next_beams;
         if completed.len() >= NUM_BEAMS {
             break;
@@ -737,8 +949,13 @@ mod tests {
     async fn test_offline_mt_en2zh() {
         std::env::set_var("SMART_TRANSLATOR_MODELS_DIR", "target/mt-models");
         let engine = OfflineMtEngine::new();
+        let t0 = std::time::Instant::now();
         let out = engine.translate("Hello world, this is a test.", "en", "zh").await.unwrap();
-        println!("[offline-mt] en→zh: {out}");
+        let t1 = std::time::Instant::now();
+        println!("[offline-mt] en→zh 首次(含加载) {:?}: {out}", t0.elapsed());
+        let out2 = engine.translate("The weather is nice today.", "en", "zh").await.unwrap();
+        println!("[offline-mt] en→zh 纯推理 {:?}: {out2}", t1.elapsed());
+        assert!(out2.chars().any(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c)));
         assert!(out.chars().any(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c)));
     }
 
