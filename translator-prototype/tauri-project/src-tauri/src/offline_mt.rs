@@ -22,9 +22,14 @@ pub static APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
 const HF_BASES: [&str; 2] = ["https://hf-mirror.com", "https://huggingface.co"];
 const MAX_SRC_TOKENS: usize = 500; // Marian 位置编码上限 512，留余量
 const MAX_NEW_TOKENS: usize = 256;
-/// 重复抑制：禁止生成已出现过的 n-gram（防"貓貓貓…"死循环）+ 已生成token概率衰减（防"park park"式复读）
-const NO_REPEAT_NGRAM: usize = 3;
+/// 重复抑制：n=2 禁止一切相邻二元组重复（OPUS-MT 小模型复读倾向强，
+/// 紧邻重复几乎无合法场景；代价是牺牲"谢谢/慢慢"类叠词，可接受）+ token概率衰减
+const NO_REPEAT_NGRAM: usize = 2;
 const REPETITION_PENALTY: f32 = 1.2;
+/// 紧邻重复（A A）重罚：小模型"park park/貓貓貓"复读的主因；软禁保留"谢谢"类叠词
+const ADJACENT_REPEAT_PENALTY: f32 = 4.0;
+/// beam search：束宽（HF 对 Marian 类模型的推荐值；批量化实现，速度损失小）
+const NUM_BEAMS: usize = 4;
 /// 下载进度事件节流：每 8MB 最多推送一次
 const DOWNLOAD_EMIT_STEP: u64 = 8 * 1024 * 1024;
 
@@ -384,22 +389,33 @@ fn run_encoder(
     Ok((data[..total].to_vec(), l, d))
 }
 
-/// 解码器单步前向：decoder_input_ids=[start]+已生成，返回最后一步 logits 行
-fn run_decoder_step(
+/// 解码器批量前向：decoder_input_ids=[B,t]（各束长度相同，同步推进），
+/// 返回各束最后一步的 logits [B,V]
+fn run_decoder_batch(
     pair: &mut MtPair,
-    dec_ids: &[i64],
+    dec_ids: &[Vec<i64>],
     enc_hidden: &[f32],
     enc_len: usize,
     enc_dim: usize,
     attn: &[i64],
-) -> Result<Vec<f32>, String> {
-    let t = dec_ids.len();
-    let dec_in = ort::value::Tensor::from_array((vec![1usize, t], dec_ids.to_vec()))
+) -> Result<Vec<Vec<f32>>, String> {
+    let b = dec_ids.len();
+    let t = dec_ids[0].len();
+    let dec_flat: Vec<i64> = dec_ids.concat();
+    // 编码器输出对全部束广播（B 份相同 hidden）
+    let mut hidden = Vec::with_capacity(b * enc_len * enc_dim);
+    for _ in 0..b {
+        hidden.extend_from_slice(enc_hidden);
+    }
+    let mut attn_b = Vec::with_capacity(b * enc_len);
+    for _ in 0..b {
+        attn_b.extend_from_slice(attn);
+    }
+    let dec_in = ort::value::Tensor::from_array((vec![b, t], dec_flat))
         .map_err(|e| e.to_string())?;
-    let dec_hidden =
-        ort::value::Tensor::from_array((vec![1usize, enc_len, enc_dim], enc_hidden.to_vec()))
-            .map_err(|e| e.to_string())?;
-    let dec_attn = ort::value::Tensor::from_array((vec![1usize, enc_len], attn.to_vec()))
+    let dec_hidden = ort::value::Tensor::from_array((vec![b, enc_len, enc_dim], hidden))
+        .map_err(|e| e.to_string())?;
+    let dec_attn = ort::value::Tensor::from_array((vec![b, enc_len], attn_b))
         .map_err(|e| e.to_string())?;
     let outputs = pair
         .decoder
@@ -413,15 +429,64 @@ fn run_decoder_step(
         .try_extract_tensor::<f32>()
         .map_err(|e| format!("解码器输出提取失败: {e}"))?;
     let v = *shape.last().ok_or("logits维度异常")? as usize;
-    let steps: usize = shape.iter().map(|&d| d as usize).product::<usize>() / v;
-    let start = (steps - 1) * v;
-    Ok(data[start..start + v].to_vec())
+    // [B, t, V]：取各批次的最后一步
+    let mut rows = Vec::with_capacity(b);
+    for bi in 0..b {
+        let start = (bi * t + (t - 1)) * v;
+        rows.push(data[start..start + v].to_vec());
+    }
+    Ok(rows)
+}
+
+/// 繁→简转换：OPUS-MT en→zh 语料偏繁体，目标语言为中文时统一转简体。
+/// 用 Windows 系统自带 LCMapString（全字表、零维护）；非 Windows 平台原样返回
+#[cfg(target_os = "windows")]
+fn to_simplified(text: &str) -> String {
+    use windows::Win32::Globalization::{LCMapStringW, LCMAP_SIMPLIFIED_CHINESE};
+    if text.is_empty() {
+        return text.to_string();
+    }
+    let src_wide: Vec<u16> = text.encode_utf16().collect();
+    const ZH_CN: u32 = 0x0804; // zh-CN
+    unsafe {
+        // 第一次调用取目标长度
+        let len = LCMapStringW(ZH_CN, LCMAP_SIMPLIFIED_CHINESE, &src_wide, None, 0);
+        if len <= 0 {
+            return text.to_string();
+        }
+        let mut dest = vec![0u16; len as usize];
+        let written = LCMapStringW(
+            ZH_CN,
+            LCMAP_SIMPLIFIED_CHINESE,
+            &src_wide,
+            Some(windows::core::PWSTR(dest.as_mut_ptr())),
+            len,
+        );
+        if written <= 0 {
+            return text.to_string();
+        }
+        dest.truncate(written as usize);
+        String::from_utf16_lossy(&dest)
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn to_simplified(text: &str) -> String {
+    text.to_string()
 }
 
 /// 重复抑制（transformers 标准手段）：
 /// 1) no_repeat_ngram_size：历史中出现过同前缀 n-gram 时禁选其尾token（掐断死循环）
 /// 2) repetition_penalty：全部已生成token的logit衰减（CTRL论文式，压轻度复读）
 fn suppress_repetition(logits: &mut [f32], generated: &[i64]) {
+    if let Some(&last) = generated.last() {
+        if last >= 0 {
+            let u = last as usize;
+            if u < logits.len() {
+                logits[u] -= ADJACENT_REPEAT_PENALTY;
+            }
+        }
+    }
     let n = NO_REPEAT_NGRAM;
     if generated.len() >= n {
         let m = n - 1;
@@ -447,8 +512,9 @@ fn suppress_repetition(logits: &mut [f32], generated: &[i64]) {
     }
 }
 
-/// 贪心解码：逐步生成直到 </s> 或达到上限
-fn greedy_decode(pair: &mut MtPair, text: &str) -> Result<String, String> {
+/// beam search 解码（束宽 NUM_BEAMS，批量化前向）：
+/// 得分=对数概率之和/长度（平均对数概率），EOS 即入完成池，活跃束凑不满/达步数上限时结束
+fn beam_decode(pair: &mut MtPair, text: &str) -> Result<String, String> {
     if text.trim().is_empty() {
         return Ok(String::new());
     }
@@ -462,25 +528,88 @@ fn greedy_decode(pair: &mut MtPair, text: &str) -> Result<String, String> {
 
     let (hidden, enc_len, enc_dim) = run_encoder(pair, &ids, &attn)?;
 
-    let mut generated: Vec<i64> = vec![pair.pad_id as i64]; // decoder 起始 = <pad>
-    let mut result_ids: Vec<u32> = Vec::new();
-    for _ in 0..MAX_NEW_TOKENS {
-        let mut logits = run_decoder_step(pair, &generated, &hidden, enc_len, enc_dim, &attn)?;
-        suppress_repetition(&mut logits, &generated);
-        let next = logits
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(i, _)| i as u32)
-            .ok_or("解码失败：空logits")?;
-        if next == pair.eos_id {
+    struct Hypo {
+        tokens: Vec<i64>, // 含起始 <pad>
+        logprob: f32,
+    }
+    let start = pair.pad_id as i64;
+    let mut beams = vec![Hypo { tokens: vec![start], logprob: 0.0 }];
+    let mut completed: Vec<Hypo> = Vec::new();
+
+    for _step in 0..MAX_NEW_TOKENS {
+        if beams.is_empty() {
             break;
         }
-        generated.push(next as i64);
-        result_ids.push(next);
+        let dec_ids: Vec<Vec<i64>> = beams.iter().map(|b| b.tokens.clone()).collect();
+        let logits_batch =
+            run_decoder_batch(pair, &dec_ids, &hidden, enc_len, enc_dim, &attn)?;
+
+        // 每束 log_softmax 后取局部 top-K，再合并全局排序
+        let k = (NUM_BEAMS * 2).min(logits_batch[0].len());
+        struct Cand {
+            parent: usize,
+            token: u32,
+            score: f32,
+        }
+        let mut cands: Vec<Cand> = Vec::new();
+        for (bi, (beam, logits)) in beams.iter().zip(&logits_batch).enumerate() {
+            let mut logits = logits.clone();
+            suppress_repetition(&mut logits, &beam.tokens);
+            let maxl = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let sum: f32 = logits.iter().map(|&l| (l - maxl).exp()).sum();
+            let log_norm = maxl + sum.ln();
+            let mut idx: Vec<u32> = (0..logits.len() as u32).collect();
+            idx.sort_unstable_by(|&a, &b| {
+                logits[b as usize]
+                    .partial_cmp(&logits[a as usize])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            for t in idx.into_iter().take(k) {
+                cands.push(Cand {
+                    parent: bi,
+                    token: t,
+                    score: beam.logprob + (logits[t as usize] - log_norm),
+                });
+            }
+        }
+        cands.sort_unstable_by(|a, b| {
+            b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let mut next_beams: Vec<Hypo> = Vec::new();
+        for c in cands {
+            if next_beams.len() >= NUM_BEAMS {
+                break;
+            }
+            let mut tokens = beams[c.parent].tokens.clone();
+            tokens.push(c.token as i64);
+            if c.token == pair.eos_id {
+                completed.push(Hypo { tokens, logprob: c.score });
+            } else {
+                next_beams.push(Hypo { tokens, logprob: c.score });
+            }
+        }
+        beams = next_beams;
+        if completed.len() >= NUM_BEAMS {
+            break;
+        }
     }
+    completed.extend(beams); // 未完成的也参与评分
+    if completed.is_empty() {
+        return Err("解码失败：无候选".to_string());
+    }
+    // GNMT 长度惩罚（(5+len)/6）：兼顾防短句偏好与防长输出偏好
+    let score = |h: &Hypo| {
+        let len = (h.tokens.len() - 1).max(1) as f32;
+        h.logprob / ((5.0 + len) / 6.0)
+    };
+    completed.sort_unstable_by(|a, b| {
+        score(b).partial_cmp(&score(a)).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let best = &completed[0];
+    let out_ids: Vec<u32> = best.tokens[1..].iter().map(|&t| t as u32).collect();
     pair.tokenizer
-        .decode(&result_ids, true)
+        .decode(&out_ids, true)
         .map_err(|e| format!("反分词失败: {e}"))
 }
 
@@ -494,7 +623,11 @@ fn translate_blocking(hops: &[(&'static str, &'static str)], text: &str) -> Resu
         };
         let pair = get_pair(f, t, &dir)?;
         let mut p = pair.lock().map_err(|_| "模型会话锁不可用".to_string())?;
-        cur = greedy_decode(&mut p, &cur)?;
+        cur = beam_decode(&mut p, &cur)?;
+    }
+    // OPUS-MT en→zh 语料偏繁体：目标为中文时统一转简体（Windows 系统级转换）
+    if hops.last().map(|(_, t)| *t) == Some("zh") {
+        cur = to_simplified(&cur);
     }
     Ok(cur)
 }
@@ -573,6 +706,15 @@ mod tests {
         assert_eq!(detect_lang("こんにちは世界"), "ja");
         assert_eq!(detect_lang("안녕하세요"), "ko");
         assert_eq!(detect_lang("Привет мир"), "ru");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_to_simplified() {
+        assert_eq!(to_simplified("這是一個測試"), "这是一个测试");
+        assert_eq!(to_simplified("我喜歡貓"), "我喜欢猫");
+        // 简体/标点原样保留
+        assert_eq!(to_simplified("你好，世界！hello"), "你好，世界！hello");
     }
 
     #[test]

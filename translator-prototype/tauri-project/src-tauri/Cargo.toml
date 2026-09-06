@@ -48,6 +48,7 @@ windows = { version = "0.61", features = [
     "Graphics_Imaging",
     "Storage_Streams",
     "Globalization",
+    "Win32_Globalization",
 ] }
 # 后续按需启用：
 # tesseract = "0.10"  # 备选OCR引擎

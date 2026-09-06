@@ -98,3 +98,10 @@ RapidOCR本地OCR	✅ 完成	PaddleOCR PP-OCRv6 模型+ONNX Runtime推理，完�
 - 端到端实测通过：en→zh / zh→en / ja→zh(pivot) 三方向真实下载+推理（模型缓存后单段约1-3秒）
 - 已知局限（后续项）：en→zh输出偏繁体（OPUS-MT语料倾向，可加简繁转换表）；贪心解码偶有"park park"级复读（beam search可根治）；截图翻译多段文本逐段解码偏慢
 - 全量 cargo test 20 通过；npm run build 通过
+
+## 2026-09-06 离线翻译质量三件套（第十轮，搁置项继续）
+- 繁→简转换：en→zh 输出统一转简体，用 Windows 系统级 LCMapString（LCMAP_SIMPLIFIED_CHINESE，全字表零维护），目标语言为中文时应用；单测覆盖
+- Beam search：束宽4、批量化前向（每步一次 [B,t] 解码，速度损失小）、EOS完成池+GNMT长度惩罚 ((5+len)/6) 评分——替换贪心解码
+- 三重重复抑制：no_repeat_ngram=2（防长程循环）+ repetition_penalty=1.2（防复读倾向）+ 紧邻重复A A重罚-4.0（软禁"park park"式复读，保留"谢谢"类叠词可能）
+- 实测对比：en→zh"這是一個測試"→"这是一个测试"；zh→en"park park"复读消除；ja→zh从数百字死循环→可读大意输出
+- 全量 cargo test 21 通过；npm run build 通过
