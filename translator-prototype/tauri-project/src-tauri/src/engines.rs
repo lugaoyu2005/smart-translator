@@ -11,9 +11,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub enum EngineType {
-    Offline, // 离线引擎（Marian/NMT）
-    Baidu,   // 百度翻译
-    Youdao,  // 有道智云
+    Offline,      // 离线引擎（Marian/NMT）
+    Baidu,        // 百度翻译
+    Youdao,       // 有道智云
+    Niutrans,     // 小牛翻译
+    DeepL,        // DeepL
+    OpenAICompat, // 自定义（OpenAI 兼容接口）
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -69,17 +72,29 @@ fn lang_code(engine: &EngineType, code: &str) -> String {
             "ru" | "fr" | "de" | "es" | "pt" => code.to_string(),
             _ => code.to_string(),
         },
+        // 小牛与内部码一致（zh/en/ja/ko/ru/fr/de/es/pt）
+        EngineType::Niutrans => code.to_string(),
+        EngineType::DeepL => match code {
+            "zh" => "ZH".to_string(),
+            "en" => "EN".to_string(),
+            "ja" => "JA".to_string(),
+            "ko" => "KO".to_string(),
+            "ru" => "RU".to_string(),
+            "fr" => "FR".to_string(),
+            "de" => "DE".to_string(),
+            "es" => "ES".to_string(),
+            "pt" => "PT-PT".to_string(),
+            _ => code.to_uppercase(),
+        },
+        // OpenAI 兼容引擎按语言名生成提示词（内部自行映射），不使用语言码
+        EngineType::OpenAICompat => code.to_string(),
         EngineType::Offline => code.to_string(),
     }
 }
 
 /// 自动检测语言时的目标语言参数
-fn auto_lang_param(engine: &EngineType) -> String {
-    match engine {
-        EngineType::Baidu => "auto".to_string(),
-        EngineType::Youdao => "auto".to_string(),
-        EngineType::Offline => "auto".to_string(),
-    }
+fn auto_lang_param(_engine: &EngineType) -> String {
+    "auto".to_string()
 }
 
 // ============ 百度翻译引擎 ============
@@ -319,6 +334,293 @@ impl TranslationEngine for YoudaoEngine {
     }
 }
 
+// ============ 小牛翻译引擎 ============
+
+pub struct NiutransEngine {
+    api_key: String,
+    client: reqwest::Client,
+}
+
+impl NiutransEngine {
+    pub fn new(api_key: &str) -> Self {
+        Self {
+            api_key: api_key.to_string(),
+            client: reqwest::Client::new(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl TranslationEngine for NiutransEngine {
+    fn name(&self) -> &str {
+        "小牛翻译"
+    }
+
+    fn engine_type(&self) -> EngineType {
+        EngineType::Niutrans
+    }
+
+    fn is_configured(&self) -> bool {
+        !self.api_key.is_empty()
+    }
+
+    async fn translate(&self, text: &str, from: &str, to: &str) -> Result<String, String> {
+        let from_code = if from == "auto" {
+            auto_lang_param(&EngineType::Niutrans)
+        } else {
+            lang_code(&EngineType::Niutrans, from)
+        };
+        let to_code = lang_code(&EngineType::Niutrans, to);
+
+        let body = serde_json::json!({
+            "from": from_code,
+            "to": to_code,
+            "apikey": self.api_key,
+            "src_text": text,
+        });
+        let resp: serde_json::Value = self
+            .client
+            .post("https://api.niutrans.com/NIUTRANS/TEXT_API")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("小牛翻译请求失败: {e}"))?
+            .json()
+            .await
+            .map_err(|e| format!("小牛翻译响应解析失败: {e}"))?;
+
+        let code = resp
+            .get("errorCode")
+            .map(|v| {
+                v.as_str()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| v.as_i64().map(|i| i.to_string()).unwrap_or_default())
+            })
+            .unwrap_or_else(|| "0".to_string());
+        if code != "0" {
+            let msg = resp
+                .get("errorMsg")
+                .or_else(|| resp.get("msg"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("未知错误");
+            return Err(format!("小牛翻译失败: {msg}（错误码{code}）"));
+        }
+
+        resp.get("tgt_text")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| "小牛翻译响应格式异常".to_string())
+    }
+}
+
+// ============ DeepL 引擎 ============
+
+pub struct DeepLEngine {
+    api_key: String,
+    client: reqwest::Client,
+}
+
+impl DeepLEngine {
+    pub fn new(api_key: &str) -> Self {
+        Self {
+            api_key: api_key.to_string(),
+            client: reqwest::Client::new(),
+        }
+    }
+
+    /// Free 版密钥以 ..fx 结尾，使用 api-free 域名；否则用正式域名
+    fn endpoint(&self) -> &'static str {
+        if self.api_key.ends_with(":fx") {
+            "https://api-free.deepl.com/v2/translate"
+        } else {
+            "https://api.deepl.com/v2/translate"
+        }
+    }
+
+    /// 内部语言码 → DeepL 语言码（目标用 PT-PT，源用 PT）
+    fn map_lang(code: &str, target: bool) -> String {
+        match code {
+            "zh" => "ZH".to_string(),
+            "en" => "EN".to_string(),
+            "ja" => "JA".to_string(),
+            "ko" => "KO".to_string(),
+            "ru" => "RU".to_string(),
+            "fr" => "FR".to_string(),
+            "de" => "DE".to_string(),
+            "es" => "ES".to_string(),
+            "pt" => {
+                if target {
+                    "PT-PT".to_string()
+                } else {
+                    "PT".to_string()
+                }
+            }
+            _ => code.to_uppercase(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl TranslationEngine for DeepLEngine {
+    fn name(&self) -> &str {
+        "DeepL"
+    }
+
+    fn engine_type(&self) -> EngineType {
+        EngineType::DeepL
+    }
+
+    fn is_configured(&self) -> bool {
+        !self.api_key.is_empty()
+    }
+
+    async fn translate(&self, text: &str, from: &str, to: &str) -> Result<String, String> {
+        let mut body = serde_json::json!({
+            "text": [text],
+            "target_lang": Self::map_lang(to, true),
+        });
+        if from != "auto" {
+            body["source_lang"] = serde_json::json!(Self::map_lang(from, false));
+        }
+
+        let resp: serde_json::Value = self
+            .client
+            .post(self.endpoint())
+            .header(
+                "Authorization",
+                format!("DeepL-Auth-Key {}", self.api_key),
+            )
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("DeepL请求失败: {e}"))?
+            .json()
+            .await
+            .map_err(|e| format!("DeepL响应解析失败: {e}"))?;
+
+        if resp.get("translations").is_none() {
+            // DeepL 错误响应为 {"message": "..."}
+            let msg = resp
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("未知错误");
+            return Err(format!("DeepL失败: {msg}"));
+        }
+
+        let translations = resp
+            .get("translations")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| "DeepL响应格式异常".to_string())?;
+        let out: String = translations
+            .iter()
+            .filter_map(|t| t.get("text").and_then(|v| v.as_str()))
+            .collect::<Vec<&str>>()
+            .join("");
+        Ok(out)
+    }
+}
+
+// ============ 自定义 OpenAI 兼容引擎 ============
+
+pub struct OpenAICompatEngine {
+    base_url: String,
+    api_key: String,
+    model: String,
+    client: reqwest::Client,
+}
+
+impl OpenAICompatEngine {
+    pub fn new(base_url: &str, api_key: &str, model: &str) -> Self {
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            api_key: api_key.to_string(),
+            model: model.to_string(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(60)) // LLM 推理较慢
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
+        }
+    }
+
+    fn lang_prompt(code: &str) -> &'static str {
+        match code {
+            "zh" => "Simplified Chinese",
+            "en" => "English",
+            "ja" => "Japanese",
+            "ko" => "Korean",
+            "ru" => "Russian",
+            "fr" => "French",
+            "de" => "German",
+            "es" => "Spanish",
+            "pt" => "Portuguese",
+            _ => "Chinese",
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl TranslationEngine for OpenAICompatEngine {
+    fn name(&self) -> &str {
+        "自定义AI"
+    }
+
+    fn engine_type(&self) -> EngineType {
+        EngineType::OpenAICompat
+    }
+
+    fn is_configured(&self) -> bool {
+        !self.base_url.is_empty() && !self.api_key.is_empty() && !self.model.is_empty()
+    }
+
+    async fn translate(&self, text: &str, from: &str, to: &str) -> Result<String, String> {
+        let system = if from == "auto" {
+            format!(
+                "You are a professional translation engine. Translate the user's text into {}. \
+Output ONLY the translation, keeping line breaks. No explanations.",
+                Self::lang_prompt(to)
+            )
+        } else {
+            format!(
+                "You are a professional translation engine. Translate the user's text from {} into {}. \
+Output ONLY the translation, keeping line breaks. No explanations.",
+                Self::lang_prompt(from),
+                Self::lang_prompt(to)
+            )
+        };
+
+        let body = serde_json::json!({
+            "model": self.model,
+            "temperature": 0.2,
+            "messages": [
+                { "role": "system", "content": system },
+                { "role": "user", "content": text }
+            ]
+        });
+
+        let resp: serde_json::Value = self
+            .client
+            .post(format!("{}/chat/completions", self.base_url))
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("自定义AI请求失败: {e}"))?
+            .json()
+            .await
+            .map_err(|e| format!("自定义AI响应解析失败: {e}"))?;
+
+        if let Some(err) = resp.get("error").and_then(|v| v.get("message")).and_then(|v| v.as_str()) {
+            return Err(format!("自定义AI失败: {err}"));
+        }
+
+        resp.pointer("/choices/0/message/content")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "自定义AI响应格式异常".to_string())
+    }
+}
+
 // ============ 术语库（一词多义优先级） ============
 
 /// 术语条目：一词多义，按优先级排序
@@ -475,26 +777,13 @@ pub struct TranslationManager {
 }
 
 impl TranslationManager {
-    pub fn new(
-        baidu: Option<BaiduEngine>,
-        youdao: Option<YoudaoEngine>,
-        term_base: TermBase,
-    ) -> Self {
-        let mut engines: Vec<Box<dyn TranslationEngine>> = vec![];
-        if let Some(e) = baidu {
-            if e.is_configured() {
-                engines.push(Box::new(e));
-            }
-        }
-        if let Some(e) = youdao {
-            if e.is_configured() {
-                engines.push(Box::new(e));
-            }
-        }
-        Self {
-            engines,
-            term_base,
-        }
+    /// 构建管理器：传入按优先级排序的引擎列表（未配置密钥的自动过滤）
+    pub fn new(engines: Vec<Box<dyn TranslationEngine>>, term_base: TermBase) -> Self {
+        let engines: Vec<Box<dyn TranslationEngine>> = engines
+            .into_iter()
+            .filter(|e| e.is_configured())
+            .collect();
+        Self { engines, term_base }
     }
 
     /// 列出所有可用引擎信息
@@ -776,7 +1065,10 @@ mod tests {
         }
         let baidu = BaiduEngine::new(&baidu_id, &baidu_secret);
         let youdao = YoudaoEngine::new(&youdao_key, &youdao_secret);
-        let mut m = TranslationManager::new(Some(baidu), Some(youdao), TermBase::default());
+        let mut m = TranslationManager::new(
+            vec![Box::new(baidu), Box::new(youdao)],
+            TermBase::default(),
+        );
 
         let texts = vec![
             "hello world".to_string(),

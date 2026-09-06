@@ -648,6 +648,13 @@ pub async fn ocr_stored_capture(
                 )
                 .await
             }
+            "rapidocr" => {
+                tauri::async_runtime::spawn_blocking(move || {
+                    rapidocr_ocr_pixels(&data, &corrections)
+                })
+                .await
+                .map_err(|e| format!("OCR任务执行失败: {e}"))?
+            }
             _ => {
                 tauri::async_runtime::spawn_blocking(move || {
                     win::ocr_from_pixels(&data.pixels, data.width, data.height, &corrections)
@@ -766,7 +773,81 @@ async fn youdao_ocr_pixels(
     Ok(OcrResult { lines, language: "auto".to_string() })
 }
 
-/// 递归收集 JSON 值树中所有同时含 x/y 键的对象作为坐标点
+/// RapidOCR 本地引擎（PaddleOCR PP-OCRv6 模型 + ONNX Runtime）：
+/// 完全离线免费无限量；首次使用自动下载模型（约15MB）到 exe 同目录 models/
+fn rapidocr_ocr_pixels(
+    data: &ScreenshotData,
+    corrections: &[(String, String)],
+) -> Result<OcrResult, String> {
+    use rapidocr_core::config::{PipelineConfig, RapidOcrConfig};
+    use std::sync::Mutex;
+    static RAPIDOCR: Mutex<Option<rapidocr_core::RapidOcr>> = Mutex::new(None);
+
+    let mut guard = RAPIDOCR.lock().map_err(|_| "RapidOCR锁不可用".to_string())?;
+    if guard.is_none() {
+        // 模型缓存目录：与 settings.json 同目录的 models/
+        let exe_dir = std::env::current_exe().unwrap_or_default();
+        let models_dir = exe_dir
+            .parent()
+            .map(|p| p.join("models"))
+            .unwrap_or_else(|| std::path::PathBuf::from("models"));
+        let model_path = rapidocr_core::model::ensure_ppocrv6_small_models(&models_dir)
+            .map_err(|e| {
+                format!("RapidOCR模型准备失败（首次使用需联网下载约15MB）: {e}")
+            })?;
+        let cfg = RapidOcrConfig::ppocr_v6_small(&model_path)
+            .with_pipeline(PipelineConfig {
+                use_det: true,
+                use_cls: false, // 截图场景无旋转文本，关闭方向分类提速
+                use_rec: true,
+            });
+        *guard = Some(
+            rapidocr_core::RapidOcr::new(cfg)
+                .map_err(|e| format!("RapidOCR初始化失败: {e}"))?,
+        );
+    }
+    let ocr = guard.as_mut().unwrap();
+
+    // BGRA → RGB（丢弃alpha）
+    let mut rgb: Vec<u8> = Vec::with_capacity(data.pixels.len() / 4 * 3);
+    for px in data.pixels.chunks_exact(4) {
+        rgb.push(px[2]);
+        rgb.push(px[1]);
+        rgb.push(px[0]);
+    }
+    let img = image::RgbImage::from_raw(data.width as u32, data.height as u32, rgb)
+        .ok_or_else(|| "图像数据无效".to_string())?;
+    let out = ocr.run_image(&img).map_err(|e| format!("RapidOCR识别失败: {e}"))?;
+
+    let mut lines = Vec::new();
+    for l in out.lines {
+        let text = win::apply_symbol_corrections(&l.text, corrections);
+        if text.trim().is_empty() {
+            continue;
+        }
+        let (mut min_x, mut min_y, mut max_x, mut max_y) =
+            (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+        for p in l.bbox.points.iter() {
+            min_x = min_x.min(p[0] as f64);
+            min_y = min_y.min(p[1] as f64);
+            max_x = max_x.max(p[0] as f64);
+            max_y = max_y.max(p[1] as f64);
+        }
+        lines.push(OcrLineInfo {
+            text,
+            x: min_x,
+            y: min_y,
+            width: max_x - min_x,
+            height: max_y - min_y,
+        });
+    }
+    Ok(OcrResult {
+        lines,
+        language: "auto".to_string(),
+    })
+}
+
+/// 递归收集 JSON 值树中所有同时含 x/y 键的对象作为坐标点（有道OCR boundingBox 解析用）
 fn collect_points(v: &serde_json::Value, pts: &mut Vec<(f64, f64)>) {
     match v {
         serde_json::Value::Object(m) => {

@@ -22,6 +22,8 @@ tokio = { version = "1", features = ["sync", "macros"] }
 md5 = "0.7"
 sha2 = "0.10"
 base64 = "0.22"
+# RapidOCR 本地OCR（PaddleOCR 模型，ONNX Runtime 推理，首次使用自动下载模型）
+rapidocr-core = "0.2"
 # 截图与OCR（Windows内置OCR，无需外部安装）
 image = { version = "0.25", default-features = false, features = ["png"] }
 windows = { version = "0.61", features = [

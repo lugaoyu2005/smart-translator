@@ -2,7 +2,8 @@
 //! 状态管理：TranslationManager 存入 Tauri 状态，跨命令共享
 
 use crate::engines::{
-    preprocess_text, BaiduEngine, EngineInfo, TranslationManager, TranslationResult, YoudaoEngine,
+    preprocess_text, BaiduEngine, DeepLEngine, EngineInfo, NiutransEngine, OpenAICompatEngine,
+    TranslationManager, TranslationResult, YoudaoEngine,
 };
 use serde::{Deserialize, Serialize};
 
@@ -12,28 +13,43 @@ pub struct AppState {
 }
 
 /// 从设置中的API密钥构建引擎管理器（术语库从 terms.json 加载）；
-/// 只构建「在线翻译引擎」多选框中启用的引擎，与截图翻译菜单双向同步
+/// 只构建「在线翻译引擎」多选框中启用的引擎（优先级=列表顺序），与截图菜单双向同步。
+/// 小牛/DeepL/自定义OpenAI兼容为本轮接入的供应商；腾讯/阿里等待后续实现
 pub fn build_manager(settings: &crate::system::AppSettings) -> TranslationManager {
     let enabled = |id: &str| settings.online_apis.iter().any(|s| s == id);
-    let baidu = if enabled("baidu") {
-        Some(BaiduEngine::new(
+    let providers = &settings.providers;
+    let mut engines: Vec<Box<dyn crate::engines::TranslationEngine>> = Vec::new();
+
+    if enabled("baidu") {
+        engines.push(Box::new(BaiduEngine::new(
             &settings.baidu_app_id,
             &settings.baidu_secret,
-        ))
-    } else {
-        None
-    };
-    let youdao = if enabled("youdao") {
-        Some(YoudaoEngine::new(
+        )));
+    }
+    if enabled("youdao") {
+        engines.push(Box::new(YoudaoEngine::new(
             &settings.youdao_app_key,
             &settings.youdao_app_secret,
-        ))
-    } else {
-        None
-    };
-    let term_base = crate::terms::load_term_base();
+        )));
+    }
+    if enabled("niutrans") {
+        engines.push(Box::new(NiutransEngine::new(
+            &providers.niutrans_api_key,
+        )));
+    }
+    if enabled("deepl") {
+        engines.push(Box::new(DeepLEngine::new(&providers.deepl_api_key)));
+    }
+    if enabled("custom") {
+        engines.push(Box::new(OpenAICompatEngine::new(
+            &providers.custom_openai_base_url,
+            &providers.custom_openai_api_key,
+            &providers.custom_openai_model,
+        )));
+    }
 
-    TranslationManager::new(baidu, youdao, term_base)
+    let term_base = crate::terms::load_term_base();
+    TranslationManager::new(engines, term_base)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
