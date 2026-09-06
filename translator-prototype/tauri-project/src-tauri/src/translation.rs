@@ -96,15 +96,7 @@ pub async fn translate_text(
 
     let mut manager = state.manager.lock().await;
 
-    let result = manager
-        .translate(&processed, &from, &to)
-        .await
-        .map(|mut r| {
-            // 返回的from/to记录实际请求的语言
-            r.from = from;
-            r.to = to;
-            r
-        });
+    let result = manager.translate(&processed, &from, &to).await;
 
     // 术语库使用计数有自动调整时落盘
     if manager.take_term_dirty() {
@@ -113,10 +105,21 @@ pub async fn translate_text(
 
     // 记录翻译历史
     if let Ok(r) = &result {
-        crate::history::record(from, to, &processed, &r.translated_text, &r.engine_used);
+        crate::history::record(
+            &from,
+            &to,
+            &processed,
+            &r.translated_text,
+            &r.engine_used,
+        );
     }
 
-    result
+    result.map(|mut r| {
+        // 返回的from/to记录实际请求的语言
+        r.from = from.clone();
+        r.to = to.clone();
+        r
+    })
 }
 
 // Tauri命令：获取支持的语言列表
@@ -256,7 +259,7 @@ pub async fn translate_lines(
         &from,
         &to,
         &lines.join("\n"),
-        &res.translations.join("\n"),
+        &translations.join("\n"),
         &engine_used,
     );
 
