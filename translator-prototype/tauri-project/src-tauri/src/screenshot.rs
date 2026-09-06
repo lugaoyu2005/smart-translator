@@ -875,29 +875,6 @@ fn rapidocr_ocr_pixels(
     })
 }
 
-/// 递归收集 JSON 值树中所有同时含 x/y 键的对象作为坐标点（有道OCR boundingBox 解析用）
-fn collect_points(v: &serde_json::Value, pts: &mut Vec<(f64, f64)>) {
-    match v {
-        serde_json::Value::Object(m) => {
-            if let (Some(x), Some(y)) = (
-                m.get("x").and_then(|v| v.as_f64()),
-                m.get("y").and_then(|v| v.as_f64()),
-            ) {
-                pts.push((x, y));
-            }
-            for (_, sub) in m {
-                collect_points(sub, pts);
-            }
-        }
-        serde_json::Value::Array(a) => {
-            for sub in a {
-                collect_points(sub, pts);
-            }
-        }
-        _ => {}
-    }
-}
-
 /// 捕获屏幕指定区域（BGRA像素）
 #[tauri::command]
 pub fn capture_region(x: i32, y: i32, width: i32, height: i32) -> Result<ScreenshotData, String> {
@@ -1158,7 +1135,7 @@ mod tests {
             let white = CreateSolidBrush(windows::Win32::Foundation::COLORREF(0x00FF_FFFF));
             let rect = windows::Win32::Foundation::RECT { left: 0, top: 0, right: w, bottom: h };
             FillRect(mem_dc, &rect, white);
-            DeleteObject(white.into());
+            let _ = DeleteObject(white.into());
 
             // 黑字 48px
             let font = CreateFontW(
@@ -1187,9 +1164,9 @@ mod tests {
 
             SelectObject(mem_dc, old_bmp);
             SelectObject(mem_dc, old_font);
-            DeleteObject(font.into());
-            DeleteObject(hbmp.into());
-            DeleteDC(mem_dc);
+            let _ = DeleteObject(font.into());
+            let _ = DeleteObject(hbmp.into());
+            let _ = DeleteDC(mem_dc);
             ReleaseDC(None, hdc_screen);
 
             Ok(ScreenshotData { pixels, width: w, height: h })

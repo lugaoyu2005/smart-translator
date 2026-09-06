@@ -216,6 +216,8 @@ const ScreenshotWindow: React.FC = () => {
   const [menuBox, setMenuBox] = useState({ w: 240, h: 96 });
   // 本次按下的拖拽是否带Ctrl（mousedown时快照，避免先松Ctrl再松鼠标导致误清空）
   const dragWasCtrl = useRef(false);
+  // 截图流水线代号：退出/重新触发时自增，使进行中的异步流程作废（防止ESC后窗口弹回）
+  const runIdRef = useRef(0);
 
   // 按键组（菜单组）
   const [groupPos, setGroupPos] = useState({ x: -9999, y: -9999 });
@@ -366,6 +368,7 @@ const ScreenshotWindow: React.FC = () => {
 
   /** 重置到框选模式（退出/重新触发共用） */
   const resetState = useCallback(() => {
+    runIdRef.current += 1; // 作废进行中的截图流水线
     setPhase("select");
     setDragging(false);
     setBlocks([]);
@@ -461,17 +464,17 @@ const ScreenshotWindow: React.FC = () => {
   const handleRootMouseUp = async () => {
     // 结果阶段：Ctrl+拖动累积片段 / 普通拖动覆盖式单选
     if (phase === "result") {
-      const selection = window.getSelection();
-      const sel = selection?.toString().trim() ?? "";
+      const nativeSel = window.getSelection();
+      const sel = nativeSel?.toString().trim() ?? "";
       if (dragWasCtrl.current) {
-        if (sel && selection && selection.rangeCount > 0) {
+        if (sel && nativeSel && nativeSel.rangeCount > 0) {
           setPicked((prev) => [
             ...prev,
             {
               text: sel,
               block: null,
               whole: false,
-              range: selection.getRangeAt(0).cloneRange(),
+              range: nativeSel.getRangeAt(0).cloneRange(),
             },
           ]);
         }
@@ -498,6 +501,9 @@ const ScreenshotWindow: React.FC = () => {
     width: number;
     height: number;
   }) => {
+    const runId = ++runIdRef.current;
+    /** 每次await后校验：期间若退出/重新触发则静默放弃本次流程 */
+    const stale = () => runIdRef.current !== runId;
     setPhase("processing");
     setProcStage("ocr");
     setProcSeconds(0);
@@ -512,6 +518,7 @@ const ScreenshotWindow: React.FC = () => {
       // 隐藏窗口，避免截到自身
       await win.hide();
       await new Promise((r) => setTimeout(r, 250));
+      if (stale()) return;
 
       // 第一步：纯截图（百毫秒级，后端暂存像素）
       await invoke("capture_region_store", {
@@ -520,6 +527,7 @@ const ScreenshotWindow: React.FC = () => {
         width: physW,
         height: physH,
       });
+      if (stale()) return;
 
       // 立即恢复UI：选区边框+加载面板在OCR/翻译期间全程可见
       // （OCR与翻译才是耗时大头，此前窗口全程隐藏导致纯空白等待）
@@ -531,6 +539,7 @@ const ScreenshotWindow: React.FC = () => {
         lines: OcrLineInfo[];
         language: string;
       }>("ocr_stored_capture");
+      if (stale()) return;
 
       // 物理像素（相对截图区域）→ 窗口CSS坐标
       const cssLines: OcrLineInfo[] = ocr.lines.map((l) => ({
@@ -585,6 +594,7 @@ const ScreenshotWindow: React.FC = () => {
         to: dstLang,
         engine: engineName ?? null,
       });
+      if (stale()) return;
 
       setBlocks(
         newBlocks.map((b, i) => ({ ...b, translation: res.translations[i] ?? "" }))
@@ -596,6 +606,7 @@ const ScreenshotWindow: React.FC = () => {
       await win.show();
       await win.setFocus();
     } catch (e: any) {
+      if (stale()) return; // 已退出：不再弹窗显示过期报错
       // 报错信息显示在框选区域内（红字居中），菜单栏保持可用（可切换引擎重试）
       setError(typeof e === "string" ? e : "截图处理失败");
       setBlocks([]);
@@ -817,14 +828,15 @@ const ScreenshotWindow: React.FC = () => {
   }, []);
 
   /** 复制到剪贴板并退出。内容优先级：
-   *  1) 当前原生选区文字（拖动单选 / 双击整段，所见即所得）
-   *  2) Ctrl累积的多个片段（Ctrl+拖动、Ctrl+双击；按操作顺序合并）
+   *  1) Ctrl累积的多个片段（Ctrl+拖动、Ctrl+双击；按操作顺序合并）
+   *     ——优先于原生选区：Ctrl操作后原生选区只是最后一次的残留，不代表用户要复制的内容
+   *  2) 当前原生选区文字（普通拖动 / 普通双击，覆盖式单选——产生时已清空累积）
    *  3) 全部段落（按当前原/译模式） */
   const handleCopy = async () => {
-    let text = window.getSelection()?.toString().trim() ?? "";
-    if (!text && picked.length > 0) {
-      text = picked.map((p) => p.text).join("\n");
-    }
+    let text =
+      picked.length > 0
+        ? picked.map((p) => p.text).join("\n")
+        : window.getSelection()?.toString().trim() ?? "";
     if (!text) {
       text = blocks
         .map((b) => (copyMode === "original" ? b.original : b.translation))
@@ -994,6 +1006,9 @@ const ScreenshotWindow: React.FC = () => {
                     ];
                   });
                 }
+              } else {
+                // 普通双击=覆盖式单选（与普通拖动一致）：清空之前累积
+                setPicked([]);
               }
             }}
             style={{
@@ -1066,7 +1081,8 @@ const ScreenshotWindow: React.FC = () => {
         )
       )}
 
-      {/* 按键组（菜单组）：底边居中下方/上方，10%→悬停100%，可拖动；报错时也保持可用 */}
+      {/* 按键组（菜单组）：底边居中下方/上方，10%→悬停100%，可拖动；报错时也保持可用
+          组件按 screenshot_components 数组顺序渲染（设置页上移/下移即生效） */}
       {phase === "result" && (!noText || error) && (
         <div
           ref={groupRef}
@@ -1076,8 +1092,10 @@ const ScreenshotWindow: React.FC = () => {
           style={{ left: groupPos.x, top: groupPos.y }}
           onMouseDown={handleGroupMouseDown}
         >
-          {settings.screenshot_components.includes("lang") && (
-            <div className="lang-pair" onMouseDown={(e) => e.stopPropagation()}>
+          {settings.screenshot_components.map((comp) => {
+            if (comp === "lang")
+              return (
+            <div key={comp} className="lang-pair" onMouseDown={(e) => e.stopPropagation()}>
               <button
                 className="group-item engine"
                 onClick={(e) => toggleLangMenu("src", e.currentTarget)}
@@ -1130,9 +1148,10 @@ const ScreenshotWindow: React.FC = () => {
                 </div>
               )}
             </div>
-          )}
-          {settings.screenshot_components.includes("engine") && (
-            <div className="engine-wrap">
+              );
+            if (comp === "engine")
+              return (
+            <div key={comp} className="engine-wrap">
               <button
                 className="group-item engine"
                 onMouseDown={(e) => e.stopPropagation()}
@@ -1168,9 +1187,10 @@ const ScreenshotWindow: React.FC = () => {
                 </div>
               )}
             </div>
-          )}
-          {settings.screenshot_components.includes("copy") && (
-            <>
+              );
+            if (comp === "copy")
+              return (
+            <React.Fragment key={comp}>
               <button
                 className="group-item"
                 onMouseDown={(e) => {
@@ -1195,10 +1215,12 @@ const ScreenshotWindow: React.FC = () => {
               >
                 {copyMode === "original" ? "原" : "译"}
               </button>
-            </>
-          )}
-          {settings.screenshot_components.includes("close") && (
+          </React.Fragment>
+              );
+            if (comp === "close")
+              return (
             <button
+              key={comp}
               className="group-item close"
               onMouseDown={(e) => e.stopPropagation()}
               onClick={exit}
@@ -1206,9 +1228,11 @@ const ScreenshotWindow: React.FC = () => {
             >
               ×
             </button>
-          )}
-          {settings.screenshot_components.includes("settings") && (
+              );
+            if (comp === "settings")
+              return (
             <button
+              key={comp}
               className="group-item"
               onMouseDown={(e) => e.stopPropagation()}
               onClick={openSettings}
@@ -1216,7 +1240,9 @@ const ScreenshotWindow: React.FC = () => {
             >
               ⚙
             </button>
-          )}
+              );
+            return null;
+          })}
         </div>
       )}
 

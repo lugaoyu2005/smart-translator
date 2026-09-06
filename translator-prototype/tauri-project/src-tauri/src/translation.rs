@@ -65,13 +65,6 @@ pub fn build_manager(settings: &crate::system::AppSettings) -> TranslationManage
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct TranslationRequest {
-    pub text: String,
-    pub from: String,
-    pub to: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
 pub struct Language {
     pub code: String,
     pub name: String,

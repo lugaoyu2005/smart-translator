@@ -78,3 +78,10 @@ RapidOCR本地OCR	✅ 完成	PaddleOCR PP-OCRv6 模型+ONNX Runtime推理，完�
 - 响应解析按官方结构：Result.regions[].lines[].{text, boundingBox}（逗号分隔8值四角坐标 → 包围盒 → OcrLineInfo）
 - GDI渲染"Hello World 123"实测云端识别通过；全量 cargo test 18 通过；npm run build 通过
 - 至此 OCR 引擎三选齐备：Windows内置 / RapidOCR本地（PP-OCRv6离线免费）/ 有道OCR云端
+
+## 2026-09-06 全库代码审查与修复（第八轮）
+- 修复回归：截图菜单组改为按 settings.screenshot_components 数组顺序渲染（设置页上移/下移此前不生效）
+- 修复：ESC退出/重新触发时作废进行中的截图流水线（runId守卫），不再在流程完成后把窗口带报错/旧结果弹回
+- 修复：复制优先级——Ctrl累积片段优先于残留原生选区（此前Ctrl多选后复制只得到最后一段）；普通双击与普通拖动对齐为覆盖式单选（清空累积）
+- 清理：删除死代码 collect_points/TranslationRequest；GDI清理调用显式处理返回值（编译警告清零）；history锁中毒时into_inner恢复
+- 全量 cargo test 18 通过；npm run build 通过

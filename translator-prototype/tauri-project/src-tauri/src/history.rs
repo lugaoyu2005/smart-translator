@@ -50,7 +50,7 @@ fn local_time_string() -> String {
 
 /// 追加一条历史（新的在前，超上限裁剪）；记录失败静默（不影响翻译主流程）
 pub fn record(from: &str, to: &str, source: &str, translation: &str, engine: &str) {
-    let _guard = HISTORY_LOCK.lock();
+    let _guard = HISTORY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut list = load();
     let id = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -75,14 +75,14 @@ pub fn record(from: &str, to: &str, source: &str, translation: &str, engine: &st
 // Tauri命令：列出全部历史（新的在前）
 #[tauri::command]
 pub fn list_history() -> Result<Vec<HistoryEntry>, String> {
-    let _guard = HISTORY_LOCK.lock().map_err(|_| "历史锁不可用".to_string())?;
+    let _guard = HISTORY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     Ok(load())
 }
 
 // Tauri命令：删除单条历史
 #[tauri::command]
 pub fn delete_history_entry(id: u64) -> Result<(), String> {
-    let _guard = HISTORY_LOCK.lock().map_err(|_| "历史锁不可用".to_string())?;
+    let _guard = HISTORY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut list = load();
     list.retain(|e| e.id != id);
     save(&list)
@@ -91,7 +91,7 @@ pub fn delete_history_entry(id: u64) -> Result<(), String> {
 // Tauri命令：清空历史
 #[tauri::command]
 pub fn clear_history() -> Result<(), String> {
-    let _guard = HISTORY_LOCK.lock().map_err(|_| "历史锁不可用".to_string())?;
+    let _guard = HISTORY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     save(&[])
 }
 
