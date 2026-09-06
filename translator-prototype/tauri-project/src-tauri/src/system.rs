@@ -32,17 +32,19 @@ pub struct AppSettings {
     // 截图翻译：菜单组组件（顺序即显示顺序，工具箱式可增删）
     #[serde(default = "default_screenshot_components")]
     pub screenshot_components: Vec<String>,
-    // 截图翻译：覆盖色块背景色（#RRGGBB）与不透明度（0.5~1.0）
-    #[serde(default = "default_overlay_bg_color")]
-    pub overlay_bg_color: String,
-    #[serde(default = "default_overlay_opacity")]
-    pub overlay_opacity: f64,
-    // 覆盖块无背景（透明模式：不画色块仅显示文字，加白色光晕保证可读）
+    // 覆盖样式：dark=黑底白字 light=白底黑字 none=无背景（透明+白色光晕）
+    // None=未设置（迁移判断依据），运行时按 transparent_legacy 回落后视为 dark
     #[serde(default)]
-    pub overlay_transparent: bool,
-    // 有背景时：背景块随翻译文字自适应（贴合文字消除留白）；false=固定覆盖原文区域
+    pub overlay_mode: Option<String>,
+    // 旧版"无背景模式"开关（迁移用：true → overlay_mode = none）
     #[serde(default)]
-    pub overlay_bg_fit_text: bool,
+    pub overlay_transparent_legacy: bool,
+    // 文本严格对齐模式：译文空间 = 原文区域 +10%（避让重叠），字号自动填充
+    #[serde(default)]
+    pub overlay_expand: bool,
+    // 当前翻译源（默认引擎名，与截图翻译菜单双向绑定）
+    #[serde(default = "default_current_engine")]
+    pub current_engine: String,
     // 主窗口尺寸：last=记住上次大小（默认）；fixed=固定大小（宽高自定义）
     #[serde(default = "default_window_size_mode")]
     pub window_size_mode: String,
@@ -57,6 +59,10 @@ pub struct AppSettings {
     // 供应商凭据（框架阶段：仅存储，翻译实现后续补齐）
     #[serde(default)]
     pub providers: ProviderSettings,
+}
+
+fn default_current_engine() -> String {
+    "百度翻译".to_string()
 }
 
 fn default_window_size_mode() -> String {
@@ -104,14 +110,6 @@ pub struct ProviderSettings {
     pub custom_openai_model: String,
 }
 
-fn default_overlay_bg_color() -> String {
-    "#ffffff".to_string()
-}
-
-fn default_overlay_opacity() -> f64 {
-    0.95
-}
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ScreenshotBehavior {
     pub cover_original_text: bool,
@@ -143,10 +141,10 @@ impl Default for AppSettings {
             youdao_app_key: String::new(),
             youdao_app_secret: String::new(),
             screenshot_components: default_screenshot_components(),
-            overlay_bg_color: default_overlay_bg_color(),
-            overlay_opacity: default_overlay_opacity(),
-            overlay_transparent: false,
-            overlay_bg_fit_text: false,
+            overlay_mode: None,
+            overlay_transparent_legacy: false,
+            overlay_expand: false,
+            current_engine: default_current_engine(),
             window_size_mode: default_window_size_mode(),
             window_fixed_width: default_window_fixed_width(),
             window_fixed_height: default_window_fixed_height(),
@@ -171,6 +169,31 @@ fn migrate(settings: &mut AppSettings) {
     if settings.ocr_engine == "tesseract" {
         settings.ocr_engine = "windows".to_string();
     }
+    // 旧版"无背景模式"开关 → 新覆盖样式
+    if settings.overlay_mode.is_none() && settings.overlay_transparent_legacy {
+        settings.overlay_mode = Some("none".to_string());
+    }
+    // 当前翻译源不在启用列表时，回落到第一个启用的引擎（名称↔ID映射）
+    let enabled_name = |name: &str| {
+        let id = match name {
+            "百度翻译" => "baidu",
+            "有道智云" => "youdao",
+            _ => "",
+        };
+        settings.online_apis.iter().any(|a| a == id)
+    };
+    if !enabled_name(&settings.current_engine) {
+        settings.current_engine = settings
+            .online_apis
+            .first()
+            .map(|id| match id.as_str() {
+                "baidu" => "百度翻译",
+                "youdao" => "有道智云",
+                _ => "",
+            })
+            .unwrap_or_default()
+            .to_string();
+    }
     // 菜单组自动补入新增的"原/译语言"组件
     if !settings.screenshot_components.iter().any(|c| c == "lang") {
         if let Some(pos) = settings
@@ -178,9 +201,13 @@ fn migrate(settings: &mut AppSettings) {
             .iter()
             .position(|c| c == "engine")
         {
-            settings.screenshot_components.insert(pos + 1, "lang".to_string());
+            settings
+                .screenshot_components
+                .insert(pos + 1, "lang".to_string());
         } else {
-            settings.screenshot_components.insert(0, "lang".to_string());
+            settings
+                .screenshot_components
+                .insert(0, "lang".to_string());
         }
     }
 }
@@ -385,6 +412,32 @@ pub fn register_hotkeys(app: &AppHandle, settings: &AppSettings) -> Result<(), S
     .map_err(|e| format!("注册翻译快捷键「{hk_translate}」失败: {e}"))?;
 
     Ok(())
+}
+
+// Tauri命令：用系统默认浏览器打开链接（仅允许 http/https，防命令注入）
+#[tauri::command]
+pub fn open_external(url: String) -> Result<(), String> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("仅允许打开 http/https 链接".to_string());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &url])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW，避免闪现控制台
+            .spawn()
+            .map_err(|e| format!("打开浏览器失败: {e}"))?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| format!("打开浏览器失败: {e}"))?;
+        Ok(())
+    }
 }
 
 // Tauri命令：获取网络状态（真实检测）

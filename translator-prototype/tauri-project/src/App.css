@@ -9,3 +9,26 @@
   overflow-y: auto;
   background-color: #f5f5f5;
 }
+/* 保存设置成功提示弹窗：点击遮罩关闭，仅一行居中标题 */
+.saved-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.saved-modal {
+  background: #fff;
+  border-radius: 10px;
+  padding: 22px 46px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.25);
+}
+
+.saved-title {
+  font-size: 15px;
+  color: #333;
+  text-align: center;
+}

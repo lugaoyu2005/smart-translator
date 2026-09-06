@@ -246,6 +246,60 @@ input:checked + .toggle-slider:before {
   margin: 8px 0 0;
 }
 
+/* 官网链接按钮（API标题旁的大号→） */
+.provider-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  margin-left: 10px;
+  border: 1px solid #cfe3ff;
+  border-radius: 50%;
+  background: #eaf3ff;
+  color: #1976d2;
+  font-size: 15px;
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+.provider-link:hover {
+  background: #1976d2;
+  color: #fff;
+}
+
+/* 覆盖样式三选 */
+.overlay-mode-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.overlay-mode-item {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 6px;
+  border: 1px solid #d9d9d9;
+  border-radius: 6px;
+  background: #fafafa;
+  cursor: pointer;
+  font-size: 13px;
+  color: #444;
+}
+
+.overlay-mode-item.active {
+  border-color: #1976d2;
+  background: #eaf3ff;
+  color: #1976d2;
+}
+
+.overlay-mode-item input {
+  margin: 0;
+}
+
 .about-info {
   line-height: 1.6;
 }

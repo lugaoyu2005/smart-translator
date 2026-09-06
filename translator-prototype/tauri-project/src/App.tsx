@@ -11,6 +11,8 @@ import "./App.css";
 function App() {
   const [activeMenu, setActiveMenu] = useState("basic");
   const [settings, setSettings] = useState<any>(null);
+  // 保存设置成功提示（GUI弹窗：仅标题，点击遮罩关闭）
+  const [savedTip, setSavedTip] = useState(false);
 
   useEffect(() => {
     // 加载应用设置
@@ -58,7 +60,7 @@ function App() {
     try {
       await invoke("save_app_settings", { settings: newSettings });
       setSettings(newSettings);
-      alert("设置已保存");
+      setSavedTip(true); // GUI 提示弹窗（点击遮罩关闭）
     } catch (error) {
       console.error("Failed to save settings:", error);
       alert(`设置已保存文件，但应用失败：\n${error}`);
@@ -114,8 +116,17 @@ function App() {
           />
         )}
       </main>
+
+      {/* 保存成功提示：仅标题居中，点击遮罩任意处关闭 */}
+      {savedTip && (
+        <div className="saved-mask" onClick={() => setSavedTip(false)}>
+          <div className="saved-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="saved-title">设置已保存</div>
+          </div>
+        </div>
+      )}
     </div>
   );
-}
+};
 
 export default App;

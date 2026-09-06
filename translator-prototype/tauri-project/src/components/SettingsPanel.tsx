@@ -211,7 +211,11 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
     </div>
   );
 
-  const renderTranslationSettings = () => (
+  const renderTranslationSettings = () => {
+    const enabledRealProviders = ONLINE_PROVIDERS.filter(
+      (p) => p.status === "" && localSettings?.online_apis?.includes(p.id)
+    );
+    return (
     <div className="settings-section">
       <h3 className="section-title">翻译引擎</h3>
 
@@ -236,9 +240,37 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         <p className="form-hint">启用的引擎（已接入的）会出现在截图翻译的引擎菜单中</p>
       </div>
 
+      {enabledRealProviders.length > 0 && (
+        <div className="form-group">
+          <label className="form-label">当前翻译源（默认引擎）</label>
+          <select
+            className="form-select"
+            value={localSettings?.current_engine || enabledRealProviders[0].label}
+            onChange={(e) => handleSettingChange("current_engine", e.target.value)}
+          >
+            {enabledRealProviders.map((p) => (
+              <option key={p.id} value={p.label}>
+                {p.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
       {localSettings?.online_apis?.includes("baidu") && (
         <div className="form-group">
-          <label className="form-label">百度翻译 API</label>
+          <label className="form-label">
+            百度翻译 API
+            <button
+              className="provider-link"
+              onClick={() =>
+                invoke("open_external", { url: "https://fanyi-api.baidu.com/" })
+              }
+              title="打开官网申请/查看密钥"
+            >
+              →
+            </button>
+          </label>
           <div className="api-keys">
             <input
               type="text"
@@ -260,7 +292,16 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
       {localSettings?.online_apis?.includes("youdao") && (
         <div className="form-group">
-          <label className="form-label">有道智云 API</label>
+          <label className="form-label">
+            有道智云 API
+            <button
+              className="provider-link"
+              onClick={() => invoke("open_external", { url: "https://ai.youdao.com/" })}
+              title="打开官网申请/查看密钥"
+            >
+              →
+            </button>
+          </label>
           <div className="api-keys">
             <input
               type="text"
@@ -409,7 +450,8 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         </select>
       </div>
     </div>
-  );
+    );
+  };
 
   const renderScreenshotSettings = () => {
     const comps: string[] = localSettings?.screenshot_components || [
@@ -487,51 +529,32 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         </div>
 
         <div className="form-group">
-          <label className="form-label">覆盖色块背景色</label>
-          <input
-            type="color"
-            className="color-input"
-            value={localSettings?.overlay_bg_color || "#ffffff"}
-            onChange={(e) =>
-              handleSettingChange("overlay_bg_color", e.target.value)
-            }
-          />
-        </div>
-
-        <div className="form-group">
-          <label className="form-label">
-            覆盖色块不透明度：
-            {Math.round((localSettings?.overlay_opacity ?? 0.95) * 100)}%
-          </label>
-          <input
-            type="range"
-            className="opacity-range"
-            min="0.5"
-            max="1"
-            step="0.05"
-            value={localSettings?.overlay_opacity ?? 0.95}
-            onChange={(e) =>
-              handleSettingChange("overlay_opacity", parseFloat(e.target.value))
-            }
-          />
-        </div>
-
-        <div className="form-group">
-          <div className="toggle-group">
-            <label className="toggle-switch">
-              <input
-                type="checkbox"
-                checked={localSettings?.overlay_transparent || false}
-                onChange={(e) =>
-                  handleSettingChange("overlay_transparent", e.target.checked)
-                }
-              />
-              <span className="toggle-slider"></span>
-            </label>
-            <span className="toggle-label">
-              无背景模式（覆盖块透明，仅显示翻译文字 + 白色光晕）
-            </span>
+          <label className="form-label">覆盖样式</label>
+          <div className="overlay-mode-row">
+            {[
+              ["dark", "黑底白字"],
+              ["light", "白底黑字"],
+              ["none", "无背景"],
+            ].map(([v, label]) => (
+              <label
+                key={v}
+                className={`overlay-mode-item ${
+                  (localSettings?.overlay_mode || "dark") === v ? "active" : ""
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="overlay_mode"
+                  checked={(localSettings?.overlay_mode || "dark") === v}
+                  onChange={() => handleSettingChange("overlay_mode", v)}
+                />
+                {label}
+              </label>
+            ))}
           </div>
+          <p className="form-hint">
+            黑底/白底覆盖整个框选区域；无背景 = 仅显示翻译文字 + 白色光晕
+          </p>
         </div>
 
         <div className="form-group">
@@ -539,15 +562,15 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
             <label className="toggle-switch">
               <input
                 type="checkbox"
-                checked={localSettings?.overlay_bg_fit_text || false}
+                checked={localSettings?.overlay_expand || false}
                 onChange={(e) =>
-                  handleSettingChange("overlay_bg_fit_text", e.target.checked)
+                  handleSettingChange("overlay_expand", e.target.checked)
                 }
               />
               <span className="toggle-slider"></span>
             </label>
             <span className="toggle-label">
-              背景随文字自适应（有背景时色块贴合翻译文字，消除留白）
+              严格对齐模式（译文空间 = 原文区域 +10%，字号自动填充）
             </span>
           </div>
         </div>

@@ -194,16 +194,17 @@ body,
 .engine-menu {
   position: absolute;
   bottom: calc(100% + 8px); /* 向上展开 */
-  left: 0;
+  left: 50%;
+  transform: translateX(-50%); /* 以按钮水平居中 */
   display: flex;
   flex-direction: column; /* 垂直布局 */
   gap: 2px;
-  min-width: 150px;
   padding: 6px;
   border-radius: 10px;
   background: rgba(30, 32, 36, 0.94);
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.4);
   z-index: 50;
+  overflow-y: auto; /* 尺寸为触发按钮3×3，超出内部滚动 */
 }
 
 .engine-menu-item {
@@ -324,24 +325,25 @@ body,
   pointer-events: none;
 }
 
-/* ============ 语言对菜单 ============ */
+/* ============ 语言对（原文按钮 → 译文按钮） ============ */
 
-.lang-menu {
-  max-height: 340px;
-  overflow-y: auto;
+/* 容器：两个语言按钮共用一个 div，箭头分隔；作为弹层定位参照 */
+.lang-pair {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  position: relative;
+}
+
+.lang-arrow {
+  color: #ddd;
+  font-size: 12px;
 }
 
 .lang-section {
   font-size: 11px;
   color: #8a94a6;
   padding: 4px 10px 2px;
-}
-
-.lang-menu .engine-menu-item.lang-reverse {
-  color: #8ecbff;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 0;
-  margin-bottom: 4px;
 }
 
 /* ============ 提示 ============ */

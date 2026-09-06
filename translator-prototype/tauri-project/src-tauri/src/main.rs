@@ -104,6 +104,7 @@ fn main() {
             screenshot::capture_screenshot,
             screenshot::get_extract_button_info,
             system::get_network_status,
+            system::open_external,
             system::get_app_settings,
             system::save_app_settings,
         ])

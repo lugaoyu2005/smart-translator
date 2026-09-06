@@ -41,18 +41,14 @@ interface EngineInfo {
 
 interface ShotSettings {
   screenshot_components: string[];
-  overlay_bg_color: string;
-  overlay_opacity: number;
-  overlay_transparent: boolean;
-  overlay_bg_fit_text: boolean;
+  overlay_mode: string; // dark=黑底白字 light=白底黑字 none=无背景
+  overlay_expand: boolean; // 严格对齐模式
 }
 
 const DEFAULT_SETTINGS: ShotSettings = {
-  screenshot_components: ["engine", "copy", "close", "settings"],
-  overlay_bg_color: "#ffffff",
-  overlay_opacity: 0.95,
-  overlay_transparent: false,
-  overlay_bg_fit_text: false,
+  screenshot_components: ["engine", "lang", "copy", "close", "settings"],
+  overlay_mode: "dark",
+  overlay_expand: false,
 };
 
 type Phase = "select" | "processing" | "result";
@@ -118,28 +114,6 @@ function unionRect(lines: OcrLineInfo[]) {
     maxY = Math.max(maxY, l.y + l.height);
   }
   return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
-}
-
-/** #RRGGBB → rgba字符串 */
-function hexToRgba(hex: string, alpha: number): string {
-  try {
-    const m = hex.replace("#", "");
-    const full =
-      m.length === 3
-        ? m
-            .split("")
-            .map((c) => c + c)
-            .join("")
-        : m;
-    const num = parseInt(full, 16);
-    if (Number.isNaN(num)) return `rgba(255,255,255,${alpha})`;
-    const r = (num >> 16) & 255;
-    const g = (num >> 8) & 255;
-    const b = num & 255;
-    return `rgba(${r},${g},${b},${alpha})`;
-  } catch {
-    return `rgba(255,255,255,${alpha})`;
-  }
 }
 
 /** 字号测量canvas（模块级复用实例） */
@@ -237,7 +211,9 @@ const ScreenshotWindow: React.FC = () => {
   // 原文/译文语言对（菜单组件可改，持久化到 settings.default_translation_direction）
   const [srcLang, setSrcLang] = useState("auto");
   const [dstLang, setDstLang] = useState("zh");
-  const [langMenuOpen, setLangMenuOpen] = useState(false);
+  const [langMenu, setLangMenu] = useState<null | "src" | "dst">(null);
+  // 弹层尺寸 = 触发按钮宽×3、高×3（openMenuBox 实测后写入）
+  const [menuBox, setMenuBox] = useState({ w: 240, h: 96 });
   // 本次按下的拖拽是否带Ctrl（mousedown时快照，避免先松Ctrl再松鼠标导致误清空）
   const dragWasCtrl = useRef(false);
 
@@ -272,25 +248,25 @@ const ScreenshotWindow: React.FC = () => {
       }
 
       try {
-        const s = await invoke<any>("get_app_settings");
+        const [s, es] = await Promise.all([
+          invoke<any>("get_app_settings"),
+          invoke<EngineInfo[]>("list_engines"),
+        ]);
         setSettings({
           screenshot_components:
             s?.screenshot_components ?? DEFAULT_SETTINGS.screenshot_components,
-          overlay_bg_color: s?.overlay_bg_color ?? DEFAULT_SETTINGS.overlay_bg_color,
-          overlay_opacity: s?.overlay_opacity ?? DEFAULT_SETTINGS.overlay_opacity,
-          overlay_transparent:
-            s?.overlay_transparent ?? DEFAULT_SETTINGS.overlay_transparent,
-          overlay_bg_fit_text:
-            s?.overlay_bg_fit_text ?? DEFAULT_SETTINGS.overlay_bg_fit_text,
+          overlay_mode: s?.overlay_mode || DEFAULT_SETTINGS.overlay_mode,
+          overlay_expand: !!s?.overlay_expand,
         });
         const dir = String(s?.default_translation_direction || "auto->zh").split("->");
         setSrcLang(dir[0] || "auto");
         setDstLang(dir[1] || "zh");
-      } catch {}
-
-      try {
-        const es = await invoke<EngineInfo[]>("list_engines");
-        setEngines(es.filter((e) => e.configured));
+        // 双向绑定：初始选中引擎来自设置的"当前翻译源"
+        const configured = (es as EngineInfo[]).filter((e) => e.configured);
+        setEngines(configured);
+        const preferred = String(s?.current_engine || "");
+        const pi = configured.findIndex((e) => e.name === preferred);
+        setEngineIdx(pi >= 0 ? pi : 0);
       } catch {}
     })();
   }, [win]);
@@ -303,12 +279,8 @@ const ScreenshotWindow: React.FC = () => {
         setSettings({
           screenshot_components:
             s?.screenshot_components ?? DEFAULT_SETTINGS.screenshot_components,
-          overlay_bg_color: s?.overlay_bg_color ?? DEFAULT_SETTINGS.overlay_bg_color,
-          overlay_opacity: s?.overlay_opacity ?? DEFAULT_SETTINGS.overlay_opacity,
-          overlay_transparent:
-            s?.overlay_transparent ?? DEFAULT_SETTINGS.overlay_transparent,
-          overlay_bg_fit_text:
-            s?.overlay_bg_fit_text ?? DEFAULT_SETTINGS.overlay_bg_fit_text,
+          overlay_mode: s?.overlay_mode || DEFAULT_SETTINGS.overlay_mode,
+          overlay_expand: !!s?.overlay_expand,
         });
         const dir = String(s?.default_translation_direction || "auto->zh").split("->");
         setSrcLang(dir[0] || "auto");
@@ -318,9 +290,13 @@ const ScreenshotWindow: React.FC = () => {
         const es = await invoke<EngineInfo[]>("list_engines");
         const configured = es.filter((e) => e.configured);
         setEngines(configured);
-        setEngineIdx((i) =>
-          configured.length ? Math.min(i, configured.length - 1) : 0
-        );
+        const s = await invoke<any>("get_app_settings");
+        // 双向绑定：设置中的"当前翻译源"同步到菜单选中项
+        const preferred = String(s?.current_engine || "");
+        setEngineIdx((i) => {
+          const pi = configured.findIndex((e) => e.name === preferred);
+          return pi >= 0 ? pi : configured.length ? Math.min(i, configured.length - 1) : 0;
+        });
       } catch {}
     });
     return () => {
@@ -400,7 +376,7 @@ const ScreenshotWindow: React.FC = () => {
     setPicked([]);
     setGroupDragging(false);
     setEngineMenuOpen(false);
-    setLangMenuOpen(false);
+    setLangMenu(null);
     groupDragged.current = false;
     setSelection({ x: 0, y: 0, width: 0, height: 0 });
   }, []);
@@ -462,8 +438,8 @@ const ScreenshotWindow: React.FC = () => {
         setEngineMenuOpen(false);
         return;
       }
-      if (langMenuOpen) {
-        setLangMenuOpen(false);
+      if (langMenu) {
+        setLangMenu(null);
         return;
       }
       // 左键点击块外：隐藏/显示翻译结果
@@ -705,28 +681,18 @@ const ScreenshotWindow: React.FC = () => {
     }
   };
 
-  /** 点击引擎按钮：向上展开垂直引擎菜单（每次打开实时拉取引擎列表） */
-  const toggleEngineMenu = async () => {
-    setLangMenuOpen(false);
-    if (engineMenuOpen) {
-      setEngineMenuOpen(false);
-      return;
-    }
-    try {
-      const es = await invoke<EngineInfo[]>("list_engines");
-      const configured = es.filter((e) => e.configured);
-      setEngines(configured);
-      setEngineIdx((i) =>
-        configured.length ? Math.min(i, configured.length - 1) : 0
-      );
-    } catch {}
-    setEngineMenuOpen(true);
-  };
-
   /** 点选菜单中的引擎：关闭菜单；报错状态下=用新引擎重试截图翻译 */
   const selectEngine = async (idx: number) => {
     setEngineMenuOpen(false);
     setEngineIdx(idx);
+    // 双向绑定：当前翻译源回写设置
+    void (async () => {
+      try {
+        const s = await invoke<any>("get_app_settings");
+        s.current_engine = engines[idx]?.name ?? "";
+        await invoke("save_app_settings", { settings: s });
+      } catch {}
+    })();
     if (error && selection.width > 0) {
       // 报错重试：重新走 截图→OCR→翻译 全链路（框选区域未变）
       setError("");
@@ -736,10 +702,41 @@ const ScreenshotWindow: React.FC = () => {
     await retranslate(engines[idx]?.name ?? null, srcLang, dstLang);
   };
 
-  /** 点击原/译语言按钮：展开语言菜单 */
-  const toggleLangMenu = () => {
+  /** 弹层尺寸 = 触发元素宽×3、高×3（统一观感），并做视口钳制 */
+  const openMenuBox = (el: HTMLElement) => {
+    const r = el.getBoundingClientRect();
+    setMenuBox({
+      w: Math.min(Math.max(r.width * 3, 120), window.innerWidth - 40),
+      h: Math.min(r.height * 3, window.innerHeight - 80),
+    });
+  };
+
+  /** 点击引擎按钮：展开引擎菜单 */
+  const toggleEngineMenu = (el: HTMLElement) => {
+    setLangMenu(null);
+    openMenuBox(el);
+    if (engineMenuOpen) {
+      setEngineMenuOpen(false);
+      return;
+    }
+    void (async () => {
+      try {
+        const es = await invoke<EngineInfo[]>("list_engines");
+        const configured = es.filter((e) => e.configured);
+        setEngines(configured);
+        setEngineIdx((i) =>
+          configured.length ? Math.min(i, configured.length - 1) : 0
+        );
+      } catch {}
+      setEngineMenuOpen(true);
+    })();
+  };
+
+  /** 点击原/译语言按钮：展开对应语言菜单 */
+  const toggleLangMenu = (which: "src" | "dst", el: HTMLElement) => {
     setEngineMenuOpen(false);
-    setLangMenuOpen((v) => !v);
+    openMenuBox(el);
+    setLangMenu((v) => (v === which ? null : which));
   };
 
   /** 应用语言对：持久化设置；结果阶段自动以新语言对重译（译文不能是自动检测） */
@@ -766,6 +763,58 @@ const ScreenshotWindow: React.FC = () => {
     if (which === "src") applyLang(code, dstLang);
     else applyLang(srcLang, code);
   };
+
+  // 严格对齐模式：译文区域 = 原文矩形 +10%（与其它块重叠时 x 从10%递减至不重叠）
+  const expandedRect = (
+    i: number,
+    r: { x: number; y: number; width: number; height: number }
+  ) => {
+    if (!settings.overlay_expand) return r;
+    const others = blocks.filter((_, k) => k !== i);
+    const overlaps = (c: {
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+    }) =>
+      others.some(
+        (o) =>
+          c.x < o.x + o.width &&
+          c.x + c.width > o.x &&
+          c.y < o.y + o.height &&
+          c.y + c.height > o.y
+      );
+    for (let x = 0.1; x >= 0; x -= 0.01) {
+      const cand = {
+        x: r.x,
+        y: r.y,
+        width: r.width * (1 + x),
+        height: r.height * (1 + x),
+      };
+      if (!overlaps(cand)) return cand;
+    }
+    return r;
+  };
+
+  // 应用内快捷键：Ctrl+Alt+B 反转原文/译文（ref 持有最新值，避免闭包过期）
+  const langPairRef = useRef({ src: "auto", dst: "zh" });
+  const applyLangRef = useRef<(s: string, d: string) => void>(() => {});
+  useEffect(() => {
+    langPairRef.current = { src: srcLang, dst: dstLang };
+  }, [srcLang, dstLang]);
+  useEffect(() => {
+    applyLangRef.current = applyLang;
+  });
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.altKey && (e.key === "b" || e.key === "B")) {
+        e.preventDefault();
+        applyLangRef.current(langPairRef.current.dst, langPairRef.current.src);
+      }
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, []);
 
   /** 复制到剪贴板并退出。内容优先级：
    *  1) 当前原生选区文字（拖动单选 / 双击整段，所见即所得）
@@ -906,7 +955,11 @@ const ScreenshotWindow: React.FC = () => {
                 片段累积；复制按钮按优先级取内容 */}
       {phase === "result" &&
         overlayVisible &&
-        blocks.map((b, i) => (
+        blocks.map((b, i) => {
+          // 严格对齐模式：译文区域 = 原文矩形 +10%（与其它块重叠时递减至不重叠）
+          const rect = expandedRect(i, b);
+          const mode = settings.overlay_mode;
+          return (
           <div
             key={i}
             className="block"
@@ -944,35 +997,23 @@ const ScreenshotWindow: React.FC = () => {
               }
             }}
             style={{
-              left: b.x,
-              top: b.y,
-              // 背景自适应模式：色块贴合翻译文字（宽度自动、超过原文宽度换行）；
-              // 默认模式/无背景模式：固定覆盖原文矩形
-              width:
-                settings.overlay_bg_fit_text && !settings.overlay_transparent
-                  ? "fit-content"
-                  : b.width,
-              maxWidth:
-                settings.overlay_bg_fit_text && !settings.overlay_transparent
-                  ? b.width
+              left: rect.x,
+              top: rect.y,
+              width: rect.width,
+              height: rect.height,
+              background:
+                mode === "dark"
+                  ? "rgba(17,17,17,0.94)"
+                  : mode === "light"
+                  ? "rgba(255,255,255,0.97)"
+                  : "transparent",
+              color: mode === "dark" ? "#fff" : undefined,
+              boxShadow: mode === "none" ? "none" : undefined,
+              textShadow:
+                mode === "none"
+                  ? "0 0 3px rgba(255,255,255,0.95), 0 0 6px rgba(255,255,255,0.7)"
                   : undefined,
-              height:
-                settings.overlay_bg_fit_text && !settings.overlay_transparent
-                  ? "auto"
-                  : b.height,
-              background: settings.overlay_transparent
-                ? "transparent"
-                : hexToRgba(
-                    settings.overlay_bg_color,
-                    settings.overlay_opacity
-                  ),
-              boxShadow: settings.overlay_transparent
-                ? "none"
-                : undefined,
-              textShadow: settings.overlay_transparent
-                ? "0 0 3px rgba(255,255,255,0.95), 0 0 6px rgba(255,255,255,0.7)"
-                : undefined,
-              fontSize: fitFontSize(b.translation, b.width, b.height),
+              fontSize: fitFontSize(b.translation, rect.width, rect.height),
               alignItems: b.translation.includes("\n")
                 ? "flex-start"
                 : "center",
@@ -982,7 +1023,8 @@ const ScreenshotWindow: React.FC = () => {
           >
             {b.translation || "…"}
           </div>
-        ))}
+          );
+        })}
 
       {/* 报错：错误信息在框选区域内水平垂直居中红色显示；
           框选区域过小放不下文字时改为红色圆圈感叹号 */}
@@ -1029,23 +1071,33 @@ const ScreenshotWindow: React.FC = () => {
         <div
           ref={groupRef}
           className={`menu-group ${groupDragging ? "dragging" : ""} ${
-            engineMenuOpen || langMenuOpen ? "menu-open" : ""
+            engineMenuOpen || langMenu ? "menu-open" : ""
           }`}
           style={{ left: groupPos.x, top: groupPos.y }}
           onMouseDown={handleGroupMouseDown}
         >
           {settings.screenshot_components.includes("lang") && (
-            <div className="engine-wrap">
+            <div className="lang-pair" onMouseDown={(e) => e.stopPropagation()}>
               <button
                 className="group-item engine"
-                onMouseDown={(e) => e.stopPropagation()}
-                onClick={toggleLangMenu}
-                title="选择原文/译文语言，⇄ 可反转"
+                onClick={(e) => toggleLangMenu("src", e.currentTarget)}
+                title="选择原文语言（Ctrl+Alt+B 反转原/译）"
               >
-                {`${langName(srcLang)} → ${langName(dstLang)}`}
+                {langName(srcLang)}
               </button>
-              {langMenuOpen && (
-                <div className="engine-menu lang-menu" onMouseDown={(e) => e.stopPropagation()}>
+              <span className="lang-arrow">→</span>
+              <button
+                className="group-item engine"
+                onClick={(e) => toggleLangMenu("dst", e.currentTarget)}
+                title="选择译文语言（Ctrl+Alt+B 反转原/译）"
+              >
+                {langName(dstLang)}
+              </button>
+              {langMenu === "src" && (
+                <div
+                  className="engine-menu"
+                  style={{ width: menuBox.w, height: menuBox.h }}
+                >
                   <div className="lang-section">原文</div>
                   {LANGUAGES.map((l) => (
                     <button
@@ -1057,12 +1109,13 @@ const ScreenshotWindow: React.FC = () => {
                       {srcLang === l.code && <span className="engine-check">✓</span>}
                     </button>
                   ))}
-                  <button
-                    className="engine-menu-item lang-reverse"
-                    onClick={() => applyLang(dstLang, srcLang)}
-                  >
-                    <span className="engine-name">⇄ 反转原文/译文</span>
-                  </button>
+                </div>
+              )}
+              {langMenu === "dst" && (
+                <div
+                  className="engine-menu"
+                  style={{ width: menuBox.w, height: menuBox.h }}
+                >
                   <div className="lang-section">译文</div>
                   {LANGUAGES.filter((l) => l.code !== "auto").map((l) => (
                     <button
@@ -1083,7 +1136,7 @@ const ScreenshotWindow: React.FC = () => {
               <button
                 className="group-item engine"
                 onMouseDown={(e) => e.stopPropagation()}
-                onClick={toggleEngineMenu}
+                onClick={(e) => toggleEngineMenu(e.currentTarget)}
                 title="选择翻译引擎并刷新翻译"
               >
                 {retranslating ? "…" : engines[engineIdx]?.name || "选择引擎"}
@@ -1091,6 +1144,7 @@ const ScreenshotWindow: React.FC = () => {
               {engineMenuOpen && (
                 <div
                   className="engine-menu"
+                  style={{ width: menuBox.w, height: menuBox.h }}
                   onMouseDown={(e) => e.stopPropagation()}
                 >
                   {engines.length === 0 && (
