@@ -922,6 +922,31 @@ pub async fn get_extract_button_info() -> Result<ExtractButton, String> {
 mod tests {
     use super::*;
 
+    /// 端到端验证 RapidOCR：模型自动下载 + ONNX Runtime 加载 + 推理管线
+    /// 首次运行需联网下载约15MB模型；白图无文字应返回空结果
+    #[test]
+    #[ignore]
+    fn test_rapidocr_model_and_inference() {
+        use rapidocr_core::config::{PipelineConfig, RapidOcrConfig};
+
+        let dir = std::env::temp_dir().join("rapidocr-model-verify");
+        let model_path = rapidocr_core::model::ensure_ppocrv6_small_models(&dir)
+            .expect("模型下载/准备失败");
+        assert!(model_path.exists());
+
+        let cfg = RapidOcrConfig::ppocr_v6_small(&model_path).with_pipeline(PipelineConfig {
+            use_det: true,
+            use_cls: false,
+            use_rec: true,
+        });
+        let mut ocr = rapidocr_core::RapidOcr::new(cfg).expect("RapidOCR初始化失败");
+
+        // 纯白图：无文字，应返回空结果（验证完整推理管线可执行）
+        let img = image::RgbImage::new(160, 60);
+        let out = ocr.run_image(&img).expect("推理失败");
+        assert!(out.lines.is_empty(), "白图不应识别出文字");
+    }
+
     #[test]
     fn test_button_below_selection() {
         let selection = ScreenshotRegion {
