@@ -3256,6 +3256,7 @@ name = "smart-translator"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "image",
  "md5",
  "reqwest 0.11.27",

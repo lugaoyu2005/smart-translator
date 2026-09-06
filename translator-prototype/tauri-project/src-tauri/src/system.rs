@@ -43,15 +43,65 @@ pub struct AppSettings {
     // 有背景时：背景块随翻译文字自适应（贴合文字消除留白）；false=固定覆盖原文区域
     #[serde(default)]
     pub overlay_bg_fit_text: bool,
+    // 主窗口尺寸：last=记住上次大小（默认）；fixed=固定大小（宽高自定义）
+    #[serde(default = "default_window_size_mode")]
+    pub window_size_mode: String,
+    #[serde(default = "default_window_fixed_width")]
+    pub window_fixed_width: u32,
+    #[serde(default = "default_window_fixed_height")]
+    pub window_fixed_height: u32,
+    #[serde(default)]
+    pub window_last_width: u32,
+    #[serde(default)]
+    pub window_last_height: u32,
+    // 供应商凭据（框架阶段：仅存储，翻译实现后续补齐）
+    #[serde(default)]
+    pub providers: ProviderSettings,
+}
+
+fn default_window_size_mode() -> String {
+    "last".to_string()
+}
+
+fn default_window_fixed_width() -> u32 {
+    1200
+}
+
+fn default_window_fixed_height() -> u32 {
+    800
 }
 
 fn default_screenshot_components() -> Vec<String> {
     vec![
         "engine".to_string(),
+        "lang".to_string(),
         "copy".to_string(),
         "close".to_string(),
         "settings".to_string(),
     ]
+}
+
+/// 框架阶段供应商凭据存储（翻译实现后续逐家补齐）
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct ProviderSettings {
+    #[serde(default)]
+    pub niutrans_api_key: String,
+    #[serde(default)]
+    pub deepl_api_key: String,
+    #[serde(default)]
+    pub tencent_secret_id: String,
+    #[serde(default)]
+    pub tencent_secret_key: String,
+    #[serde(default)]
+    pub ali_access_key_id: String,
+    #[serde(default)]
+    pub ali_access_key_secret: String,
+    #[serde(default)]
+    pub custom_openai_base_url: String,
+    #[serde(default)]
+    pub custom_openai_api_key: String,
+    #[serde(default)]
+    pub custom_openai_model: String,
 }
 
 fn default_overlay_bg_color() -> String {
@@ -80,7 +130,7 @@ impl Default for AppSettings {
             default_translation_direction: "auto->zh".to_string(),
             offline_engine: "marian".to_string(),
             online_apis: vec!["baidu".to_string(), "youdao".to_string()],
-            ocr_engine: "tesseract".to_string(),
+            ocr_engine: "windows".to_string(),
             screenshot_behavior: ScreenshotBehavior {
                 cover_original_text: true,
                 left_click_toggle: true,
@@ -97,6 +147,12 @@ impl Default for AppSettings {
             overlay_opacity: default_overlay_opacity(),
             overlay_transparent: false,
             overlay_bg_fit_text: false,
+            window_size_mode: default_window_size_mode(),
+            window_fixed_width: default_window_fixed_width(),
+            window_fixed_height: default_window_fixed_height(),
+            window_last_width: 0,
+            window_last_height: 0,
+            providers: ProviderSettings::default(),
         }
     }
 }
@@ -109,17 +165,47 @@ fn settings_path() -> std::path::PathBuf {
     path
 }
 
+/// 加载后的兼容性迁移（就地修正历史遗留值）
+fn migrate(settings: &mut AppSettings) {
+    // 历史默认值 "tesseract" 从未实现，实际可用的是 Windows 内置 OCR
+    if settings.ocr_engine == "tesseract" {
+        settings.ocr_engine = "windows".to_string();
+    }
+    // 菜单组自动补入新增的"原/译语言"组件
+    if !settings.screenshot_components.iter().any(|c| c == "lang") {
+        if let Some(pos) = settings
+            .screenshot_components
+            .iter()
+            .position(|c| c == "engine")
+        {
+            settings.screenshot_components.insert(pos + 1, "lang".to_string());
+        } else {
+            settings.screenshot_components.insert(0, "lang".to_string());
+        }
+    }
+}
+
 /// 同步加载设置（setup阶段使用）
 pub fn load_settings() -> AppSettings {
     let path = settings_path();
     if path.exists() {
         if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Ok(settings) = serde_json::from_str::<AppSettings>(&content) {
+            if let Ok(mut settings) = serde_json::from_str::<AppSettings>(&content) {
+                migrate(&mut settings);
                 return settings;
             }
         }
     }
-    AppSettings::default()
+    let mut settings = AppSettings::default();
+    migrate(&mut settings);
+    settings
+}
+
+/// 保存设置到磁盘（供窗口尺寸记忆等内部流程使用）
+pub fn save_settings(settings: &AppSettings) -> Result<(), String> {
+    let json =
+        serde_json::to_string_pretty(settings).map_err(|e| format!("序列化设置失败: {e}"))?;
+    std::fs::write(settings_path(), json).map_err(|e| format!("写入设置文件失败: {e}"))
 }
 
 // 真实网络检测：尝试TCP连接多个公共端点，测量延迟

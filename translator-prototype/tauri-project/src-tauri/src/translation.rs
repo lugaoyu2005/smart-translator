@@ -11,13 +11,29 @@ pub struct AppState {
     pub manager: tokio::sync::Mutex<TranslationManager>,
 }
 
-/// 从设置中的API密钥构建引擎管理器（术语库从 terms.json 加载）
+/// 从设置中的API密钥构建引擎管理器（术语库从 terms.json 加载）；
+/// 只构建「在线翻译引擎」多选框中启用的引擎，与截图翻译菜单双向同步
 pub fn build_manager(settings: &crate::system::AppSettings) -> TranslationManager {
-    let baidu = BaiduEngine::new(&settings.baidu_app_id, &settings.baidu_secret);
-    let youdao = YoudaoEngine::new(&settings.youdao_app_key, &settings.youdao_app_secret);
+    let enabled = |id: &str| settings.online_apis.iter().any(|s| s == id);
+    let baidu = if enabled("baidu") {
+        Some(BaiduEngine::new(
+            &settings.baidu_app_id,
+            &settings.baidu_secret,
+        ))
+    } else {
+        None
+    };
+    let youdao = if enabled("youdao") {
+        Some(YoudaoEngine::new(
+            &settings.youdao_app_key,
+            &settings.youdao_app_secret,
+        ))
+    } else {
+        None
+    };
     let term_base = crate::terms::load_term_base();
 
-    TranslationManager::new(Some(baidu), Some(youdao), term_base)
+    TranslationManager::new(baidu, youdao, term_base)
 }
 
 #[derive(Debug, Serialize, Deserialize)]

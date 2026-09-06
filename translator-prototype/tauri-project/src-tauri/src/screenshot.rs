@@ -291,7 +291,10 @@ mod win {
     ];
 
     /// 应用符号纠错：先内置穷举表，再用户术语映射（术语管理中 1-2 字非字母数字源词）
-    fn apply_symbol_corrections(text: &str, corrections: &[(String, String)]) -> String {
+    pub(crate) fn apply_symbol_corrections(
+        text: &str,
+        corrections: &[(String, String)],
+    ) -> String {
         let mut result = text.to_string();
         for (from, to) in BUILTIN_SYMBOL_FIXES {
             result = result.replace(from, to);
@@ -604,6 +607,7 @@ pub fn capture_region_store(x: i32, y: i32, width: i32, height: i32) -> Result<(
 }
 
 /// 对暂存的截图执行OCR（OCR较慢，异步执行，取走即清空缓存）
+/// 引擎按 settings.ocr_engine 分发：windows=内置引擎；youdao=有道OCR（云）。
 /// 符号纠错映射来自术语管理（1-2字非字母数字源词的术语），如 乛→→
 #[tauri::command]
 pub async fn ocr_stored_capture(
@@ -626,21 +630,162 @@ pub async fn ocr_stored_capture(
                 })
                 .collect()
         };
-        tauri::async_runtime::spawn_blocking(move || {
-            let data = LAST_CAPTURE
-                .lock()
-                .map_err(|_| "截图缓存锁不可用".to_string())?
-                .take()
-                .ok_or_else(|| "没有已暂存的截图".to_string())?;
-            win::ocr_from_pixels(&data.pixels, data.width, data.height, &corrections)
-        })
-        .await
-        .map_err(|e| format!("OCR任务执行失败: {e}"))?
+
+        let data = LAST_CAPTURE
+            .lock()
+            .map_err(|_| "截图缓存锁不可用".to_string())?
+            .take()
+            .ok_or_else(|| "没有已暂存的截图".to_string())?;
+
+        let settings = crate::system::load_settings();
+        match settings.ocr_engine.as_str() {
+            "youdao" => {
+                youdao_ocr_pixels(
+                    &data,
+                    &settings.youdao_app_key,
+                    &settings.youdao_app_secret,
+                    &corrections,
+                )
+                .await
+            }
+            _ => {
+                tauri::async_runtime::spawn_blocking(move || {
+                    win::ocr_from_pixels(&data.pixels, data.width, data.height, &corrections)
+                })
+                .await
+                .map_err(|e| format!("OCR任务执行失败: {e}"))?
+            }
+        }
     }
     #[cfg(not(target_os = "windows"))]
     {
         let _ = state;
         Err("当前平台暂不支持截图OCR".to_string())
+    }
+}
+
+/// 有道OCR（云）：区域截图 BGRA → PNG → Base64 → ocrapi
+/// 签名按有道OCR规范：input = sha256(q的Base64字符串)，sha256(appKey+input+salt+curtime+secret)
+async fn youdao_ocr_pixels(
+    data: &ScreenshotData,
+    app_key: &str,
+    app_secret: &str,
+    corrections: &[(String, String)],
+) -> Result<OcrResult, String> {
+    use base64::Engine as _;
+    use sha2::{Digest, Sha256};
+
+    if app_key.is_empty() || app_secret.is_empty() {
+        return Err("有道OCR未配置：请先在设置中填写有道应用ID与密钥".to_string());
+    }
+
+    // BGRA → RGBA → PNG → Base64
+    let mut rgba = data.pixels.clone();
+    for px in rgba.chunks_exact_mut(4) {
+        px.swap(0, 2);
+    }
+    let img = image::RgbaImage::from_raw(data.width as u32, data.height as u32, rgba)
+        .ok_or_else(|| "图像数据无效".to_string())?;
+    let mut png = Vec::new();
+    image::DynamicImage::ImageRgba8(img)
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .map_err(|e| format!("PNG编码失败: {e}"))?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+
+    let salt = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos().to_string())
+        .unwrap_or_else(|_| "0".to_string());
+    let curtime = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_else(|_| "0".to_string());
+
+    let q_hash = format!("{:x}", Sha256::digest(b64.as_bytes()));
+    let sign_raw = format!("{}{}{}{}{}", app_key, q_hash, salt, curtime, app_secret);
+    let sign = format!("{:x}", Sha256::digest(sign_raw.as_bytes()));
+
+    let client = reqwest::Client::new();
+    let resp: serde_json::Value = client
+        .post("https://openapi.youdao.com/ocrapi")
+        .form(&[
+            ("type", "1".to_string()),
+            ("q", b64),
+            ("langType", "auto".to_string()),
+            ("appKey", app_key.to_string()),
+            ("salt", salt),
+            ("curtime", curtime),
+            ("signType", "v3".to_string()),
+            ("sign", sign),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("有道OCR请求失败: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("有道OCR响应解析失败: {e}"))?;
+
+    if let Some(code) = resp.get("errorCode").and_then(|v| v.as_str()) {
+        if code != "0" {
+            return Err(format!("有道OCR失败（错误码{code}）"));
+        }
+    }
+
+    // 解析 lines：boundingBox 内递归收集所有 (x,y) 点，取包围盒
+    let empty = Vec::new();
+    let raw_lines = resp
+        .get("lines")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&empty);
+    let mut lines = Vec::new();
+    for l in raw_lines {
+        let text = win::apply_symbol_corrections(
+            l.get("text").and_then(|v| v.as_str()).unwrap_or(""),
+            corrections,
+        );
+        if text.trim().is_empty() {
+            continue;
+        }
+        let mut pts: Vec<(f64, f64)> = Vec::new();
+        collect_points(l.get("boundingBox").unwrap_or(&serde_json::Value::Null), &mut pts);
+        if pts.is_empty() {
+            continue;
+        }
+        let min_x = pts.iter().map(|p| p.0).fold(f64::MAX, f64::min);
+        let min_y = pts.iter().map(|p| p.1).fold(f64::MAX, f64::min);
+        let max_x = pts.iter().map(|p| p.0).fold(f64::MIN, f64::max);
+        let max_y = pts.iter().map(|p| p.1).fold(f64::MIN, f64::max);
+        lines.push(OcrLineInfo {
+            text,
+            x: min_x,
+            y: min_y,
+            width: max_x - min_x,
+            height: max_y - min_y,
+        });
+    }
+    Ok(OcrResult { lines, language: "auto".to_string() })
+}
+
+/// 递归收集 JSON 值树中所有同时含 x/y 键的对象作为坐标点
+fn collect_points(v: &serde_json::Value, pts: &mut Vec<(f64, f64)>) {
+    match v {
+        serde_json::Value::Object(m) => {
+            if let (Some(x), Some(y)) = (
+                m.get("x").and_then(|v| v.as_f64()),
+                m.get("y").and_then(|v| v.as_f64()),
+            ) {
+                pts.push((x, y));
+            }
+            for (_, sub) in m {
+                collect_points(sub, pts);
+            }
+        }
+        serde_json::Value::Array(a) => {
+            for sub in a {
+                collect_points(sub, pts);
+            }
+        }
+        _ => {}
     }
 }
 

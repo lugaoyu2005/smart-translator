@@ -7,9 +7,29 @@ import TermsPanel from "./TermsPanel";
 // 菜单组组件定义（工具箱：设置里可增删、排序）
 const GROUP_COMPONENTS = [
   { id: "engine", label: "翻译引擎" },
+  { id: "lang", label: "原/译语言" },
   { id: "copy", label: "复制（原/译）" },
   { id: "close", label: "关闭" },
   { id: "settings", label: "设置" },
+];
+
+// 在线翻译引擎清单：status 非空 = 框架阶段（翻译实现后续接入）
+const ONLINE_PROVIDERS = [
+  { id: "baidu", label: "百度翻译", status: "" },
+  { id: "youdao", label: "有道智云", status: "" },
+  { id: "niutrans", label: "小牛翻译", status: "未接入" },
+  { id: "deepl", label: "DeepL", status: "未接入" },
+  { id: "tencent", label: "腾讯云翻译", status: "未接入" },
+  { id: "ali", label: "阿里云翻译", status: "未接入" },
+  { id: "custom", label: "自定义（OpenAI兼容）", status: "未接入" },
+];
+
+// OCR 引擎清单：ready=true 当前可用
+const OCR_ENGINES = [
+  { id: "windows", label: "Windows 内置 OCR", status: "已接入 · 本地 · 免费" },
+  { id: "youdao", label: "有道 OCR", status: "已接入 · 云 · 体验金计费" },
+  { id: "rapidocr", label: "RapidOCR 本地", status: "未接入 · 敬请期待" },
+  { id: "tesseract", label: "Tesseract", status: "未接入" },
 ];
 
 interface SettingsPanelProps {
@@ -81,6 +101,23 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
     handleSettingChange("screenshot_components", comps);
   };
 
+  // 在线翻译引擎：启用/停用（双向绑定截图翻译引擎菜单）
+  const toggleOnlineApi = (id: string, on: boolean) => {
+    const apis: string[] = localSettings?.online_apis || [];
+    handleSettingChange(
+      "online_apis",
+      on ? [...new Set([...apis, id])] : apis.filter((a: string) => a !== id)
+    );
+  };
+
+  // 供应商凭据字段更新
+  const setProviderKey = (field: string, value: string) => {
+    handleSettingChange("providers", {
+      ...(localSettings?.providers || {}),
+      [field]: value,
+    });
+  };
+
   const renderBasicSettings = () => (
     <div className="settings-section">
       <h3 className="section-title">基本设置</h3>
@@ -113,6 +150,58 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
       </div>
       
       <div className="form-group">
+        <label className="form-label">主窗口大小</label>
+        <div className="toggle-group">
+          <label className="toggle-switch">
+            <input
+              type="checkbox"
+              checked={(localSettings?.window_size_mode || "last") === "fixed"}
+              onChange={(e) =>
+                handleSettingChange(
+                  "window_size_mode",
+                  e.target.checked ? "fixed" : "last"
+                )
+              }
+            />
+            <span className="toggle-slider"></span>
+          </label>
+          <span className="toggle-label">
+            固定大小（关闭 = 记住上次调整后的大小）
+          </span>
+        </div>
+        {(localSettings?.window_size_mode || "last") === "fixed" && (
+          <div className="api-keys">
+            <input
+              type="number"
+              className="form-input"
+              placeholder="宽（≥400）"
+              min={400}
+              value={localSettings?.window_fixed_width || 1200}
+              onChange={(e) =>
+                handleSettingChange(
+                  "window_fixed_width",
+                  Math.max(400, parseInt(e.target.value) || 1200)
+                )
+              }
+            />
+            <input
+              type="number"
+              className="form-input"
+              placeholder="高（≥300）"
+              min={300}
+              value={localSettings?.window_fixed_height || 800}
+              onChange={(e) =>
+                handleSettingChange(
+                  "window_fixed_height",
+                  Math.max(300, parseInt(e.target.value) || 800)
+                )
+              }
+            />
+          </div>
+        )}
+      </div>
+
+      <div className="form-group">
         <label className="form-label">网络状态</label>
         <div className="network-status">
           <div className={`status-indicator ${true ? "online" : "offline"}`}></div>
@@ -125,7 +214,175 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
   const renderTranslationSettings = () => (
     <div className="settings-section">
       <h3 className="section-title">翻译引擎</h3>
-      
+
+      <div className="form-group">
+        <label className="form-label">在线翻译引擎</label>
+        {ONLINE_PROVIDERS.map((p) => (
+          <div className="toggle-group" key={p.id}>
+            <label className="toggle-switch">
+              <input
+                type="checkbox"
+                checked={localSettings?.online_apis?.includes(p.id) || false}
+                onChange={(e) => toggleOnlineApi(p.id, e.target.checked)}
+              />
+              <span className="toggle-slider"></span>
+            </label>
+            <span className="toggle-label">
+              {p.label}
+              {p.status && <span className="provider-badge">{p.status}</span>}
+            </span>
+          </div>
+        ))}
+        <p className="form-hint">启用的引擎（已接入的）会出现在截图翻译的引擎菜单中</p>
+      </div>
+
+      {localSettings?.online_apis?.includes("baidu") && (
+        <div className="form-group">
+          <label className="form-label">百度翻译 API</label>
+          <div className="api-keys">
+            <input
+              type="text"
+              className="form-input"
+              placeholder="百度 APP ID"
+              value={localSettings?.baidu_app_id || ""}
+              onChange={(e) => handleSettingChange("baidu_app_id", e.target.value)}
+            />
+            <input
+              type="password"
+              className="form-input"
+              placeholder="百度 密钥"
+              value={localSettings?.baidu_secret || ""}
+              onChange={(e) => handleSettingChange("baidu_secret", e.target.value)}
+            />
+          </div>
+        </div>
+      )}
+
+      {localSettings?.online_apis?.includes("youdao") && (
+        <div className="form-group">
+          <label className="form-label">有道智云 API</label>
+          <div className="api-keys">
+            <input
+              type="text"
+              className="form-input"
+              placeholder="有道 应用ID"
+              value={localSettings?.youdao_app_key || ""}
+              onChange={(e) => handleSettingChange("youdao_app_key", e.target.value)}
+            />
+            <input
+              type="password"
+              className="form-input"
+              placeholder="有道 应用密钥"
+              value={localSettings?.youdao_app_secret || ""}
+              onChange={(e) => handleSettingChange("youdao_app_secret", e.target.value)}
+            />
+          </div>
+        </div>
+      )}
+
+      {localSettings?.online_apis?.includes("niutrans") && (
+        <div className="form-group">
+          <label className="form-label">小牛翻译 API（未接入）</label>
+          <div className="api-keys">
+            <input
+              type="password"
+              className="form-input"
+              placeholder="API Key"
+              value={localSettings?.providers?.niutrans_api_key || ""}
+              onChange={(e) => setProviderKey("niutrans_api_key", e.target.value)}
+            />
+          </div>
+        </div>
+      )}
+
+      {localSettings?.online_apis?.includes("deepl") && (
+        <div className="form-group">
+          <label className="form-label">DeepL API（未接入）</label>
+          <div className="api-keys">
+            <input
+              type="password"
+              className="form-input"
+              placeholder="DeepL Auth Key（Free版以 ..fx 结尾）"
+              value={localSettings?.providers?.deepl_api_key || ""}
+              onChange={(e) => setProviderKey("deepl_api_key", e.target.value)}
+            />
+          </div>
+        </div>
+      )}
+
+      {localSettings?.online_apis?.includes("tencent") && (
+        <div className="form-group">
+          <label className="form-label">腾讯云翻译 API（未接入）</label>
+          <div className="api-keys">
+            <input
+              type="text"
+              className="form-input"
+              placeholder="SecretId"
+              value={localSettings?.providers?.tencent_secret_id || ""}
+              onChange={(e) => setProviderKey("tencent_secret_id", e.target.value)}
+            />
+            <input
+              type="password"
+              className="form-input"
+              placeholder="SecretKey"
+              value={localSettings?.providers?.tencent_secret_key || ""}
+              onChange={(e) => setProviderKey("tencent_secret_key", e.target.value)}
+            />
+          </div>
+        </div>
+      )}
+
+      {localSettings?.online_apis?.includes("ali") && (
+        <div className="form-group">
+          <label className="form-label">阿里云翻译 API（未接入）</label>
+          <div className="api-keys">
+            <input
+              type="text"
+              className="form-input"
+              placeholder="AccessKey ID"
+              value={localSettings?.providers?.ali_access_key_id || ""}
+              onChange={(e) => setProviderKey("ali_access_key_id", e.target.value)}
+            />
+            <input
+              type="password"
+              className="form-input"
+              placeholder="AccessKey Secret"
+              value={localSettings?.providers?.ali_access_key_secret || ""}
+              onChange={(e) => setProviderKey("ali_access_key_secret", e.target.value)}
+            />
+          </div>
+        </div>
+      )}
+
+      {localSettings?.online_apis?.includes("custom") && (
+        <div className="form-group">
+          <label className="form-label">自定义供应商（OpenAI 兼容 · 未接入）</label>
+          <div className="api-keys">
+            <input
+              type="text"
+              className="form-input"
+              placeholder="Base URL（如 https://api.deepseek.com/v1）"
+              value={localSettings?.providers?.custom_openai_base_url || ""}
+              onChange={(e) => setProviderKey("custom_openai_base_url", e.target.value)}
+            />
+            <input
+              type="password"
+              className="form-input"
+              placeholder="API Key"
+              value={localSettings?.providers?.custom_openai_api_key || ""}
+              onChange={(e) => setProviderKey("custom_openai_api_key", e.target.value)}
+            />
+            <input
+              type="text"
+              className="form-input"
+              placeholder="模型名（如 deepseek-chat）"
+              value={localSettings?.providers?.custom_openai_model || ""}
+              onChange={(e) => setProviderKey("custom_openai_model", e.target.value)}
+            />
+          </div>
+        </div>
+      )}
+
       <div className="form-group">
         <label className="form-label">离线翻译引擎</label>
         <select
@@ -138,82 +395,7 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
           <option value="disabled">禁用离线翻译</option>
         </select>
       </div>
-      
-      <div className="form-group">
-        <label className="form-label">在线翻译API</label>
-        <div className="toggle-group">
-          <label className="toggle-switch">
-            <input
-              type="checkbox"
-              checked={localSettings?.online_apis?.includes("baidu") || false}
-              onChange={(e) => {
-                const apis = localSettings?.online_apis || [];
-                if (e.target.checked) {
-                  handleSettingChange("online_apis", [...apis, "baidu"]);
-                } else {
-                  handleSettingChange("online_apis", apis.filter((api: string) => api !== "baidu"));
-                }
-              }}
-            />
-            <span className="toggle-slider"></span>
-          </label>
-          <span className="toggle-label">百度翻译 (免费额度)</span>
-        </div>
 
-        <div className="api-keys">
-          <input
-            type="text"
-            className="form-input"
-            placeholder="百度 APP ID"
-            value={localSettings?.baidu_app_id || ""}
-            onChange={(e) => handleSettingChange("baidu_app_id", e.target.value)}
-          />
-          <input
-            type="password"
-            className="form-input"
-            placeholder="百度 密钥"
-            value={localSettings?.baidu_secret || ""}
-            onChange={(e) => handleSettingChange("baidu_secret", e.target.value)}
-          />
-        </div>
-        
-        <div className="toggle-group">
-          <label className="toggle-switch">
-            <input
-              type="checkbox"
-              checked={localSettings?.online_apis?.includes("youdao") || false}
-              onChange={(e) => {
-                const apis = localSettings?.online_apis || [];
-                if (e.target.checked) {
-                  handleSettingChange("online_apis", [...apis, "youdao"]);
-                } else {
-                  handleSettingChange("online_apis", apis.filter((api: string) => api !== "youdao"));
-                }
-              }}
-            />
-            <span className="toggle-slider"></span>
-          </label>
-          <span className="toggle-label">有道智云 (免费额度)</span>
-        </div>
-
-        <div className="api-keys">
-          <input
-            type="text"
-            className="form-input"
-            placeholder="有道 应用ID"
-            value={localSettings?.youdao_app_key || ""}
-            onChange={(e) => handleSettingChange("youdao_app_key", e.target.value)}
-          />
-          <input
-            type="password"
-            className="form-input"
-            placeholder="有道 应用密钥"
-            value={localSettings?.youdao_app_secret || ""}
-            onChange={(e) => handleSettingChange("youdao_app_secret", e.target.value)}
-          />
-        </div>
-      </div>
-      
       <div className="form-group">
         <label className="form-label">术语优先级调整</label>
         <select
@@ -241,16 +423,28 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         <h3 className="section-title">截图翻译</h3>
 
         <div className="form-group">
-          <label className="form-label">OCR引擎</label>
-          <select
-            className="form-select"
-            value={localSettings?.ocr_engine || "windows"}
-            onChange={(e) => handleSettingChange("ocr_engine", e.target.value)}
-          >
-            <option value="windows">Windows内置OCR (推荐，无需安装)</option>
-            <option value="tesseract">Tesseract OCR</option>
-            <option value="baidu">百度OCR (有免费额度)</option>
-          </select>
+          <label className="form-label">OCR 引擎</label>
+          {OCR_ENGINES.map((o) => {
+            const enabled = o.status.indexOf("未接入") < 0;
+            return (
+              <div className="toggle-group" key={o.id}>
+                <label className="toggle-switch">
+                  <input
+                    type="checkbox"
+                    checked={localSettings?.ocr_engine === o.id}
+                    disabled={!enabled}
+                    onChange={() => handleSettingChange("ocr_engine", o.id)}
+                  />
+                  <span className="toggle-slider"></span>
+                </label>
+                <span className="toggle-label">
+                  {o.label}
+                  <span className="provider-badge">{o.status}</span>
+                </span>
+              </div>
+            );
+          })}
+          <p className="form-hint">单选：同时只有一个 OCR 引擎生效，用于截图翻译的文字识别</p>
         </div>
 
         <div className="form-group">

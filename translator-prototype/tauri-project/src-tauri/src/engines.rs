@@ -57,6 +57,8 @@ fn lang_code(engine: &EngineType, code: &str) -> String {
             "en" => "en".to_string(),
             "ja" => "jp".to_string(), // 百度用 jp
             "ko" => "kor".to_string(), // 百度用 kor
+            "es" => "spa".to_string(), // 百度用 spa
+            "ru" | "fr" | "de" | "pt" => code.to_string(),
             _ => code.to_string(),
         },
         EngineType::Youdao => match code {
@@ -64,6 +66,7 @@ fn lang_code(engine: &EngineType, code: &str) -> String {
             "en" => "en".to_string(),
             "ja" => "ja".to_string(),
             "ko" => "ko".to_string(),
+            "ru" | "fr" | "de" | "es" | "pt" => code.to_string(),
             _ => code.to_string(),
         },
         EngineType::Offline => code.to_string(),

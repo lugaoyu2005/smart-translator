@@ -58,6 +58,20 @@ const DEFAULT_SETTINGS: ShotSettings = {
 type Phase = "select" | "processing" | "result";
 type CopyMode = "original" | "translated";
 
+// 菜单语言对：国际通用语 + 亚洲高频语（百度/有道共同支持）
+const LANGUAGES = [
+  { code: "auto", name: "自动检测" },
+  { code: "zh", name: "中文" },
+  { code: "en", name: "英语" },
+  { code: "ja", name: "日语" },
+  { code: "ko", name: "韩语" },
+  { code: "ru", name: "俄语" },
+  { code: "fr", name: "法语" },
+  { code: "de", name: "德语" },
+  { code: "es", name: "西班牙语" },
+  { code: "pt", name: "葡萄牙语" },
+];
+
 // ============ 工具函数 ============
 
 /**
@@ -220,6 +234,10 @@ const ScreenshotWindow: React.FC = () => {
     { text: string; block: number | null; whole: boolean; range: Range }[]
   >([]);
   const [ctrlHeld, setCtrlHeld] = useState(false);
+  // 原文/译文语言对（菜单组件可改，持久化到 settings.default_translation_direction）
+  const [srcLang, setSrcLang] = useState("auto");
+  const [dstLang, setDstLang] = useState("zh");
+  const [langMenuOpen, setLangMenuOpen] = useState(false);
   // 本次按下的拖拽是否带Ctrl（mousedown时快照，避免先松Ctrl再松鼠标导致误清空）
   const dragWasCtrl = useRef(false);
 
@@ -265,6 +283,9 @@ const ScreenshotWindow: React.FC = () => {
           overlay_bg_fit_text:
             s?.overlay_bg_fit_text ?? DEFAULT_SETTINGS.overlay_bg_fit_text,
         });
+        const dir = String(s?.default_translation_direction || "auto->zh").split("->");
+        setSrcLang(dir[0] || "auto");
+        setDstLang(dir[1] || "zh");
       } catch {}
 
       try {
@@ -289,6 +310,9 @@ const ScreenshotWindow: React.FC = () => {
           overlay_bg_fit_text:
             s?.overlay_bg_fit_text ?? DEFAULT_SETTINGS.overlay_bg_fit_text,
         });
+        const dir = String(s?.default_translation_direction || "auto->zh").split("->");
+        setSrcLang(dir[0] || "auto");
+        setDstLang(dir[1] || "zh");
       } catch {}
       try {
         const es = await invoke<EngineInfo[]>("list_engines");
@@ -376,6 +400,7 @@ const ScreenshotWindow: React.FC = () => {
     setPicked([]);
     setGroupDragging(false);
     setEngineMenuOpen(false);
+    setLangMenuOpen(false);
     groupDragged.current = false;
     setSelection({ x: 0, y: 0, width: 0, height: 0 });
   }, []);
@@ -387,6 +412,17 @@ const ScreenshotWindow: React.FC = () => {
       un.then((f) => f());
     };
   }, [resetState]);
+
+  // 启动预热：Rust 短暂 show/hide 窗口以初始化合成管线，期间不渲染任何内容（完全透明无闪屏）
+  const [warming, setWarming] = useState(false);
+  useEffect(() => {
+    const u1 = listen("screenshot-warmup", () => setWarming(true));
+    const u2 = listen("screenshot-warmup-done", () => setWarming(false));
+    return () => {
+      u1.then((f) => f());
+      u2.then((f) => f());
+    };
+  }, []);
 
   /** 退出截图翻译：重置状态并隐藏窗口 */
   const exit = useCallback(async () => {
@@ -421,9 +457,13 @@ const ScreenshotWindow: React.FC = () => {
       dragWasCtrl.current = ctrlHeld;
       // Ctrl多选拖选模式：不切换覆盖层，允许原生拖选开始
       if (ctrlHeld) return;
-      // 引擎菜单打开时：点击菜单外仅关闭菜单，不切换覆盖层
+      // 引擎/语言菜单打开时：点击菜单外仅关闭菜单，不切换覆盖层
       if (engineMenuOpen) {
         setEngineMenuOpen(false);
+        return;
+      }
+      if (langMenuOpen) {
+        setLangMenuOpen(false);
         return;
       }
       // 左键点击块外：隐藏/显示翻译结果
@@ -565,8 +605,8 @@ const ScreenshotWindow: React.FC = () => {
         engine_used: string;
       }>("translate_lines", {
         lines: groupTexts,
-        from: "auto",
-        to: "zh",
+        from: srcLang,
+        to: dstLang,
         engine: engineName ?? null,
       });
 
@@ -580,11 +620,14 @@ const ScreenshotWindow: React.FC = () => {
       await win.show();
       await win.setFocus();
     } catch (e: any) {
+      // 报错信息显示在框选区域内（红字居中），菜单栏保持可用（可切换引擎重试）
       setError(typeof e === "string" ? e : "截图处理失败");
-      setPhase("select");
-      setSelection({ x: 0, y: 0, width: 0, height: 0 });
+      setBlocks([]);
+      setNoText(false);
+      setPhase("result");
       try {
         await win.show();
+        await win.setFocus();
       } catch {}
     }
   };
@@ -636,7 +679,7 @@ const ScreenshotWindow: React.FC = () => {
   }, [groupDragging]);
 
   /** 用指定引擎重译并刷新覆盖层 */
-  const retranslate = async (engineName: string | null) => {
+  const retranslate = async (engineName: string | null, from: string, to: string) => {
     if (blocks.length === 0 || retranslating) return;
     setRetranslating(true);
     try {
@@ -645,8 +688,8 @@ const ScreenshotWindow: React.FC = () => {
         engine_used: string;
       }>("translate_lines", {
         lines: blocks.map((b) => b.original),
-        from: "auto",
-        to: "zh",
+        from,
+        to,
         engine: engineName,
       });
       setBlocks((prev) =>
@@ -664,6 +707,7 @@ const ScreenshotWindow: React.FC = () => {
 
   /** 点击引擎按钮：向上展开垂直引擎菜单（每次打开实时拉取引擎列表） */
   const toggleEngineMenu = async () => {
+    setLangMenuOpen(false);
     if (engineMenuOpen) {
       setEngineMenuOpen(false);
       return;
@@ -679,12 +723,48 @@ const ScreenshotWindow: React.FC = () => {
     setEngineMenuOpen(true);
   };
 
-  /** 点选菜单中的引擎：关闭菜单 + 重译刷新 */
+  /** 点选菜单中的引擎：关闭菜单；报错状态下=用新引擎重试截图翻译 */
   const selectEngine = async (idx: number) => {
     setEngineMenuOpen(false);
-    if (blocks.length === 0 || retranslating) return;
     setEngineIdx(idx);
-    await retranslate(engines[idx]?.name ?? null);
+    if (error && selection.width > 0) {
+      // 报错重试：重新走 截图→OCR→翻译 全链路（框选区域未变）
+      setError("");
+      await processSelection(selection);
+      return;
+    }
+    await retranslate(engines[idx]?.name ?? null, srcLang, dstLang);
+  };
+
+  /** 点击原/译语言按钮：展开语言菜单 */
+  const toggleLangMenu = () => {
+    setEngineMenuOpen(false);
+    setLangMenuOpen((v) => !v);
+  };
+
+  /** 应用语言对：持久化设置；结果阶段自动以新语言对重译（译文不能是自动检测） */
+  const applyLang = (nextSrc: string, nextDst: string) => {
+    if (nextSrc === nextDst || nextDst === "auto") return;
+    setSrcLang(nextSrc);
+    setDstLang(nextDst);
+    void (async () => {
+      try {
+        const s = await invoke<any>("get_app_settings");
+        s.default_translation_direction = `${nextSrc}->${nextDst}`;
+        await invoke("save_app_settings", { settings: s });
+      } catch {}
+    })();
+    if (blocks.length > 0 && !error) {
+      void retranslate(engines[engineIdx]?.name ?? null, nextSrc, nextDst);
+    }
+  };
+
+  const langName = (code: string) =>
+    LANGUAGES.find((l) => l.code === code)?.name || code;
+
+  const handleLangSelect = (which: "src" | "dst", code: string) => {
+    if (which === "src") applyLang(code, dstLang);
+    else applyLang(srcLang, code);
   };
 
   /** 复制到剪贴板并退出。内容优先级：
@@ -736,6 +816,9 @@ const ScreenshotWindow: React.FC = () => {
   };
 
   // ============ 渲染 ============
+
+  // 预热期间：窗口被 Rust 短暂显示，渲染空内容保持完全透明（无闪屏）
+  if (warming) return null;
 
   return (
     <div
@@ -901,16 +984,100 @@ const ScreenshotWindow: React.FC = () => {
           </div>
         ))}
 
-      {/* 按键组（菜单组）：底边居中下方/上方，10%→悬停100%，可拖动 */}
-      {phase === "result" && !noText && (
+      {/* 报错：错误信息在框选区域内水平垂直居中红色显示；
+          框选区域过小放不下文字时改为红色圆圈感叹号 */}
+      {phase === "result" && error && selection.width > 0 && (
+        selection.width >= 180 && selection.height >= 70 ? (
+          <div
+            className="block-error"
+            style={{
+              left: Math.min(
+                Math.max(selection.x + selection.width / 2, 170),
+                window.innerWidth - 170
+              ),
+              top: Math.min(
+                Math.max(selection.y + selection.height / 2, 60),
+                window.innerHeight - 60
+              ),
+              maxWidth: Math.max(160, Math.min(selection.width - 16, window.innerWidth - 40)),
+            }}
+          >
+            {error}
+          </div>
+        ) : (
+          <div
+            className="block-error-icon"
+            title={error}
+            style={{
+              left: Math.min(
+                Math.max(selection.x + selection.width / 2, 40),
+                window.innerWidth - 40
+              ),
+              top: Math.min(
+                Math.max(selection.y + selection.height / 2, 40),
+                window.innerHeight - 40
+              ),
+            }}
+          >
+            !
+          </div>
+        )
+      )}
+
+      {/* 按键组（菜单组）：底边居中下方/上方，10%→悬停100%，可拖动；报错时也保持可用 */}
+      {phase === "result" && (!noText || error) && (
         <div
           ref={groupRef}
           className={`menu-group ${groupDragging ? "dragging" : ""} ${
-            engineMenuOpen ? "menu-open" : ""
+            engineMenuOpen || langMenuOpen ? "menu-open" : ""
           }`}
           style={{ left: groupPos.x, top: groupPos.y }}
           onMouseDown={handleGroupMouseDown}
         >
+          {settings.screenshot_components.includes("lang") && (
+            <div className="engine-wrap">
+              <button
+                className="group-item engine"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={toggleLangMenu}
+                title="选择原文/译文语言，⇄ 可反转"
+              >
+                {`${langName(srcLang)} → ${langName(dstLang)}`}
+              </button>
+              {langMenuOpen && (
+                <div className="engine-menu lang-menu" onMouseDown={(e) => e.stopPropagation()}>
+                  <div className="lang-section">原文</div>
+                  {LANGUAGES.map((l) => (
+                    <button
+                      key={`s-${l.code}`}
+                      className={`engine-menu-item ${srcLang === l.code ? "active" : ""}`}
+                      onClick={() => handleLangSelect("src", l.code)}
+                    >
+                      <span className="engine-name">{l.name}</span>
+                      {srcLang === l.code && <span className="engine-check">✓</span>}
+                    </button>
+                  ))}
+                  <button
+                    className="engine-menu-item lang-reverse"
+                    onClick={() => applyLang(dstLang, srcLang)}
+                  >
+                    <span className="engine-name">⇄ 反转原文/译文</span>
+                  </button>
+                  <div className="lang-section">译文</div>
+                  {LANGUAGES.filter((l) => l.code !== "auto").map((l) => (
+                    <button
+                      key={`d-${l.code}`}
+                      className={`engine-menu-item ${dstLang === l.code ? "active" : ""}`}
+                      onClick={() => handleLangSelect("dst", l.code)}
+                    >
+                      <span className="engine-name">{l.name}</span>
+                      {dstLang === l.code && <span className="engine-check">✓</span>}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           {settings.screenshot_components.includes("engine") && (
             <div className="engine-wrap">
               <button
@@ -1001,11 +1168,6 @@ const ScreenshotWindow: React.FC = () => {
 
       {noText && phase === "result" && (
         <div className="toast">未识别到文字（右键退出后重试）</div>
-      )}
-      {error && (
-        <div className="toast error" onClick={() => setError("")}>
-          {error}（点击关闭）
-        </div>
       )}
     </div>
   );
