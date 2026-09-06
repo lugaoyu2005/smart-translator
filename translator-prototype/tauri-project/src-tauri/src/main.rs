@@ -2,6 +2,7 @@
 
 mod engines;
 mod screenshot;
+mod selection;
 mod system;
 mod terms;
 mod translation;
@@ -11,6 +12,10 @@ use tauri::Manager;
 
 fn main() {
     tauri::Builder::default()
+        // 单实例：二次启动唤起已有实例的主窗口（必须为第一个插件）
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            system::show_main_window(app);
+        }))
         // 系统集成插件：开机自启动 + 全局快捷键
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,

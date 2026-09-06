@@ -28,7 +28,13 @@ interface TranslationResult {
   to: string;
 }
 
-const TranslatePanel: React.FC = () => {
+interface TranslatePanelProps {
+  // 划词捕获的待翻译文本（App监听事件后传入，自动翻译一次）
+  pendingText?: { text: string; seq: number } | null;
+  onConsumed?: () => void;
+}
+
+const TranslatePanel: React.FC<TranslatePanelProps> = ({ pendingText, onConsumed }) => {
   const [text, setText] = useState("");
   const [result, setResult] = useState("");
   const [engineUsed, setEngineUsed] = useState("");
@@ -45,6 +51,16 @@ const TranslatePanel: React.FC = () => {
     loadEngines();
     loadNetworkStatus();
   }, []);
+
+  // 划词捕获：文本到达后填入并自动翻译一次
+  useEffect(() => {
+    if (pendingText && pendingText.text.trim()) {
+      setText(pendingText.text);
+      void handleTranslate(pendingText.text);
+      onConsumed?.();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingText?.seq]);
 
   const loadLanguages = async () => {
     try {
@@ -73,8 +89,9 @@ const TranslatePanel: React.FC = () => {
     }
   };
 
-  const handleTranslate = async () => {
-    if (!text.trim()) {
+  const handleTranslate = async (override?: string) => {
+    const source = override ?? text;
+    if (!source.trim()) {
       setError("请输入要翻译的内容");
       return;
     }
@@ -83,7 +100,7 @@ const TranslatePanel: React.FC = () => {
     setError("");
     try {
       const res = await invoke<TranslationResult>("translate_text", {
-        text,
+        text: source,
         from: fromLang,
         to: toLang,
       });
@@ -169,7 +186,7 @@ const TranslatePanel: React.FC = () => {
       />
 
       <div className="action-row">
-        <button className="translate-btn" onClick={handleTranslate} disabled={loading}>
+        <button className="translate-btn" onClick={() => handleTranslate()} disabled={loading}>
           {loading ? "翻译中..." : "翻译"}
         </button>
         <button className="example-btn" onClick={handleTextExample}>

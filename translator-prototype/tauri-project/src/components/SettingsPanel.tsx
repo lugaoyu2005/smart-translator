@@ -665,6 +665,72 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
           }
         />
       </div>
+
+      <div className="form-group">
+        <label className="form-label">划词翻译快捷键</label>
+        <input
+          type="text"
+          className="form-input"
+          value={localSettings?.hotkeys?.select || "Ctrl+Alt+X"}
+          onChange={(e) =>
+            handleSettingChange("hotkeys", {
+              ...localSettings?.hotkeys,
+              select: e.target.value,
+            })
+          }
+        />
+      </div>
+    </div>
+  );
+
+  const renderSelectSettings = () => (
+    <div className="settings-section">
+      <h3 className="section-title">划词翻译</h3>
+
+      <div className="form-group">
+        <div className="toggle-group">
+          <label className="toggle-switch">
+            <input
+              type="checkbox"
+              checked={localSettings?.select_translate_enabled || false}
+              onChange={(e) =>
+                handleSettingChange(
+                  "select_translate_enabled",
+                  e.target.checked
+                )
+              }
+            />
+            <span className="toggle-slider"></span>
+          </label>
+          <span className="toggle-label">
+            启用划词翻译（全局快捷键触发）
+          </span>
+        </div>
+      </div>
+
+      <div className="form-group">
+        <label className="form-label">划词翻译快捷键</label>
+        <input
+          type="text"
+          className="form-input"
+          value={localSettings?.hotkeys?.select || "Ctrl+Alt+X"}
+          onChange={(e) =>
+            handleSettingChange("hotkeys", {
+              ...localSettings?.hotkeys,
+              select: e.target.value,
+            })
+          }
+        />
+      </div>
+
+      <div className="form-group">
+        <label className="form-label">使用说明</label>
+        <p className="form-hint">
+          在任意应用中选中文字，按上方快捷键（默认 Ctrl+Alt+X），翻译结果将显示在主窗口的翻译页。
+          原理为模拟复制并读取剪贴板（随后自动还原），少数禁用复制功能的应用不支持。
+          原文/译文语言可在截图翻译菜单或基本设置的"默认翻译方向"调整。
+        </p>
+      </div>
     </div>
   );
 
@@ -691,6 +757,9 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         return renderScreenshotSettings();
       case "hotkeys":
         return renderHotkeySettings();
+      case "select":
+        // 划词翻译：增删改即时生效，无需外层"保存设置"按钮
+        return renderSelectSettings();
       case "about":
         return renderAbout();
       case "terms":

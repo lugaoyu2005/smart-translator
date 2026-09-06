@@ -32,6 +32,9 @@ pub struct AppSettings {
     // 截图翻译：菜单组组件（顺序即显示顺序，工具箱式可增删）
     #[serde(default = "default_screenshot_components")]
     pub screenshot_components: Vec<String>,
+    // 划词翻译：选中文本后按全局热键捕获并翻译
+    #[serde(default = "default_select_translate_enabled")]
+    pub select_translate_enabled: bool,
     // 覆盖样式：dark=黑底白字 light=白底黑字 none=无背景（透明+白色光晕）
     // None=未设置（迁移判断依据），运行时按 transparent_legacy 回落后视为 dark
     #[serde(default)]
@@ -63,6 +66,10 @@ pub struct AppSettings {
 
 fn default_current_engine() -> String {
     "百度翻译".to_string()
+}
+
+fn default_select_translate_enabled() -> bool {
+    true
 }
 
 fn default_window_size_mode() -> String {
@@ -122,6 +129,7 @@ impl Default for AppSettings {
         let mut hotkeys = HashMap::new();
         hotkeys.insert("translate".to_string(), "Ctrl+Alt+T".to_string());
         hotkeys.insert("screenshot".to_string(), "Ctrl+Alt+S".to_string());
+        hotkeys.insert("select".to_string(), "Ctrl+Alt+X".to_string());
 
         Self {
             autostart: true,
@@ -144,6 +152,7 @@ impl Default for AppSettings {
             overlay_mode: None,
             overlay_transparent_legacy: false,
             overlay_expand: false,
+            select_translate_enabled: true,
             current_engine: default_current_engine(),
             window_size_mode: default_window_size_mode(),
             window_fixed_width: default_window_fixed_width(),
@@ -168,6 +177,12 @@ fn migrate(settings: &mut AppSettings) {
     // 历史默认值 "tesseract" 从未实现，实际可用的是 Windows 内置 OCR
     if settings.ocr_engine == "tesseract" {
         settings.ocr_engine = "windows".to_string();
+    }
+    // 划词翻译热键（历史配置缺失时补默认值）
+    if !settings.hotkeys.contains_key("select") {
+        settings
+            .hotkeys
+            .insert("select".to_string(), "Ctrl+Alt+X".to_string());
     }
     // 旧版"无背景模式"开关 → 新覆盖样式
     if settings.overlay_mode.is_none() && settings.overlay_transparent_legacy {
@@ -410,6 +425,34 @@ pub fn register_hotkeys(app: &AppHandle, settings: &AppSettings) -> Result<(), S
         }
     })
     .map_err(|e| format!("注册翻译快捷键「{hk_translate}」失败: {e}"))?;
+
+    // 划词翻译：捕获前台应用选中文本 → 主窗口翻译页（未启用则跳过）
+    if settings.select_translate_enabled {
+        let hk_select = settings
+            .hotkeys
+            .get("select")
+            .cloned()
+            .unwrap_or_else(|| "Ctrl+Alt+X".to_string());
+        if !hk_select.trim().is_empty() {
+            let sc_select = parse_shortcut(&hk_select)?;
+            if sc_select == sc_screenshot || sc_select == sc_translate {
+                return Err("划词翻译快捷键与其他快捷键重复".to_string());
+            }
+            gs.on_shortcut(sc_select, move |app, _shortcut, event| {
+                if event.state() == ShortcutState::Pressed {
+                    let app = app.clone();
+                    // 捕获含轮询等待，放后台线程执行
+                    std::thread::spawn(move || {
+                        if let Some(text) = crate::selection::capture_selected_text() {
+                            show_main_window(&app);
+                            let _ = app.emit_to("main", "translate-selection", text);
+                        }
+                    });
+                }
+            })
+            .map_err(|e| format!("注册划词翻译快捷键「{hk_select}」失败: {e}"))?;
+        }
+    }
 
     Ok(())
 }

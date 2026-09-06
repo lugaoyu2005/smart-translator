@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -13,6 +13,24 @@ function App() {
   const [settings, setSettings] = useState<any>(null);
   // 保存设置成功提示（GUI弹窗：仅标题，点击遮罩关闭）
   const [savedTip, setSavedTip] = useState(false);
+  // 划词捕获的待翻译文本（seq 递增保证重复文本也能触发）
+  const [pendingSelection, setPendingSelection] = useState<{
+    text: string;
+    seq: number;
+  } | null>(null);
+  const selectionSeq = useRef(0);
+
+  // 划词翻译：后台捕获选中文本后，显示主窗口并跳转翻译页自动翻译
+  useEffect(() => {
+    const un = listen<string>("translate-selection", (e) => {
+      selectionSeq.current += 1;
+      setPendingSelection({ text: e.payload, seq: selectionSeq.current });
+      setActiveMenu("translate");
+    });
+    return () => {
+      un.then((f) => f());
+    };
+  }, []);
 
   useEffect(() => {
     // 加载应用设置
@@ -107,7 +125,10 @@ function App() {
 
       <main className="main-content">
         {activeMenu === "translate" ? (
-          <TranslatePanel />
+          <TranslatePanel
+            pendingText={pendingSelection}
+            onConsumed={() => setPendingSelection(null)}
+          />
         ) : (
           <SettingsPanel
             activeMenu={activeMenu}
