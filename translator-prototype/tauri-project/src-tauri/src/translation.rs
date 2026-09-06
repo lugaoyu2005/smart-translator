@@ -111,6 +111,11 @@ pub async fn translate_text(
         let _ = crate::terms::save_term_base(manager.term_base());
     }
 
+    // 记录翻译历史
+    if let Ok(r) = &result {
+        crate::history::record(from, to, &processed, &r.translated_text, &r.engine_used);
+    }
+
     result
 }
 
@@ -142,6 +147,31 @@ pub async fn get_supported_languages() -> Result<Vec<Language>, String> {
             code: "ko".to_string(),
             name: "Korean".to_string(),
             native_name: "한국어".to_string(),
+        },
+        Language {
+            code: "ru".to_string(),
+            name: "Russian".to_string(),
+            native_name: "Русский".to_string(),
+        },
+        Language {
+            code: "fr".to_string(),
+            name: "French".to_string(),
+            native_name: "Français".to_string(),
+        },
+        Language {
+            code: "de".to_string(),
+            name: "German".to_string(),
+            native_name: "Deutsch".to_string(),
+        },
+        Language {
+            code: "es".to_string(),
+            name: "Spanish".to_string(),
+            native_name: "Español".to_string(),
+        },
+        Language {
+            code: "pt".to_string(),
+            name: "Portuguese".to_string(),
+            native_name: "Português".to_string(),
         },
     ])
 }
@@ -220,6 +250,15 @@ pub async fn translate_lines(
     if manager.take_term_dirty() {
         let _ = crate::terms::save_term_base(manager.term_base());
     }
+
+    // 记录翻译历史（整批合并为一条）
+    crate::history::record(
+        &from,
+        &to,
+        &lines.join("\n"),
+        &res.translations.join("\n"),
+        &engine_used,
+    );
 
     Ok(LinesTranslationResult {
         translations,

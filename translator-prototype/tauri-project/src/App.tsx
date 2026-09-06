@@ -109,6 +109,7 @@ function App() {
     { id: "screenshot", label: "截图翻译", icon: "📷" },
     { id: "select", label: "划词翻译", icon: "🖱️" },
     { id: "terms", label: "术语管理", icon: "📚" },
+    { id: "history", label: "翻译历史", icon: "🕘" },
     { id: "hotkeys", label: "快捷键", icon: "⌨️" },
     { id: "advanced", label: "高级设置", icon: "🔧" },
     { id: "about", label: "关于", icon: "ℹ️" },

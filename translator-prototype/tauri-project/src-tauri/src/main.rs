@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod engines;
+mod history;
 mod screenshot;
 mod selection;
 mod system;
@@ -112,6 +113,9 @@ fn main() {
             system::open_external,
             system::get_app_settings,
             system::save_app_settings,
+            history::list_history,
+            history::delete_history_entry,
+            history::clear_history,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

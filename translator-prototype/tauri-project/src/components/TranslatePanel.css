@@ -196,3 +196,75 @@
   white-space: pre-wrap;
   word-break: break-word;
 }
+/* ============ 翻译历史 ============ */
+
+.history-toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.history-toolbar .form-input {
+  flex: 1;
+}
+
+.history-empty {
+  color: #9ca3af;
+  text-align: center;
+  padding: 24px 0;
+}
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.history-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #fff;
+}
+
+.history-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.history-time {
+  color: #9ca3af;
+  font-size: 12px;
+}
+
+.history-engine {
+  color: #1976d2;
+  font-size: 12px;
+}
+
+.history-lang {
+  color: #9ca3af;
+  font-size: 12px;
+  flex: 1;
+}
+
+.history-body {
+  cursor: pointer;
+}
+
+.history-source {
+  color: #9ca3af;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: pre-wrap;
+}
+
+.history-translation {
+  font-size: 14px;
+  color: #111;
+  margin-top: 2px;
+  white-space: pre-wrap;
+}
