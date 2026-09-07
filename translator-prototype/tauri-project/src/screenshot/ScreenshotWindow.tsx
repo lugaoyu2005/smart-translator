@@ -428,7 +428,7 @@ const ScreenshotWindow: React.FC = () => {
     };
   }, []);
 
-  /** 退出截图翻译：回到常驻待命态（全屏透明+点击穿透，无任何可见内容） */
+  /** 退出截图翻译：隐藏窗口待命（隐藏态不可能拦截任何输入——穿透恢复失败也有兜底） */
   const exit = useCallback(async () => {
     runIdRef.current += 1;
     setPhase("idle");
@@ -437,6 +437,9 @@ const ScreenshotWindow: React.FC = () => {
     invoke("unregister_esc_exit").catch(() => {});
     try {
       await win.setIgnoreCursorEvents(true);
+    } catch {}
+    try {
+      await win.hide();
     } catch {}
   }, [win]);
 

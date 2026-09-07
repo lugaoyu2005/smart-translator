@@ -72,8 +72,9 @@ fn main() {
                 eprintln!("[启动] 注册全局快捷键失败: {e}");
             }
 
-            // 截图窗口常驻：全屏透明 + 点击穿透，触发时仅取消穿透（零延迟进入框选，
-            // 取代旧 show/hide 预热方案）。TOOLWINDOW 使其不进 Alt+Tab 列表
+            // 截图窗口预热：先置穿透再显示一次，完成 WebView2 全屏透明合成初始化
+            //（idle 态零渲染，用户无感知），随后隐藏待命。此后触发/退出均为显隐切换，
+            // 穿透切换统一在隐藏态进行；TOOLWINDOW 使其不进 Alt+Tab 列表
             if let Some(win) = app.get_webview_window("screenshot") {
                 let _ = win.set_ignore_cursor_events(true);
                 #[cfg(target_os = "windows")]
@@ -87,6 +88,13 @@ fn main() {
                     }
                 }
                 let _ = win.show();
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(600));
+                    if let Some(w) = handle.get_webview_window("screenshot") {
+                        let _ = w.hide();
+                    }
+                });
             }
 
             // 初始化翻译管理器状态（术语库从 terms.json 加载）

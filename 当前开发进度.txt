@@ -156,3 +156,9 @@ RapidOCR本地OCR	✅ 完成	PaddleOCR PP-OCRv6 模型+ONNX Runtime推理，完�
 - ESC 失效根因：窗口偶发拿不到键盘焦点（Windows 前台锁定），keydown 收不到——新增全局 ESC 热键兜底（trigger 时注册、result 阶段/退出时注销，热键吞键窗口期仅限框选+处理的几秒内）
 - 状态机自查（回归+负向）：idle穿透无响应✓/processing中ESC作废流水线✓/processing中再触发重置✓/exit幂等✓/热键残留防护（is_registered去重）✓
 - cargo test 19 通过；release exe 已重打包
+
+## 2026-09-08 常驻架构回退为“预热+隐藏待命”（第十九轮）
+- 实测反馈：右键退出后暗幕消失但鼠标仍十字准星、任何点击无反馈——运行时 setIgnoreCursorEvents(true) 在可见窗口上未生效（穿透无法恢复），窗口残留拦截所有输入
+- 决策：放弃“窗口常驻穿透”模型，回退为“预热+隐藏待命”——启动时置穿透显示一次（idle零渲染无感知，完成合成初始化）后隐藏；此后触发/退出均为显隐切换；退出强制 win.hide() 兜底（隐藏窗口不可能拦截任何输入，穿透恢复失败也有兜底）；TOOLWINDOW 保留
+- 穿透切换统一在隐藏态进行（行为一致对称）；触发路径不变（hide→取消穿透→show→focus→事件）
+- release exe 已重打包
