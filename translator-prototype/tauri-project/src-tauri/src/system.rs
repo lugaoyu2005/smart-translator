@@ -323,8 +323,44 @@ pub fn trigger_screenshot(app: &AppHandle) {
         let _ = win.set_ignore_cursor_events(false);
         let _ = win.show();
         let _ = win.set_focus();
+        // ESC 退出兜底：窗口偶发拿不到键盘焦点（Windows 前台锁定）时全局热键仍可退出；
+        // 仅在框选/处理期间注册（短窗口期），进入结果阶段或退出时由前端注销
+        register_esc_exit(app);
         let _ = app.emit_to("screenshot", "trigger-screenshot", ());
     }
+}
+
+/// 注册全局 ESC 退出热键（已在注册表时跳过）
+fn register_esc_exit(app: &AppHandle) {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    let gs = app.global_shortcut();
+    if gs.is_registered("Escape") {
+        return;
+    }
+    let _ = gs.on_shortcut("Escape", |app, _sc, event| {
+        use tauri_plugin_global_shortcut::ShortcutState;
+        if event.state() == ShortcutState::Pressed {
+            let _ = app.emit_to("screenshot", "exit-screenshot", ());
+        }
+    });
+}
+
+/// Tauri命令：主窗口“开始截图”按钮与快捷键/托盘走同一触发路径
+#[tauri::command]
+pub fn trigger_screenshot_cmd(app: tauri::AppHandle) -> Result<(), String> {
+    trigger_screenshot(&app);
+    Ok(())
+}
+
+/// Tauri命令：注销 ESC 全局热键（进入结果阶段/退出截图时调用，避免吞掉其他应用的ESC）
+#[tauri::command]
+pub fn unregister_esc_exit(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    let gs = app.global_shortcut();
+    if gs.is_registered("Escape") {
+        gs.unregister("Escape").map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 // ===== 系统托盘 =====

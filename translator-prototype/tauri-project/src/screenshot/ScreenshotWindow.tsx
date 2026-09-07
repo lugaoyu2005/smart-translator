@@ -434,10 +434,26 @@ const ScreenshotWindow: React.FC = () => {
     setPhase("idle");
     setDragging(false);
     setSelection({ x: 0, y: 0, width: 0, height: 0 });
+    invoke("unregister_esc_exit").catch(() => {});
     try {
       await win.setIgnoreCursorEvents(true);
     } catch {}
   }, [win]);
+
+  // ESC 兜底：窗口偶发拿不到键盘焦点时，后端全局热键 exit-screenshot 触发退出
+  useEffect(() => {
+    const un = listen("exit-screenshot", () => exit());
+    return () => {
+      un.then((f) => f());
+    };
+  }, [exit]);
+
+  // 结果阶段注销全局 ESC 热键（窗口已有焦点，keydown 足够；避免吞掉其他应用的 ESC）
+  useEffect(() => {
+    if (phase === "result") {
+      invoke("unregister_esc_exit").catch(() => {});
+    }
+  }, [phase]);
 
   // ESC退出
   useEffect(() => {

@@ -150,3 +150,9 @@ RapidOCR本地OCR	✅ 完成	PaddleOCR PP-OCRv6 模型+ONNX Runtime推理，完�
 - 实测反馈：常驻窗口启动即渲染框选暗幕提示（透明窗口内容可见），用户以为“一打开就是截图翻译”
 - 修复：新增 idle 待命态——启动后窗口常驻但完全透明无任何内容；仅快捷键/主窗口按钮触发（trigger-screenshot→resetState→select）才显示截图界面；退出（ESC/右键/复制）回 idle
 - release exe 已重打包
+
+## 2026-09-08 截图触发双通道修复（第十八轮）
+- 主窗口“开始截图”按钮失败根因：只做了窗口显隐，idle 架构下前端需 trigger-screenshot 事件才进入框选——新增 trigger_screenshot_cmd，按钮与快捷键/托盘走同一后端路径
+- ESC 失效根因：窗口偶发拿不到键盘焦点（Windows 前台锁定），keydown 收不到——新增全局 ESC 热键兜底（trigger 时注册、result 阶段/退出时注销，热键吞键窗口期仅限框选+处理的几秒内）
+- 状态机自查（回归+负向）：idle穿透无响应✓/processing中ESC作废流水线✓/processing中再触发重置✓/exit幂等✓/热键残留防护（is_registered去重）✓
+- cargo test 19 通过；release exe 已重打包

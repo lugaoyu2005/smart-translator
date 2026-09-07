@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import Sidebar from "./components/Sidebar";
@@ -91,19 +90,10 @@ function App() {
     }
   };
 
-  // 启动截图翻译：显示独立的截图窗口
+  // 启动截图翻译：与快捷键/托盘同一后端路径（激活窗口+取消穿透+发触发事件+注册ESC兜底）
   const handleStartScreenshot = async () => {
     try {
-      const win = await WebviewWindow.getByLabel("screenshot");
-      if (win) {
-        // 常驻透明窗口：hide→show 重新激活拿焦点（仅取消穿透会按键无响应）
-        await win.hide();
-        await win.setIgnoreCursorEvents(false);
-        await win.show();
-        await win.setFocus();
-      } else {
-        alert("截图窗口未初始化");
-      }
+      await invoke("trigger_screenshot_cmd");
     } catch (e) {
       console.error("打开截图窗口失败:", e);
       alert("打开截图窗口失败");
