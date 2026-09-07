@@ -316,7 +316,10 @@ pub fn show_main_window(app: &AppHandle) {
 /// 触发截图翻译：显示截图窗口并通知前端重置到框选模式
 pub fn trigger_screenshot(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("screenshot") {
-        // 常驻透明窗口：仅取消点击穿透即可进入框选（窗口已在屏幕上，零合成延迟）
+        // 常驻窗口合成已预热，但"已可见"状态下 show() 是空操作、不会带来系统激活，
+        // 仅取消穿透会因拿不到焦点表现为按键/点击无响应——走一次 hide→show 重新激活
+        //（WebView 内容仍在，显隐开销极小）
+        let _ = win.hide();
         let _ = win.set_ignore_cursor_events(false);
         let _ = win.show();
         let _ = win.set_focus();

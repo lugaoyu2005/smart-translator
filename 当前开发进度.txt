@@ -140,3 +140,8 @@ RapidOCR本地OCR	✅ 完成	PaddleOCR PP-OCRv6 模型+ONNX Runtime推理，完�
 - 严格对齐字距/行距自适应：fitFontSize 升级——标准行距放不下时压行距(1.12)换更大字号；多行且高度富余时行距上浮(≤1.45)铺满色块；返回 {size,lineHeight} 供渲染
 - 死代码清理：ScreenshotRegion / calculate_extract_button_position 及其测试删除，cargo 警告清零
 - 全量 cargo test 19 通过；release exe 已重打包
+
+## 2026-09-08 常驻架构焦点修复（第十六轮）
+- 实测反馈：常驻架构下触发截图后 ESC/左右键全部无响应（穿透取消但窗口拿不到系统激活——已可见窗口 show() 是空操作）
+- 修复：触发时 hide→取消穿透→show→set_focus 重新激活（合成已预热，显隐开销极小）；主窗口“开始截图”按钮同步
+- cargo test 19 通过；release exe 已重打包
