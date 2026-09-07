@@ -51,7 +51,7 @@ const DEFAULT_SETTINGS: ShotSettings = {
   overlay_expand: false,
 };
 
-type Phase = "select" | "processing" | "result";
+type Phase = "idle" | "select" | "processing" | "result";
 type CopyMode = "original" | "translated";
 
 // 菜单语言对：国际通用语 + 亚洲高频语（百度/有道共同支持）
@@ -208,7 +208,8 @@ function fitFontSize(
 const ScreenshotWindow: React.FC = () => {
   const win = getCurrentWebviewWindow();
 
-  const [phase, setPhase] = useState<Phase>("select");
+  // 启动待命态：窗口常驻但完全透明（触发截图后才进入 select 显示暗幕）
+  const [phase, setPhase] = useState<Phase>("idle");
   // 处理阶段反馈：当前子阶段 + 已耗时（秒）
   const [procStage, setProcStage] = useState<"ocr" | "translate">("ocr");
   const [procSeconds, setProcSeconds] = useState(0);
@@ -427,13 +428,16 @@ const ScreenshotWindow: React.FC = () => {
     };
   }, []);
 
-  /** 退出截图翻译：重置状态并回到常驻待命态（全屏透明+点击穿透，不隐藏窗口） */
+  /** 退出截图翻译：回到常驻待命态（全屏透明+点击穿透，无任何可见内容） */
   const exit = useCallback(async () => {
-    resetState();
+    runIdRef.current += 1;
+    setPhase("idle");
+    setDragging(false);
+    setSelection({ x: 0, y: 0, width: 0, height: 0 });
     try {
       await win.setIgnoreCursorEvents(true);
     } catch {}
-  }, [win, resetState]);
+  }, [win]);
 
   // ESC退出
   useEffect(() => {
@@ -912,8 +916,8 @@ const ScreenshotWindow: React.FC = () => {
       onMouseUp={handleRootMouseUp}
       onContextMenu={handleContextMenu}
     >
-      {/* 选择/处理阶段：暗幕 + 提示 */}
-      {phase !== "result" && (
+      {/* 选择/处理阶段：暗幕 + 提示（idle 待命态不渲染任何内容） */}
+      {(phase === "select" || phase === "processing") && (
         <div className="dim-mask">
           {!dragging && phase === "select" && (
             <div className="hint">

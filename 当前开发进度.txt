@@ -145,3 +145,8 @@ RapidOCR本地OCR	✅ 完成	PaddleOCR PP-OCRv6 模型+ONNX Runtime推理，完�
 - 实测反馈：常驻架构下触发截图后 ESC/左右键全部无响应（穿透取消但窗口拿不到系统激活——已可见窗口 show() 是空操作）
 - 修复：触发时 hide→取消穿透→show→set_focus 重新激活（合成已预热，显隐开销极小）；主窗口“开始截图”按钮同步
 - cargo test 19 通过；release exe 已重打包
+
+## 2026-09-08 启动待命态（第十七轮）
+- 实测反馈：常驻窗口启动即渲染框选暗幕提示（透明窗口内容可见），用户以为“一打开就是截图翻译”
+- 修复：新增 idle 待命态——启动后窗口常驻但完全透明无任何内容；仅快捷键/主窗口按钮触发（trigger-screenshot→resetState→select）才显示截图界面；退出（ESC/右键/复制）回 idle
+- release exe 已重打包
