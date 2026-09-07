@@ -72,21 +72,22 @@ fn main() {
                 eprintln!("[启动] 注册全局快捷键失败: {e}");
             }
 
-            // 截图窗口预热：show→hide 一次，强制 WebView2 完成全屏透明合成
-            // 初始化，消除首次触发截图的卡顿。预热期间前端收到事件后暂停渲染，
-            // 窗口完全透明，用户无感知
-            let handle = app.handle().clone();
-            std::thread::spawn(move || {
-                use tauri::Emitter;
-                std::thread::sleep(std::time::Duration::from_millis(1500));
-                if let Some(win) = handle.get_webview_window("screenshot") {
-                    let _ = win.emit("screenshot-warmup", ());
-                    let _ = win.show();
-                    std::thread::sleep(std::time::Duration::from_millis(350));
-                    let _ = win.hide();
-                    let _ = win.emit("screenshot-warmup-done", ());
+            // 截图窗口常驻：全屏透明 + 点击穿透，触发时仅取消穿透（零延迟进入框选，
+            // 取代旧 show/hide 预热方案）。TOOLWINDOW 使其不进 Alt+Tab 列表
+            if let Some(win) = app.get_webview_window("screenshot") {
+                let _ = win.set_ignore_cursor_events(true);
+                #[cfg(target_os = "windows")]
+                unsafe {
+                    use windows::Win32::UI::WindowsAndMessaging::{
+                        GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_TOOLWINDOW,
+                    };
+                    if let Ok(hwnd) = win.hwnd() {
+                        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+                        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_TOOLWINDOW.0 as isize);
+                    }
                 }
-            });
+                let _ = win.show();
+            }
 
             // 初始化翻译管理器状态（术语库从 terms.json 加载）
             let manager = translation::build_manager(&settings);

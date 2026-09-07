@@ -96,6 +96,8 @@ function App() {
     try {
       const win = await WebviewWindow.getByLabel("screenshot");
       if (win) {
+        // 常驻透明窗口：取消点击穿透并置前台，进入框选
+        await win.setIgnoreCursorEvents(false);
         await win.show();
         await win.setFocus();
       } else {

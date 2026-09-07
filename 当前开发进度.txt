@@ -134,3 +134,9 @@ RapidOCR本地OCR	✅ 完成	PaddleOCR PP-OCRv6 模型+ONNX Runtime推理，完�
 - 7 个预装 API 密钥区常显（不再随启用开关隐藏）；小牛/DeepL/腾讯云/阿里云标题误标“未接入”修正（早已全部接入）并补全→官网按钮（小牛/DeepL/腾讯云TMT/阿里云MT）；自定义AI API 标题同步
 - 带→按钮的标题 label 加 flex 垂直居中（.form-label.with-link）
 - 全量 cargo test 21 通过；release exe 已重打包
+
+## 2026-09-08 搁置项处理（第十五轮）——Android 已确认搁置
+- 常驻透明+点击穿透架构落地：截图窗口启动即全屏透明+鼠标穿透常驻（TOOLWINDOW 不进 Alt+Tab），触发截图仅取消穿透——十字准星零延迟出现，取代旧 1.5s show/hide 预热方案；主窗口“开始截图”按钮同步适配；退出（ESC/右键/复制完成）回到穿透待命态，窗口不再隐藏
+- 严格对齐字距/行距自适应：fitFontSize 升级——标准行距放不下时压行距(1.12)换更大字号；多行且高度富余时行距上浮(≤1.45)铺满色块；返回 {size,lineHeight} 供渲染
+- 死代码清理：ScreenshotRegion / calculate_extract_button_position 及其测试删除，cargo 警告清零
+- 全量 cargo test 19 通过；release exe 已重打包

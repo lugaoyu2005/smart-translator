@@ -12,14 +12,6 @@ use std::sync::Mutex;
 /// 把"截图"与"OCR"拆成两步，让前端在较慢的OCR期间恢复UI显示
 static LAST_CAPTURE: Mutex<Option<ScreenshotData>> = Mutex::new(None);
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ScreenshotRegion {
-    pub x: i32,
-    pub y: i32,
-    pub width: i32,
-    pub height: i32,
-}
-
 /// 截图数据：原始BGRA像素 + 尺寸
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ScreenshotData {
@@ -54,38 +46,6 @@ pub struct ExtractButton {
     pub opacity: f64,
     pub visible: bool,
     pub draggable: bool,
-}
-
-// ============ 按键组位置计算 ============
-// 需求：在框选边框的下方边框居中下方对齐
-// 如果超出屏幕最大显示范围则在框选边框的下方边框居中上方对齐（仍锚定底边）
-pub fn calculate_extract_button_position(
-    selection_rect: &ScreenshotRegion,
-    screen_bounds: &(i32, i32, u32, u32),
-) -> (f64, f64) {
-    let button_width = 120.0;
-    let button_height = 40.0;
-    let gap = 10.0;
-
-    // 默认位置：底边居中下方对齐
-    let mut x = selection_rect.x as f64 + (selection_rect.width as f64 - button_width) / 2.0;
-    let mut y = selection_rect.y as f64 + selection_rect.height as f64 + gap;
-
-    let screen_right = screen_bounds.0 as f64 + screen_bounds.2 as f64;
-    let screen_bottom = screen_bounds.1 as f64 + screen_bounds.3 as f64;
-
-    // 超出屏幕下方：改为底边居中上方对齐（仍锚定底边）
-    if y + button_height > screen_bottom {
-        y = selection_rect.y as f64 + selection_rect.height as f64 - gap - button_height;
-    }
-
-    if x < 0.0 {
-        x = 0.0;
-    } else if x + button_width > screen_right {
-        x = screen_right - button_width;
-    }
-
-    (x, y)
 }
 
 // ============ Windows实现 ============
@@ -980,35 +940,6 @@ mod tests {
         println!("[有道OCR识别] {}", joined);
         assert!(!joined.trim().is_empty(), "有道OCR未识别到内容");
         Ok(())
-    }
-
-    #[test]
-    fn test_button_below_selection() {
-        let selection = ScreenshotRegion {
-            x: 100,
-            y: 100,
-            width: 300,
-            height: 200,
-        };
-        let screen = (0, 0, 1920, 1080);
-        let (x, y) = calculate_extract_button_position(&selection, &screen);
-        assert_eq!(x, 190.0);
-        assert_eq!(y, 310.0);
-    }
-
-    #[test]
-    fn test_button_above_bottom_edge_when_overflow() {
-        // 选区底边接近屏幕底部：按钮改为底边上方对齐（仍锚定底边）
-        let selection = ScreenshotRegion {
-            x: 100,
-            y: 1000,
-            width: 300,
-            height: 100,
-        };
-        let screen = (0, 0, 1920, 1080);
-        let (_, y) = calculate_extract_button_position(&selection, &screen);
-        // 底边y=1100，上方对齐：1100 - 10 - 40 = 1050
-        assert_eq!(y, 1050.0);
     }
 
     #[cfg(target_os = "windows")]

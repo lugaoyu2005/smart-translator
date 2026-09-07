@@ -316,6 +316,8 @@ pub fn show_main_window(app: &AppHandle) {
 /// 触发截图翻译：显示截图窗口并通知前端重置到框选模式
 pub fn trigger_screenshot(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("screenshot") {
+        // 常驻透明窗口：仅取消点击穿透即可进入框选（窗口已在屏幕上，零合成延迟）
+        let _ = win.set_ignore_cursor_events(false);
         let _ = win.show();
         let _ = win.set_focus();
         let _ = app.emit_to("screenshot", "trigger-screenshot", ());

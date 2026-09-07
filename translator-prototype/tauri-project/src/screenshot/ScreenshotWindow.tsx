@@ -125,19 +125,24 @@ let measureCanvas: HTMLCanvasElement | null = null;
  * 模拟按块宽换行，二分查找总高度≤块高的最大字号——固定系数估算对
  * 中英混排和小色块必然失准，此法从根源上消除文字溢出。
  */
-function fitFontSize(text: string, blockW: number, blockH: number): number {
+function fitFontSize(
+  text: string,
+  blockW: number,
+  blockH: number
+): { size: number; lineHeight: number } {
+  const fallback = { size: 14, lineHeight: 1.3 };
   const t = (text || "").trim();
-  if (!t || blockW <= 14 || blockH <= 10) return 14;
+  if (!t || blockW <= 14 || blockH <= 10) return fallback;
 
   if (!measureCanvas) measureCanvas = document.createElement("canvas");
   const ctx = measureCanvas.getContext("2d");
-  if (!ctx) return 14;
+  if (!ctx) return fallback;
 
   const family = `"Segoe UI", "Microsoft YaHei", sans-serif`;
   const usableW = Math.max(4, blockW - 12); // 减去左右padding
   const usableH = Math.max(4, blockH - 8); // 减去上下padding
   const paras = t.split("\n");
-  const lh = 1.3; // 与CSS line-height保持一致
+  let lh = 1.3; // 基准行距（fitFontSize 按块尺寸自适应 1.12~1.45）
 
   /** 模拟按宽度逐字符换行后的总行数 */
   const wrappedLineCount = (fs: number): number => {
@@ -164,19 +169,38 @@ function fitFontSize(text: string, blockW: number, blockH: number): number {
     return total;
   };
 
-  let lo = 10; // 字号下限：过小不可读（用户反馈：下限再大一点）
-  let hi = 48;
-  let best = 10;
-  while (lo <= hi) {
-    const mid = Math.floor((lo + hi) / 2);
-    if (wrappedLineCount(mid) * mid * lh <= usableH) {
-      best = mid;
-      lo = mid + 1;
-    } else {
-      hi = mid - 1;
+  /** 固定行距下的最大可容纳字号 */
+  const bestSize = (lineH: number): number => {
+    let lo = 10; // 字号下限：过小不可读（用户反馈：下限再大一点）
+    let hi = 48;
+    let best = 10;
+    while (lo <= hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      if (wrappedLineCount(mid) * mid * lineH <= usableH) {
+        best = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return best;
+  };
+
+  let size = bestSize(lh);
+  // 标准行距放不下（字号贴下限）：压行距换更大字号（严格对齐的小色块受益）
+  if (size <= 12) {
+    const compact = bestSize(1.12);
+    if (compact > size) {
+      size = compact;
+      lh = 1.12;
     }
   }
-  return best;
+  // 多行且高度富余：行距上浮铺满色块（上限1.45）
+  const lines = wrappedLineCount(size);
+  if (lines > 1 && lines * size * lh < usableH) {
+    lh = Math.min(1.45, usableH / lines / size);
+  }
+  return { size, lineHeight: lh };
 }
 
 // ============ 组件 ============
@@ -395,24 +419,19 @@ const ScreenshotWindow: React.FC = () => {
     };
   }, [resetState]);
 
-  // 启动预热：Rust 短暂 show/hide 窗口以初始化合成管线，期间不渲染任何内容（完全透明无闪屏）
-  const [warming, setWarming] = useState(false);
+  // 离线翻译模型下载/加载进度推送
   useEffect(() => {
-    const u1 = listen("screenshot-warmup", () => setWarming(true));
-    const u2 = listen("screenshot-warmup-done", () => setWarming(false));
     const u3 = listen<string>("offline-mt-status", (e) => setMtStatus(e.payload));
     return () => {
-      u1.then((f) => f());
-      u2.then((f) => f());
       u3.then((f) => f());
     };
   }, []);
 
-  /** 退出截图翻译：重置状态并隐藏窗口 */
+  /** 退出截图翻译：重置状态并回到常驻待命态（全屏透明+点击穿透，不隐藏窗口） */
   const exit = useCallback(async () => {
     resetState();
     try {
-      await win.hide();
+      await win.setIgnoreCursorEvents(true);
     } catch {}
   }, [win, resetState]);
 
@@ -883,9 +902,6 @@ const ScreenshotWindow: React.FC = () => {
 
   // ============ 渲染 ============
 
-  // 预热期间：窗口被 Rust 短暂显示，渲染空内容保持完全透明（无闪屏）
-  if (warming) return null;
-
   return (
     <div
       className={`screenshot-root ${
@@ -977,6 +993,7 @@ const ScreenshotWindow: React.FC = () => {
           // 严格对齐模式：译文区域 = 原文矩形 +10%（与其它块重叠时递减至不重叠）
           const rect = expandedRect(i, b);
           const mode = settings.overlay_mode;
+          const fit = fitFontSize(b.translation, rect.width, rect.height);
           return (
           <div
             key={i}
@@ -1022,6 +1039,8 @@ const ScreenshotWindow: React.FC = () => {
               top: rect.y,
               width: rect.width,
               height: rect.height,
+              // 行距由 fitFontSize 按块尺寸自适应（1.12~1.45）
+              lineHeight: fit.lineHeight,
               background:
                 mode === "dark"
                   ? "rgba(17,17,17,0.94)"
@@ -1034,7 +1053,7 @@ const ScreenshotWindow: React.FC = () => {
                 mode === "none"
                   ? "0 0 3px rgba(255,255,255,0.95), 0 0 6px rgba(255,255,255,0.7)"
                   : undefined,
-              fontSize: fitFontSize(b.translation, rect.width, rect.height),
+              fontSize: fit.size,
               alignItems: b.translation.includes("\n")
                 ? "flex-start"
                 : "center",
