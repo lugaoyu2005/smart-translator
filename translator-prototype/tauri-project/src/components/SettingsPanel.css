@@ -218,11 +218,11 @@ input:checked + .toggle-slider:before {
 }
 
 .settings-actions {
-  /* 固定在右侧可视区底部，不随滚轮滚动（sticky 抵消 .main-content 的 30px 内边距） */
+  /* 固定在右侧可视区底部，不随滚轮滚动（sticky 的 bottom 相对滚动可视区，0 即贴底） */
   position: sticky;
-  bottom: -30px;
+  bottom: 0;
   margin: 0 -30px;
-  padding: 14px 30px 0;
+  padding: 14px 30px 16px;
   background: #f5f5f5;
   border-top: 1px solid #e0e0e0;
   z-index: 10;

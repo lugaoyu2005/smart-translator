@@ -11,8 +11,14 @@ import "./App.css";
 function App() {
   const [activeMenu, setActiveMenu] = useState("basic");
   const [settings, setSettings] = useState<any>(null);
-  // 保存设置成功提示（GUI弹窗：仅标题，点击遮罩关闭）
+  // 保存设置成功提示（GUI弹窗：仅标题，点击遮罩关闭，2秒后自动消失）
   const [savedTip, setSavedTip] = useState(false);
+
+  useEffect(() => {
+    if (!savedTip) return;
+    const t = setTimeout(() => setSavedTip(false), 2000);
+    return () => clearTimeout(t);
+  }, [savedTip]);
   // 划词捕获的待翻译文本（seq 递增保证重复文本也能触发）
   const [pendingSelection, setPendingSelection] = useState<{
     text: string;

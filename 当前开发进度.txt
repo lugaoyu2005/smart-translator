@@ -114,3 +114,9 @@ RapidOCR本地OCR	✅ 完成	PaddleOCR PP-OCRv6 模型+ONNX Runtime推理，完�
 - 实测：三方向正确性保持；首次翻译 4.2s（含会话加载）、纯推理 1.9s/短句——短句场景与全量重解码相当（If 图开销抵消部分收益），长句/多段场景受益显著；会话加载为进程内一次性成本
 - 下载清单更新：新语言对下载 merged 版（无缓存版不再下载，已缓存对自动补下 merged）
 - 全量 cargo test 21 通过
+
+## 2026-09-08 实测反馈修复（第十二轮）+ release 打包
+- release 打包：绿色版 smart-translator.exe（44MB）+ MSI 安装包；用户配置（settings/terms/history）与已下载离线翻译模型迁移到 release 目录
+- 修复：保存设置按钮未贴底——sticky bottom:-30px 的负值 hack 把按钮条推出了可视区（sticky 的 bottom 本就相对滚动可视区），改 bottom:0 并补 padding-bottom
+- 保存成功提示 2 秒后自动消失（此前仅点击遮罩关闭）
+- 已重打 release exe 交付
