@@ -120,3 +120,11 @@ RapidOCR本地OCR	✅ 完成	PaddleOCR PP-OCRv6 模型+ONNX Runtime推理，完�
 - 修复：保存设置按钮未贴底——sticky bottom:-30px 的负值 hack 把按钮条推出了可视区（sticky 的 bottom 本就相对滚动可视区），改 bottom:0 并补 padding-bottom
 - 保存成功提示 2 秒后自动消失（此前仅点击遮罩关闭）
 - 已重打 release exe 交付
+
+## 2026-09-08 实测反馈第二轮修复（第十三轮）
+- 离线翻译同语言（如中文→中文）误报“暂不支持”：改为直接原文返回
+- 保存栏两项修正：内容不满一屏时沉底（panel flex column + min-height:100% + margin-top:auto，等价用户建议的 layout_weight）；滚动穿模观感加 box-shadow 分层
+- 开机启动“无效”根因：启动后按设计隐藏到托盘，用户以为没启动——现在自启动注册表带 --autostart 参数，开机拉起时显示主窗口；注册表值规范化（带引号+参数）
+- 翻译引擎徽标修正：统一动态显示“已接入/已接入·待填密钥”（按密钥是否填写），百度/有道不再缺失徽标；自定义引擎设置页显示名统一为“自定义AI（OpenAI兼容）”；hint 更新为含离线翻译
+- 官网→按钮改镂空描边+圆角正方形（8px），hover 反色
+- 全量 cargo test 21 通过；release exe 已重打包

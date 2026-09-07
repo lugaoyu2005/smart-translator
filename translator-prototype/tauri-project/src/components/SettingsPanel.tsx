@@ -15,15 +15,16 @@ const GROUP_COMPONENTS = [
 ];
 
 // 在线翻译引擎清单：status 非空 = 框架阶段（翻译实现后续接入）
+// status 一律由代码动态计算（已接入/已接入·待填密钥），字段废弃
 const ONLINE_PROVIDERS = [
-  { id: "baidu", label: "百度翻译", engine: "百度翻译", status: "" },
-  { id: "youdao", label: "有道智云", engine: "有道智云", status: "" },
-  { id: "niutrans", label: "小牛翻译", engine: "小牛翻译", status: "已接入" },
-  { id: "deepl", label: "DeepL", engine: "DeepL", status: "已接入" },
-  { id: "tencent", label: "腾讯云翻译", engine: "腾讯云翻译", status: "已接入" },
-  { id: "ali", label: "阿里云翻译", engine: "阿里云翻译", status: "已接入" },
+  { id: "baidu", label: "百度翻译", engine: "百度翻译" },
+  { id: "youdao", label: "有道智云", engine: "有道智云" },
+  { id: "niutrans", label: "小牛翻译", engine: "小牛翻译" },
+  { id: "deepl", label: "DeepL", engine: "DeepL" },
+  { id: "tencent", label: "腾讯云翻译", engine: "腾讯云翻译" },
+  { id: "ali", label: "阿里云翻译", engine: "阿里云翻译" },
   // engine=后端引擎名（current_engine 存储/截图菜单匹配用），label=界面显示
-  { id: "custom", label: "自定义（OpenAI兼容）", engine: "自定义AI", status: "已接入" },
+  { id: "custom", label: "自定义AI（OpenAI兼容）", engine: "自定义AI" },
 ];
 
 // OCR 引擎清单：ready=true 当前可用
@@ -101,6 +102,30 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
     if (idx < 0 || target < 0 || target >= comps.length) return;
     [comps[idx], comps[target]] = [comps[target], comps[idx]];
     handleSettingChange("screenshot_components", comps);
+  };
+
+  // 供应商凭据是否已填写（决定"已接入 / 已接入·待填密钥"徽标）
+  const providerReady = (id: string): boolean => {
+    const s: any = localSettings;
+    if (!s) return false;
+    switch (id) {
+      case "baidu":
+        return !!(s.baidu_app_id && s.baidu_secret);
+      case "youdao":
+        return !!(s.youdao_app_key && s.youdao_app_secret);
+      case "niutrans":
+        return !!s.providers?.niutrans_api_key;
+      case "deepl":
+        return !!s.providers?.deepl_api_key;
+      case "tencent":
+        return !!(s.providers?.tencent_secret_id && s.providers?.tencent_secret_key);
+      case "ali":
+        return !!(s.providers?.ali_access_key_id && s.providers?.ali_access_key_secret);
+      case "custom":
+        return !!(s.providers?.custom_openai_base_url && s.providers?.custom_openai_api_key);
+      default:
+        return false;
+    }
   };
 
   // 在线翻译引擎：启用/停用（双向绑定截图翻译引擎菜单）
@@ -214,8 +239,8 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
   );
 
   const renderTranslationSettings = () => {
-    const enabledRealProviders = ONLINE_PROVIDERS.filter(
-      (p) => p.status === "" && localSettings?.online_apis?.includes(p.id)
+    const enabledRealProviders = ONLINE_PROVIDERS.filter((p) =>
+      localSettings?.online_apis?.includes(p.id)
     );
     return (
     <div className="settings-section">
@@ -235,11 +260,13 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
             </label>
             <span className="toggle-label">
               {p.label}
-              {p.status && <span className="provider-badge">{p.status}</span>}
+              <span className="provider-badge">
+                {providerReady(p.id) ? "已接入" : "已接入 · 待填密钥"}
+              </span>
             </span>
           </div>
         ))}
-        <p className="form-hint">启用的引擎（已接入的）会出现在截图翻译的引擎菜单中</p>
+        <p className="form-hint">启用的引擎与离线翻译会出现在截图翻译的引擎菜单中</p>
       </div>
 
       {(enabledRealProviders.length > 0 || localSettings?.offline_engine !== "disabled") && (

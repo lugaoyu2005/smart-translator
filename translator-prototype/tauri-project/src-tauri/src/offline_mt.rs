@@ -884,6 +884,10 @@ impl TranslationEngine for OfflineMtEngine {
         } else {
             from
         };
+        // 源语言与目标相同：无需翻译，直接原文返回（避免"暂不支持 x→x"误报）
+        if from == to {
+            return Ok(text.to_string());
+        }
         let hops = route(from, to);
         if hops.is_empty() {
             return Err(format!(

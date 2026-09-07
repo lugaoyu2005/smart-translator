@@ -1,6 +1,15 @@
 .settings-panel {
   max-width: 800px;
   margin: 0 auto;
+  /* 内容不满一屏时保存栏也沉到可视区底部（flex 布局 + margin-top:auto） */
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+}
+
+.settings-panel > .settings-section {
+  flex: 1 0 auto;
 }
 
 /* 菜单组组件管理行 */
@@ -221,10 +230,13 @@ input:checked + .toggle-slider:before {
   /* 固定在右侧可视区底部，不随滚轮滚动（sticky 的 bottom 相对滚动可视区，0 即贴底） */
   position: sticky;
   bottom: 0;
-  margin: 0 -30px;
+  margin-top: auto; /* 内容不满一屏时沉底 */
+  margin-left: -30px;
+  margin-right: -30px;
   padding: 14px 30px 16px;
   background: #f5f5f5;
   border-top: 1px solid #e0e0e0;
+  box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.08); /* 与滚过内容的分层，消除穿模观感 */
   z-index: 10;
 }
 
@@ -254,9 +266,9 @@ input:checked + .toggle-slider:before {
   width: 26px;
   height: 26px;
   margin-left: 10px;
-  border: 1px solid #cfe3ff;
-  border-radius: 50%;
-  background: #eaf3ff;
+  border: 1.5px solid #1976d2;
+  border-radius: 8px;
+  background: transparent;
   color: #1976d2;
   font-size: 15px;
   cursor: pointer;
