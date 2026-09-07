@@ -294,9 +294,8 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         </div>
       )}
 
-      {localSettings?.online_apis?.includes("baidu") && (
         <div className="form-group">
-          <label className="form-label">
+          <label className="form-label with-link">
             百度翻译 API
             <button
               className="provider-link"
@@ -325,11 +324,9 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
             />
           </div>
         </div>
-      )}
 
-      {localSettings?.online_apis?.includes("youdao") && (
         <div className="form-group">
-          <label className="form-label">
+          <label className="form-label with-link">
             有道智云 API
             <button
               className="provider-link"
@@ -356,11 +353,18 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
             />
           </div>
         </div>
-      )}
 
-      {localSettings?.online_apis?.includes("niutrans") && (
         <div className="form-group">
-          <label className="form-label">小牛翻译 API（未接入）</label>
+          <label className="form-label with-link">
+            小牛翻译 API
+            <button
+              className="provider-link"
+              onClick={() => invoke("open_external", { url: "https://niutrans.com/" })}
+              title="打开官网申请/查看密钥"
+            >
+              →
+            </button>
+          </label>
           <div className="api-keys">
             <input
               type="password"
@@ -371,11 +375,18 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
             />
           </div>
         </div>
-      )}
 
-      {localSettings?.online_apis?.includes("deepl") && (
         <div className="form-group">
-          <label className="form-label">DeepL API（未接入）</label>
+          <label className="form-label with-link">
+            DeepL API
+            <button
+              className="provider-link"
+              onClick={() => invoke("open_external", { url: "https://www.deepl.com/zh/pro-api" })}
+              title="打开官网申请/查看密钥"
+            >
+              →
+            </button>
+          </label>
           <div className="api-keys">
             <input
               type="password"
@@ -386,11 +397,18 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
             />
           </div>
         </div>
-      )}
 
-      {localSettings?.online_apis?.includes("tencent") && (
         <div className="form-group">
-          <label className="form-label">腾讯云翻译 API（未接入）</label>
+          <label className="form-label with-link">
+            腾讯云翻译 API
+            <button
+              className="provider-link"
+              onClick={() => invoke("open_external", { url: "https://cloud.tencent.com/product/tmt" })}
+              title="打开官网申请/查看密钥"
+            >
+              →
+            </button>
+          </label>
           <div className="api-keys">
             <input
               type="text"
@@ -408,11 +426,18 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
             />
           </div>
         </div>
-      )}
 
-      {localSettings?.online_apis?.includes("ali") && (
         <div className="form-group">
-          <label className="form-label">阿里云翻译 API（未接入）</label>
+          <label className="form-label with-link">
+            阿里云翻译 API
+            <button
+              className="provider-link"
+              onClick={() => invoke("open_external", { url: "https://mt.aliyun.com/" })}
+              title="打开官网申请/查看密钥"
+            >
+              →
+            </button>
+          </label>
           <div className="api-keys">
             <input
               type="text"
@@ -430,11 +455,9 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
             />
           </div>
         </div>
-      )}
 
-      {localSettings?.online_apis?.includes("custom") && (
         <div className="form-group">
-          <label className="form-label">自定义供应商（OpenAI 兼容 · 未接入）</label>
+          <label className="form-label with-link">自定义AI API（OpenAI 兼容）</label>
           <div className="api-keys">
             <input
               type="text"
@@ -459,7 +482,6 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
             />
           </div>
         </div>
-      )}
 
       <div className="form-group">
         <label className="form-label">离线翻译引擎</label>

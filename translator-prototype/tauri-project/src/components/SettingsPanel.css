@@ -259,6 +259,12 @@ input:checked + .toggle-slider:before {
 }
 
 /* 官网链接按钮（API标题旁的大号→） */
+/* 带→官网按钮的标题：文本与按钮垂直居中 */
+.form-label.with-link {
+  display: flex;
+  align-items: center;
+}
+
 .provider-link {
   display: inline-flex;
   align-items: center;

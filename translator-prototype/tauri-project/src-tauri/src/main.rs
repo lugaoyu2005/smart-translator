@@ -21,9 +21,7 @@ fn main() {
         // 系统集成插件：开机自启动 + 全局快捷键
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            // 自启动带参数：开机拉起时据此显示主窗口（否则用户误以为"开机启动无效"——
-            // 默认行为是隐藏到托盘）
-            Some(vec!["--autostart"]),
+            None,
         ))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         // 主窗口点 × 隐藏到托盘（退出走托盘菜单）；隐藏前记住窗口尺寸
@@ -48,10 +46,6 @@ fn main() {
             // 先加载设置（自启动/快捷键/引擎都依赖它）
             let settings = system::load_settings();
 
-            // 开机自启动拉起：显示主窗口（手动启动本就可见；托盘常驻行为不变）
-            if std::env::args().any(|a| a == "--autostart") {
-                system::show_main_window(app.handle());
-            }
 
             // 离线翻译下载进度推送给前端（测试等无GUI场景不注入则静默跳过）
             let _ = offline_mt::APP_HANDLE.set(app.handle().clone());
