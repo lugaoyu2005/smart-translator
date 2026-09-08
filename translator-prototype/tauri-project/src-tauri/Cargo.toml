@@ -1,6 +1,6 @@
 [package]
 name = "smart-translator"
-version = "0.2.0"
+version = "0.2.1"
 description = "智能翻译软件 - 支持离线翻译、在线翻译、截图翻译"
 edition = "2021"
 

@@ -44,8 +44,11 @@ const TranslatePanel: React.FC<TranslatePanelProps> = ({ pendingText, onConsumed
   const [fromLang, setFromLang] = useState("auto");
   const [toLang, setToLang] = useState("zh");
   const [engines, setEngines] = useState<EngineInfo[]>([]);
-  // 手动指定引擎（翻译测试用）：null=默认优先级
+  // 手动指定引擎（翻译测试用）：null=默认优先级（描边框在默认引擎上）
   const [selectedEngine, setSelectedEngine] = useState<string | null>(null);
+  const [defaultEngine, setDefaultEngine] = useState("");
+  // auto 状态下点击 ⇄ 的可见提示
+  const [swapHint, setSwapHint] = useState(false);
   const [network, setNetwork] = useState<NetworkStatus | null>(null);
 
   useEffect(() => {
@@ -75,6 +78,9 @@ const TranslatePanel: React.FC<TranslatePanelProps> = ({ pendingText, onConsumed
 
   const loadEngines = async () => {
     try {
+      invoke<any>("get_app_settings")
+        .then((s) => setDefaultEngine(String(s?.current_engine || "")))
+        .catch(() => {});
       const engineList = await invoke<EngineInfo[]>("list_engines");
       setEngines(engineList);
     } catch (e) {
@@ -117,7 +123,12 @@ const TranslatePanel: React.FC<TranslatePanelProps> = ({ pendingText, onConsumed
   };
 
   const handleSwap = () => {
-    if (fromLang === "auto") return; // auto 无法交换（目标语言不允许自动检测）
+    if (fromLang === "auto") {
+      // 可见提示：原文为自动检测时无法交换
+      setSwapHint(true);
+      window.setTimeout(() => setSwapHint(false), 2200);
+      return;
+    }
     const tmp = fromLang;
     setFromLang(toLang);
     setToLang(tmp);
@@ -152,7 +163,11 @@ const TranslatePanel: React.FC<TranslatePanelProps> = ({ pendingText, onConsumed
               <span
                 key={e.name}
                 className={`engine-badge ready ${
-                  selectedEngine === e.name ? "selected" : ""
+                  selectedEngine === e.name
+                    ? "selected"
+                    : selectedEngine === null && e.name === defaultEngine
+                    ? "default-engine"
+                    : ""
                 }`}
                 title={`点击${selectedEngine === e.name ? "取消指定" : "指定用此引擎"}测试`}
                 onClick={() =>
@@ -196,6 +211,11 @@ const TranslatePanel: React.FC<TranslatePanelProps> = ({ pendingText, onConsumed
         >
           ⇄
         </button>
+        {swapHint && (
+          <div className="swap-hint">
+            原文为自动检测时无法交换，请先手动选择源语言
+          </div>
+        )}
         <select value={toLang} onChange={(e) => setToLang(e.target.value)}>
           {languages
             .filter((l) => l.code !== "auto")

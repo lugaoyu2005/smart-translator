@@ -1042,7 +1042,7 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         <p>
           <strong>智能翻译软件</strong>
         </p>
-        <p>版本: 0.2.0</p>
+        <p>版本: 0.2.1</p>
         <p>技术栈: Tauri 2 + React + Rust（ONNX Runtime 本地推理）</p>
         <p>
           开源地址:{" "}

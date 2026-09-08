@@ -274,6 +274,28 @@ fn migrate(settings: &mut AppSettings) {
             .hotkeys
             .insert("reverse".to_string(), "None".to_string());
     }
+    // 快捷键默认值改为 None（无）：升级前使用出厂默认值的旧值一并重置；
+    // 用户自定义过的非默认值保留
+    let legacy_defaults = [
+        "Ctrl+Alt+T",
+        "Ctrl+Alt+S",
+        "Ctrl+Alt+X",
+        "Ctrl+Alt+B",
+        "ctrl+alt+t",
+        "ctrl+alt+s",
+        "ctrl+alt+x",
+        "ctrl+alt+b",
+    ];
+    for key in ["translate", "screenshot", "select", "reverse"] {
+        let is_legacy = settings
+            .hotkeys
+            .get(key)
+            .map(|v| legacy_defaults.iter().any(|d| d.eq_ignore_ascii_case(v)))
+            .unwrap_or(false);
+        if is_legacy {
+            settings.hotkeys.insert(key.to_string(), "None".to_string());
+        }
+    }
     // 快捷键格式校验：设置页为自由文本输入，误输入（如"Ctrl+Alt+TCt"）会使注册失败，
     // 无法识别的值回落默认值
     fn is_valid_hotkey(s: &str) -> bool {
@@ -954,12 +976,18 @@ mod tests {
     #[test]
     fn regression_migrate_valid_hotkeys_kept() {
         // 注意：裸键（如 F9 无修饰键）按设计也视为非法（全局热键插件不接受）
-        for good in ["Ctrl+Alt+T", "none", "Ctrl+Shift+F9", "Ctrl+1", "Alt+F12"] {
+        // 旧出厂默认值（Ctrl+Alt+T 等）升级时重置为 None；用户自定义值保留
+        for good in ["none", "Ctrl+Shift+F9", "Ctrl+1", "Alt+F12"] {
             let mut s = AppSettings::default();
             s.hotkeys.insert("translate".to_string(), good.to_string());
             migrate(&mut s);
             assert_eq!(s.hotkeys["translate"], good, "合法热键 {good:?} 不得被改动");
         }
+        // 旧出厂默认值重置为 None（v0.2.1 起默认无快捷键）
+        let mut s = AppSettings::default();
+        s.hotkeys.insert("translate".to_string(), "Ctrl+Alt+T".to_string());
+        migrate(&mut s);
+        assert_eq!(s.hotkeys["translate"], "None");
     }
 
     #[test]

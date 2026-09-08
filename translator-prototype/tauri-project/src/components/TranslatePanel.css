@@ -77,6 +77,25 @@
   border-radius: 10px;
 }
 
+/* 默认引擎（未手动指定时）：中性蓝描边框到默认引擎上 */
+.engine-badge.default-engine {
+  background-color: #e3f2fd;
+  color: #1565c0;
+  border: 1.5px solid #64b5f6;
+  border-radius: 10px;
+}
+
+/* auto 状态点击 ⇄ 的提示条 */
+.swap-hint {
+  margin-top: 6px;
+  padding: 6px 10px;
+  background: #fff8e1;
+  border: 1px solid #ffca28;
+  border-radius: 6px;
+  color: #8d6e00;
+  font-size: 12px;
+}
+
 .lang-selector {
   display: flex;
   align-items: center;
