@@ -52,6 +52,7 @@ const DEFAULT_SETTINGS: ShotSettings = {
 };
 
 type Phase = "idle" | "select" | "processing" | "result";
+type CopyMode = "original" | "translated";
 
 
 // 菜单语言对：国际通用语 + 亚洲高频语（百度/有道共同支持）
@@ -222,6 +223,7 @@ const ScreenshotWindow: React.FC = () => {
   const [retranslating, setRetranslating] = useState(false);
   // 离线翻译模型下载/加载进度（offline-mt-status 事件推送）
   const [mtStatus, setMtStatus] = useState("");
+  const [copyMode, setCopyMode] = useState<CopyMode>("original");
 
   const [engines, setEngines] = useState<EngineInfo[]>([]);
   const [engineIdx, setEngineIdx] = useState(0);
@@ -404,6 +406,7 @@ const ScreenshotWindow: React.FC = () => {
     setNoText(false);
     setError("");
     setMtStatus("");
+    setCopyMode("original");
     setPicked([]);
     setGroupDragging(false);
     setEngineMenuOpen(false);
@@ -878,16 +881,10 @@ const ScreenshotWindow: React.FC = () => {
     return () => window.removeEventListener("keydown", h);
   }, []);
 
-  /** 复制到剪贴板并退出。内容优先级：
-   *  1) Ctrl累积的多个片段（Ctrl+拖动、Ctrl+双击；按操作顺序合并）
-   *     ——优先于原生选区：Ctrl操作后原生选区只是最后一次的残留，不代表用户要复制的内容
-   *  2) 当前原生选区文字（普通拖动 / 普通双击，覆盖式单选——产生时已清空累积）
-   *  3) 全部段落（按当前原/译模式） */
-  /** 复制到剪贴板并退出。mode=src 复制原文 / dst 复制译文。
-   *  原文优先级：1) Ctrl累积片段 2) 原生选区文字 3) 全部段落原文 */
-  const handleCopy = async (mode: "src" | "dst") => {
+  /** 复制到剪贴板并退出。按当前原/译模式，优先级：Ctrl累积片段 > 原生选区 > 全部段落 */
+  const handleCopy = async () => {
     let text: string;
-    if (mode === "dst") {
+    if (copyMode === "translated") {
       text = blocks.map((b) => b.translation).join("\n");
     } else {
       text =
@@ -1245,23 +1242,35 @@ const ScreenshotWindow: React.FC = () => {
               )}
             </div>
               );
-            if (comp === "copy_src" || comp === "copy_dst")
+if (comp === "copy")
               return (
-            <button
-              key={comp}
-              className="group-item"
-              onMouseDown={(e) => {
-                // 阻止点击按钮时浏览器清除原生文字选区
-                e.stopPropagation();
-                e.preventDefault();
-              }}
-              onClick={() => handleCopy(comp === "copy_src" ? "src" : "dst")}
-              title={comp === "copy_src" ? "复制原文（拖选文字优先）" : "复制全部译文"}
-            >
-              {comp === "copy_src" ? "原文" : "译文"}
-            </button>
-              );
-            if (comp === "close")
+            <React.Fragment key={comp}>
+              <button
+                className="group-item"
+                onMouseDown={(e) => {
+                  // 阻止点击按钮时浏览器清除原生文字选区
+                  e.stopPropagation();
+                  e.preventDefault();
+                }}
+                onClick={handleCopy}
+                title={`复制（拖选文字/选中段落/全部，当前${copyMode === "original" ? "原文" : "译文"}）`}
+              >
+                ⧉
+              </button>
+              <button
+                className="group-item toggle"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={() =>
+                  setCopyMode((m) =>
+                    m === "original" ? "translated" : "original"
+                  )
+                }
+                title="切换复制内容：原文/译文"
+              >
+                {copyMode === "original" ? "原" : "译"}
+              </button>
+            </React.Fragment>
+              );            if (comp === "close")
               return (
             <button
               key={comp}

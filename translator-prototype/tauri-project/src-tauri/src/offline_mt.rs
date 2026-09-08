@@ -117,6 +117,59 @@ pub fn route(from: &str, to: &str) -> Vec<(&'static str, &'static str)> {
     vec![]
 }
 
+const NLLB_REPO: &str = "Xenova/nllb-200-distilled-600M";
+const NLLB_MAX_NEW_TOKENS: usize = 128; // 600M CPU 解码较慢，控制上限
+
+/// NLLB-200 语言代码映射（内部码 → BCP-47 风格 NLLB 码）
+fn nllb_lang(code: &str) -> &'static str {
+    match code {
+        "zh" => "zho_Hans",
+        "en" => "eng_Latn",
+        "ja" => "jpn_Jpan",
+        "ko" => "kor_Hang",
+        "ru" => "rus_Cyrl",
+        "fr" => "fra_Latn",
+        "de" => "deu_Latn",
+        "es" => "spa_Latn",
+        "pt" => "por_Latn",
+        _ => "eng_Latn",
+    }
+}
+
+/// 确保 NLLB-200 模型就绪（tokenizer + encoder/decoder merged 量化版，约600MB）
+pub async fn ensure_nllb_model() -> Result<PathBuf, String> {
+    let dir = models_root().join(NLLB_REPO.replace('/', "_"));
+    let files = [
+        ("tokenizer.json", dir.join("tokenizer.json")),
+        (
+            "onnx/encoder_model_quantized.onnx",
+            dir.join("encoder_model_quantized.onnx"),
+        ),
+        (
+            "onnx/decoder_model_merged_quantized.onnx",
+            dir.join("decoder_model_merged_quantized.onnx"),
+        ),
+    ];
+    let mut need_download = false;
+    for (_, dest) in &files {
+        if !(dest.exists() && std::fs::metadata(dest).map(|m| m.len() > 0).unwrap_or(false)) {
+            need_download = true;
+            break;
+        }
+    }
+    if need_download {
+        emit_status("首次使用 NLLB-200：准备模型文件（约600MB，请耐心等待）…");
+    }
+    for (src, dest) in &files {
+        let exists =
+            dest.exists() && std::fs::metadata(dest).map(|m| m.len() > 0).unwrap_or(false);
+        if !exists {
+            download_file(NLLB_REPO, src, dest).await?;
+        }
+    }
+    Ok(dir)
+}
+
 fn boxed_pair(s: &str) -> &'static str {
     match s {
         "zh" => "zh",
@@ -274,6 +327,15 @@ struct MtPair {
     past_io: Vec<(String, String)>,
     pad_id: u32, // Marian decoder 起始 token
     eos_id: u32,
+    kind: ModelKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ModelKind {
+    /// Helsinki OPUS-MT 双语对模型（decoder_start=<pad>）
+    OpusMt,
+    /// NLLB-200（decoder_start=</s>，强制首 token=目标语言码，源前缀=源语言码）
+    Nllb200,
 }
 
 static PAIRS: Mutex<Option<HashMap<String, Arc<Mutex<MtPair>>>>> = Mutex::new(None);
@@ -302,7 +364,7 @@ fn load_tokenizer(path: &PathBuf) -> Result<Tokenizer, String> {
     Tokenizer::from_str(&v.to_string()).map_err(|e| format!("分词器加载失败: {e}"))
 }
 
-fn load_pair(dir: &PathBuf) -> Result<Arc<Mutex<MtPair>>, String> {
+fn load_pair(dir: &PathBuf, kind: ModelKind) -> Result<Arc<Mutex<MtPair>>, String> {
     let tokenizer = load_tokenizer(&dir.join("tokenizer.json"))?;
     let pad_id = tokenizer
         .token_to_id("<pad>")
@@ -375,21 +437,21 @@ fn load_pair(dir: &PathBuf) -> Result<Arc<Mutex<MtPair>>, String> {
         past_io,
         pad_id,
         eos_id,
+        kind,
     })))
 }
 
 /// 取（必要时加载）语言对模型。锁内完成加载以避免并发重复加载。
-fn get_pair(from: &str, to: &str, dir: &PathBuf) -> Result<Arc<Mutex<MtPair>>, String> {
-    let repo = pair_repo(from, to).ok_or("无对应本地模型")?;
+fn get_pair_cached(key: &str, dir: &PathBuf, kind: ModelKind) -> Result<Arc<Mutex<MtPair>>, String> {
     let mut guard = PAIRS
         .lock()
         .map_err(|_| "离线模型缓存锁不可用".to_string())?;
     let map = guard.get_or_insert_with(HashMap::new);
-    if let Some(p) = map.get(repo) {
+    if let Some(p) = map.get(key) {
         return Ok(p.clone());
     }
-    let pair = load_pair(dir)?;
-    map.insert(repo.to_string(), pair.clone());
+    let pair = load_pair(dir, kind)?;
+    map.insert(key.to_string(), pair.clone());
     Ok(pair)
 }
 
@@ -701,7 +763,13 @@ fn suppress_repetition(logits: &mut [f32], generated: &[i64]) {
 
 /// beam search 解码（束宽 NUM_BEAMS，批量化前向）：
 /// 得分=对数概率之和/长度（平均对数概率），EOS 即入完成池，活跃束凑不满/达步数上限时结束
-fn beam_decode(pair: &mut MtPair, text: &str) -> Result<String, String> {
+fn beam_decode(
+    pair: &mut MtPair,
+    text: &str,
+    start_tokens: &[i64],
+    src_prefix: Option<u32>,
+    max_new_tokens: usize,
+) -> Result<String, String> {
     if text.trim().is_empty() {
         return Ok(String::new());
     }
@@ -710,6 +778,10 @@ fn beam_decode(pair: &mut MtPair, text: &str) -> Result<String, String> {
         .encode(text, false)
         .map_err(|e| format!("分词失败: {e}"))?;
     let mut ids: Vec<i64> = enc.get_ids().iter().map(|&i| i as i64).collect();
+    // NLLB：源语言码作为序列首 token
+    if let Some(prefix) = src_prefix {
+        ids.insert(0, prefix as i64);
+    }
     ids.truncate(MAX_SRC_TOKENS);
     let attn: Vec<i64> = vec![1; ids.len()];
 
@@ -719,14 +791,13 @@ fn beam_decode(pair: &mut MtPair, text: &str) -> Result<String, String> {
         tokens: Vec<i64>, // 含起始 <pad>
         logprob: f32,
     }
-    let start = pair.pad_id as i64;
-    let mut beams = vec![Hypo { tokens: vec![start], logprob: 0.0 }];
+    let mut beams = vec![Hypo { tokens: start_tokens.to_vec(), logprob: 0.0 }];
     let mut completed: Vec<Hypo> = Vec::new();
     // 自注意力缓存（每步更新）+ cross-attention缓存（首步取值后恒定，仅随束复制）
     let mut dec_past: Option<PastTensors> = None;
     let mut enc_past: Option<PastTensors> = None;
 
-    for _step in 0..MAX_NEW_TOKENS {
+    for _step in 0..max_new_tokens {
         if beams.is_empty() {
             break;
         }
@@ -826,16 +897,50 @@ fn beam_decode(pair: &mut MtPair, text: &str) -> Result<String, String> {
 }
 
 /// 按语言跳依次翻译（模型必须已就绪；纯CPU推理在阻塞线程执行）
-fn translate_blocking(hops: &[(&'static str, &'static str)], text: &str) -> Result<String, String> {
+fn translate_blocking(
+    model: &str,
+    hops: &[(&'static str, &'static str)],
+    text: &str,
+) -> Result<String, String> {
+    let is_nllb = model == "nllb-200";
     let mut cur = text.to_string();
     for (f, t) in hops {
-        let dir = {
+        let (dir, key, kind) = if is_nllb {
+            (
+                models_root().join(NLLB_REPO.replace('/', "_")),
+                NLLB_REPO.to_string(),
+                ModelKind::Nllb200,
+            )
+        } else {
             let repo = pair_repo(f, t).ok_or("无对应本地模型")?;
-            models_root().join(repo.replace('/', "_"))
+            (
+                models_root().join(repo.replace('/', "_")),
+                repo.to_string(),
+                ModelKind::OpusMt,
+            )
         };
-        let pair = get_pair(f, t, &dir)?;
+        let pair = get_pair_cached(&key, &dir, kind)?;
         let mut p = pair.lock().map_err(|_| "模型会话锁不可用".to_string())?;
-        cur = beam_decode(&mut p, &cur)?;
+
+        // 解码起始与源前缀按模型家族区分：
+        // OPUS-MT：decoder_start=<pad>；NLLB：decoder_start=</s>，首个强制 token=目标语言码，
+        // 源序列首 token=源语言码
+        let (start_tokens, src_prefix, max_new) = match p.kind {
+            ModelKind::Nllb200 => {
+                let tgt = p
+                    .tokenizer
+                    .token_to_id(nllb_lang(t))
+                    .ok_or_else(|| format!("分词器缺少语言码 {}", nllb_lang(t)))?;
+                (
+                    vec![p.eos_id as i64, tgt as i64],
+                    p.tokenizer.token_to_id(nllb_lang(f)).map(|x| x as u32),
+                    NLLB_MAX_NEW_TOKENS,
+                )
+            }
+            ModelKind::OpusMt => (vec![p.pad_id as i64], None, MAX_NEW_TOKENS),
+        };
+
+        cur = beam_decode(&mut p, &cur, &start_tokens, src_prefix, max_new)?;
     }
     // OPUS-MT en→zh 语料偏繁体：目标为中文时统一转简体（Windows 系统级转换）
     if hops.last().map(|(_, t)| *t) == Some("zh") {
@@ -846,11 +951,17 @@ fn translate_blocking(hops: &[(&'static str, &'static str)], text: &str) -> Resu
 
 // ============ 引擎实现 ============
 
-pub struct OfflineMtEngine;
+pub struct OfflineMtEngine {
+    /// 离线模型选择（settings.offline_model）："opus-mt" | "nllb-200"
+    model: String,
+}
 
 impl OfflineMtEngine {
     pub fn new() -> Self {
-        Self
+        Self { model: "opus-mt".to_string() }
+    }
+    pub fn with_model(model: &str) -> Self {
+        Self { model: model.to_string() }
     }
 }
 
@@ -888,7 +999,13 @@ impl TranslationEngine for OfflineMtEngine {
         if from == to {
             return Ok(text.to_string());
         }
-        let hops = route(from, to);
+        // NLLB-200：单一模型直达任意语言对；OPUS-MT：中英直达+其余经英中转
+        let is_nllb = self.model == "nllb-200";
+        let hops: Vec<(&'static str, &'static str)> = if is_nllb {
+            vec![(boxed_pair(from), boxed_pair(to))]
+        } else {
+            route(from, to)
+        };
         if hops.is_empty() {
             return Err(format!(
                 "离线翻译暂不支持 {}→{}（无对应本地模型）",
@@ -898,12 +1015,17 @@ impl TranslationEngine for OfflineMtEngine {
         }
 
         // 下载是异步IO：在阻塞推理前完成
-        for (f, t) in &hops {
-            ensure_pair_models(f, t).await?;
+        if is_nllb {
+            ensure_nllb_model().await?;
+        } else {
+            for (f, t) in &hops {
+                ensure_pair_models(f, t).await?;
+            }
         }
 
+        let model = self.model.clone();
         let text = text.to_string();
-        tauri::async_runtime::spawn_blocking(move || translate_blocking(&hops, &text))
+        tauri::async_runtime::spawn_blocking(move || translate_blocking(&model, &hops, &text))
             .await
             .map_err(|e| format!("离线翻译任务执行失败: {e}"))?
     }
@@ -972,6 +1094,21 @@ mod tests {
         let out = engine.translate("今天天气真好，我们去公园散步吧。", "zh", "en").await.unwrap();
         println!("[offline-mt] zh→en: {out}");
         assert!(out.to_lowercase().contains("weather") || out.to_lowercase().contains("park"));
+    }
+
+    /// 端到端：NLLB-200 直达翻译（下载约600MB，首次运行耗时较长）
+    #[tokio::test]
+    #[ignore]
+    async fn test_offline_mt_nllb() {
+        std::env::set_var("SMART_TRANSLATOR_MODELS_DIR", "target/mt-models");
+        let engine = OfflineMtEngine::with_model("nllb-200");
+        let t0 = std::time::Instant::now();
+        let out = engine
+            .translate("Hello world, this is a test.", "en", "zh")
+            .await
+            .unwrap();
+        println!("[offline-mt] nllb en→zh first {:?}: {out}", t0.elapsed());
+        assert!(out.chars().any(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c)));
     }
 
     /// 端到端：ja→zh 经英语中转（验证 pivot 与 ja-en 模型下载）

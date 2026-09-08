@@ -160,10 +160,10 @@ pub struct ScreenshotBehavior {
 impl Default for AppSettings {
     fn default() -> Self {
         let mut hotkeys = HashMap::new();
-        hotkeys.insert("translate".to_string(), "Ctrl+Alt+T".to_string());
-        hotkeys.insert("screenshot".to_string(), "Ctrl+Alt+S".to_string());
-        hotkeys.insert("select".to_string(), "Ctrl+Alt+X".to_string());
-        hotkeys.insert("reverse".to_string(), "Ctrl+Alt+B".to_string());
+        hotkeys.insert("translate".to_string(), "None".to_string());
+        hotkeys.insert("screenshot".to_string(), "None".to_string());
+        hotkeys.insert("select".to_string(), "None".to_string());
+        hotkeys.insert("reverse".to_string(), "None".to_string());
 
         Self {
             autostart: true,
@@ -224,13 +224,13 @@ fn migrate(settings: &mut AppSettings) {
     if !settings.hotkeys.contains_key("select") {
         settings
             .hotkeys
-            .insert("select".to_string(), "Ctrl+Alt+X".to_string());
+            .insert("select".to_string(), "None".to_string());
     }
     // 反转原译快捷键（截图会话内生效）
     if !settings.hotkeys.contains_key("reverse") {
         settings
             .hotkeys
-            .insert("reverse".to_string(), "Ctrl+Alt+B".to_string());
+            .insert("reverse".to_string(), "None".to_string());
     }
     // 菜单组 copy 组件拆分为复制原文/复制译文
     if settings.screenshot_components.iter().any(|c| c == "copy") {
@@ -251,6 +251,9 @@ fn migrate(settings: &mut AppSettings) {
     // 无法识别的值回落默认值
     fn is_valid_hotkey(s: &str) -> bool {
         let s = s.trim();
+        if s.eq_ignore_ascii_case("none") {
+            return true;
+        }
         if !s.contains('+') {
             return false;
         }
@@ -467,6 +470,10 @@ pub async fn download_offline_model() -> Result<(), String> {
         .map(|(f, t)| (f.to_string(), t.to_string()))
         .unwrap_or_else(|| ("auto".to_string(), "zh".to_string()));
     let from = if from == "auto" { "en".to_string() } else { from };
+    if load_settings().offline_model == "nllb-200" {
+        // NLLB-200：单模型覆盖全部语言对
+        return crate::offline_mt::ensure_nllb_model().await.map(|_| ());
+    }
     let hops = crate::offline_mt::route(&from, &to);
     if hops.is_empty() {
         return Err(format!("当前方向 {from}→{to} 暂无离线模型"));
@@ -489,28 +496,6 @@ pub fn set_hotkeys_suspended(app: tauri::AppHandle, suspended: bool) -> Result<(
         register_hotkeys(&app, &settings)?;
     }
     Ok(())
-}
-
-/// 注册系统右键菜单（文件/文件夹右键 → 智能翻译）：HKCU 类根，无需管理员；
-/// 每次启动刷新（exe 路径变化自动更新）。选中文本的右键菜单为各应用私有，系统无法全局注入
-pub fn register_right_click_menu(app: &AppHandle) {
-    use std::os::windows::process::CommandExt;
-    let Ok(exe) = std::env::current_exe() else { return };
-    let Some(exe_str) = exe.to_str() else { return };
-    let cmd = format!("\"{}\"", exe_str);
-    for class in ["*", "Directory"] {
-        let key = format!("HKCU\\Software\\Classes\\{}\\shell\\SmartTranslator", class);
-        let _ = std::process::Command::new("reg")
-            .args(["add", &key, "/ve", "/d", "智能翻译", "/f"])
-            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-            .spawn();
-        let cmd_key = format!("{}\\command", key);
-        let _ = std::process::Command::new("reg")
-            .args(["add", &cmd_key, "/ve", "/d", &format!("{} --selection-translate", cmd), "/f"])
-            .creation_flags(0x0800_0000)
-            .spawn();
-    }
-    let _ = app; // 预留：菜单图标需要资源句柄
 }
 
 /// Tauri命令：主窗口“开始截图”按钮与快捷键/托盘走同一触发路径
@@ -601,58 +586,56 @@ fn parse_shortcut(s: &str) -> Result<Shortcut, String> {
 
 // 按设置注册全局快捷键（重复调用会先注销全部再注册，用于设置变更后重注册）
 pub fn register_hotkeys(app: &AppHandle, settings: &AppSettings) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
     let gs = app.global_shortcut();
     gs.unregister_all()
         .map_err(|e| format!("注销旧快捷键失败: {e}"))?;
 
-    let hk_screenshot = settings
-        .hotkeys
-        .get("screenshot")
-        .cloned()
-        .unwrap_or_else(|| "Ctrl+Alt+S".to_string());
-    let hk_translate = settings
-        .hotkeys
-        .get("translate")
-        .cloned()
-        .unwrap_or_else(|| "Ctrl+Alt+T".to_string());
-
-    let sc_screenshot = parse_shortcut(&hk_screenshot)?;
-    let sc_translate = parse_shortcut(&hk_translate)?;
-    if sc_screenshot == sc_translate {
-        return Err("截图与翻译快捷键不能相同".to_string());
-    }
-
-    gs.on_shortcut(sc_screenshot, |app, _shortcut, event| {
-        if event.state() == ShortcutState::Pressed {
-            trigger_screenshot(app);
-        }
-    })
-    .map_err(|e| format!("注册截图快捷键「{hk_screenshot}」失败: {e}"))?;
-
-    gs.on_shortcut(sc_translate, |app, _shortcut, event| {
-        if event.state() == ShortcutState::Pressed {
-            show_main_window(app);
-            let _ = app.emit_to("main", "open-translate-page", ());
-        }
-    })
-    .map_err(|e| format!("注册翻译快捷键「{hk_translate}」失败: {e}"))?;
-
-    // 划词翻译：捕获前台应用选中文本 → 主窗口翻译页（未启用则跳过）
-    if settings.select_translate_enabled {
-        let hk_select = settings
-            .hotkeys
-            .get("select")
-            .cloned()
-            .unwrap_or_else(|| "Ctrl+Alt+X".to_string());
-        if !hk_select.trim().is_empty() {
-            let sc_select = parse_shortcut(&hk_select)?;
-            if sc_select == sc_screenshot || sc_select == sc_translate {
-                return Err("划词翻译快捷键与其他快捷键重复".to_string());
+    let hm = |k: &str| settings.hotkeys.get(k).cloned().unwrap_or_default();
+    let entries: Vec<(&str, String)> = vec![
+        ("screenshot", hm("screenshot").trim().to_string()),
+        ("translate", hm("translate").trim().to_string()),
+        ("select", {
+            if settings.select_translate_enabled {
+                hm("select").trim().to_string()
+            } else {
+                String::new()
             }
-            gs.on_shortcut(sc_select, move |app, _shortcut, event| {
-                if event.state() == ShortcutState::Pressed {
+        }),
+    ];
+
+    // 值为 None/空 = 用户未设置，跳过注册；注册失败的收集为冲突清单（可能与其他软件/系统占用冲突）
+    let mut registered: Vec<(&str, String)> = Vec::new();
+    let mut conflicts: Vec<String> = Vec::new();
+    for (name, combo) in &entries {
+        if combo.is_empty() || combo.eq_ignore_ascii_case("none") {
+            continue;
+        }
+        let sc = match parse_shortcut(combo) {
+            Ok(s) => s,
+            Err(_) => {
+                conflicts.push(format!("{combo}（{name}·格式无法识别）"));
+                continue;
+            }
+        };
+        if registered.iter().any(|(_, r)| *r == *combo) {
+            conflicts.push(format!("{combo}（{name}·与其他快捷键重复）"));
+            continue;
+        }
+        let name_owned = name.to_string();
+        let combo_owned = combo.clone();
+        let result = gs.on_shortcut(sc, move |app, _shortcut, event| {
+            if event.state() != ShortcutState::Pressed {
+                return;
+            }
+            match name_owned.as_str() {
+                "screenshot" => trigger_screenshot(app),
+                "translate" => {
+                    show_main_window(app);
+                    let _ = app.emit_to("main", "open-translate-page", ());
+                }
+                "select" => {
                     let app = app.clone();
-                    // 捕获含轮询等待，放后台线程执行
                     std::thread::spawn(move || {
                         if let Some(text) = crate::selection::capture_selected_text() {
                             show_main_window(&app);
@@ -660,12 +643,39 @@ pub fn register_hotkeys(app: &AppHandle, settings: &AppSettings) -> Result<(), S
                         }
                     });
                 }
-            })
-            .map_err(|e| format!("注册划词翻译快捷键「{hk_select}」失败: {e}"))?;
+                _ => {}
+            }
+            let _ = combo_owned;
+        });
+        if let Err(e) = result {
+            conflicts.push(format!("{combo}（{name}·注册失败: 可能已被系统或其他软件占用）"));
+            let _ = e;
+        } else {
+            registered.push((name, combo.clone()));
         }
     }
 
-    Ok(())
+    *HOTKEY_CONFLICTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = conflicts.clone();
+
+    if conflicts.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("以下快捷键注册失败：{}", conflicts.join("、")))
+    }
+}
+
+/// 最近一次快捷键注册的冲突清单（前端快捷键页展示）
+static HOTKEY_CONFLICTS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Tauri命令：查询快捷键冲突清单
+#[tauri::command]
+pub fn get_hotkey_conflicts() -> Result<Vec<String>, String> {
+    Ok(HOTKEY_CONFLICTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone())
 }
 
 // Tauri命令：用系统默认浏览器打开链接（仅允许 http/https，防命令注入）

@@ -11,12 +11,14 @@ interface SidebarProps {
   menuItems: MenuItem[];
   activeMenu: string;
   onMenuChange: (menu: string) => void;
+  footer?: React.ReactNode;
 }
 
 const Sidebar: React.FC<SidebarProps> = ({
   menuItems,
   activeMenu,
   onMenuChange,
+  footer,
 }) => {
   return (
     <div className="sidebar">
@@ -35,6 +37,7 @@ const Sidebar: React.FC<SidebarProps> = ({
         ))}
       </div>
 
+      {footer && <div className="sidebar-footer">{footer}</div>}
     </div>
   );
 };

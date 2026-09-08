@@ -193,3 +193,15 @@ RapidOCR本地OCR	✅ 完成	PaddleOCR PP-OCRv6 模型+ONNX Runtime推理，完�
 - 删除高级设置与划词翻译区块（划词恒启用）；启动截图翻译按钮移至截图翻译标题旁；关于页版本0.2.0+GitHub地址；保存失败alert统一GUI弹窗；保存栏穿模修复（terms-panel纳入flex沉底）
 - 冗余清理：死命令capture_region_ocr/perform_ocr/capture_screenshot/get_extract_button_info删除；应用图标换langage.ico（16-256七尺寸级联）
 - cargo test 19 通过；npm run build 通过；release exe 重打包
+
+## 2026-09-09 反馈修复9项 + NLLB-200 接入（第二十四轮）
+1 右键系统功能取消（代码+注册表项清理）
+2 应用图标换桌面 icon.ico（七尺寸级联重生成）
+3 截图菜单：按住即拖拽（去掉500ms阈值）；复制原文/译文回退上版（⧉+原/译切换），migrate反向迁移
+4 术语管理：导入支持 JSON（[{source,translation}] 或 {原文:译文}）；导入按钮穿模修复（with-link）；导入/新建包增加映射编辑器（查看/删/增/保存）
+5 翻译历史复制拆分为“复制原文/复制译文”
+6 快捷键默认全部 None（不注册任何全局热键）；冲突识别——注册失败收集为冲突清单（get_hotkey_conflicts），格式无法识别/互相重复/系统占用分别标注
+7 关于页 → 按钮移除，GitHub 地址改蓝色下划线超链接
+8 保存/恢复按钮移至侧边栏底部（SettingsPanel 受控化，localSettings 提升 App；彻底解决穿模）
+9 离线翻译补全：NLLB-200 蒸馏版（600MB）真实接入——200语言单模型直达（无需英语中转），语言码映射（zho_Hans等9语）、decoder_start=eos+强制目标语言码、源前缀语言码、128 token上限；OPUS-MT 回归通过
+- cargo test 19 通过；npm run build 通过；release exe 重打包

@@ -10,8 +10,7 @@ import "./SettingsPanel.css";
 const GROUP_COMPONENTS = [
   { id: "engine", label: "翻译引擎" },
   { id: "lang", label: "原/译语言" },
-  { id: "copy_src", label: "复制原文" },
-  { id: "copy_dst", label: "复制译文" },
+  { id: "copy", label: "复制" },
   { id: "close", label: "关闭" },
   { id: "settings", label: "设置" },
 ];
@@ -174,7 +173,6 @@ const ComponentChips: React.FC<{
   onOrderChange: (next: string[]) => void;
 }> = ({ order, onOrderChange }) => {
   const [draggingId, setDraggingId] = useState<string | null>(null);
-  const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const chipRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
   const allIds = GROUP_COMPONENTS.map((d) => d.id);
@@ -184,12 +182,11 @@ const ComponentChips: React.FC<{
     ...allIds.filter((id) => !order.includes(id)),
   ];
 
+  // 按住即进入拖拽模式（无阈值延迟）
   const startHold = (id: string) => {
-    holdTimer.current = setTimeout(() => setDraggingId(id), 500);
+    setDraggingId(id);
   };
-  const cancelHold = () => {
-    if (holdTimer.current) clearTimeout(holdTimer.current);
-  };
+
 
   useEffect(() => {
     if (!draggingId) return;
@@ -235,15 +232,7 @@ const ComponentChips: React.FC<{
               draggingId === id ? "dragging" : ""
             }`}
             onMouseDown={() => startHold(id)}
-            onMouseUp={cancelHold}
-            onMouseLeave={cancelHold}
-            onClick={() => {
-              if (draggingId) return; // 拖动结束的那次点击不当作切换
-              onOrderChange(
-                enabled ? order.filter((x) => x !== id) : [...order, id]
-              );
-            }}
-            title="点击启用/禁用 · 长按拖动排序"
+            title="点击启用/禁用 · 按住拖动排序"
           >
             <ComponentIcon id={id} />
             <span>{def.label}</span>
@@ -251,7 +240,7 @@ const ComponentChips: React.FC<{
         );
       })}
       <div className="component-tip">
-        点击启用/禁用组件 · 长按组件可左右拖动排序 · 从左到右显示在截图菜单组中
+        点击启用/禁用组件 · 按住组件左右拖动排序 · 从左到右显示在截图菜单组中
       </div>
     </div>
   );
@@ -262,24 +251,17 @@ const ComponentChips: React.FC<{
 interface SettingsPanelProps {
   activeMenu: string;
   settings: any;
-  onSaveSettings: (newSettings: any) => void;
+  // 受控模式：localSettings 由 App 持有（保存/恢复按钮在侧边栏底部统一渲染）
+  localSettings: any;
+  onLocalChange: (next: any) => void;
 }
 
 const SettingsPanel: React.FC<SettingsPanelProps> = ({
   activeMenu,
-  settings,
-  onSaveSettings,
+  localSettings,
+  onLocalChange,
 }) => {
-  const [localSettings, setLocalSettings] = useState<any>(settings);
-  const [customProviders, setCustomProviders] = useState<any[]>(
-    settings?.custom_providers || []
-  );
   const [netOk, setNetOk] = useState<boolean | null>(null);
-
-  useEffect(() => {
-    setLocalSettings(settings);
-    setCustomProviders(settings?.custom_providers || []);
-  }, [settings]);
 
   useEffect(() => {
     if (activeMenu !== "basic") return;
@@ -289,7 +271,7 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
   }, [activeMenu]);
 
   const handleSettingChange = (key: string, value: any) => {
-    setLocalSettings((prev: any) => ({ ...prev, [key]: value }));
+    onLocalChange({ ...localSettings, [key]: value });
   };
 
   // 供应商凭据是否已填写（徽标：已接入 / 未接入）
@@ -330,12 +312,14 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
   };
 
   // ===== 自定义多供应商 =====
+  const customProviders: any[] = localSettings?.custom_providers || [];
   const updateProvider = (idx: number, field: string, value: string) => {
-    const next = customProviders.map((p, i) =>
-      i === idx ? { ...p, [field]: value } : p
-    );
-    setCustomProviders(next);
-    handleSettingChange("custom_providers", next);
+    onLocalChange({
+      ...localSettings,
+      custom_providers: customProviders.map((p, i) =>
+        i === idx ? { ...p, [field]: value } : p
+      ),
+    });
   };
   const addProvider = (preset?: (typeof AI_PRESETS)[number]) => {
     const np = {
@@ -345,29 +329,26 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
       api_key: "",
       model: preset?.model || "",
     };
-    const next = [...customProviders, np];
-    setCustomProviders(next);
-    handleSettingChange("custom_providers", next);
+    onLocalChange({
+      ...localSettings,
+      custom_providers: [...customProviders, np],
+    });
   };
   const removeProvider = (idx: number) => {
-    const next = customProviders.filter((_, i) => i !== idx);
-    setCustomProviders(next);
-    handleSettingChange("custom_providers", next);
+    onLocalChange({
+      ...localSettings,
+      custom_providers: customProviders.filter((_, i) => i !== idx),
+    });
   };
 
   // ===== 菜单组件 chips =====
   const screenshotComponents: string[] = localSettings?.screenshot_components || [
     "engine",
     "lang",
-    "copy_src",
-    "copy_dst",
+    "copy",
     "close",
     "settings",
   ];
-
-  const handleSave = () => {
-    onSaveSettings({ ...localSettings, custom_providers: customProviders });
-  };
 
   // ===== 各页面 =====
 
@@ -1038,18 +1019,18 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         <p>技术栈: Tauri 2 + React + Rust（ONNX Runtime 本地推理）</p>
         <p>
           开源地址:{" "}
-          <button
-            className="provider-link"
-            onClick={() =>
+          <a
+            href="#"
+            className="gh-link"
+            onClick={(e) => {
+              e.preventDefault();
               invoke("open_external", {
                 url: "https://github.com/lugaoyu2005/smart-translator",
-              })
-            }
-            title="在浏览器打开 GitHub 仓库"
+              });
+            }}
           >
-            →
-          </button>
-          github.com/lugaoyu2005/smart-translator
+            github.com/lugaoyu2005/smart-translator
+          </a>
         </p>
         <p>支持平台: Windows 11, Android (计划中)</p>
       </div>
@@ -1092,22 +1073,6 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
     <div className="settings-panel">
       {renderContent()}
 
-      {activeMenu !== "about" && activeMenu !== "terms" && activeMenu !== "history" && (
-        <div className="settings-actions">
-          <button className="button primary" onClick={handleSave}>
-            保存设置
-          </button>
-          <button
-            className="button secondary"
-            onClick={() => {
-              setLocalSettings(settings);
-              setCustomProviders(settings?.custom_providers || []);
-            }}
-          >
-            恢复默认
-          </button>
-        </div>
-      )}
     </div>
   );
 };

@@ -46,9 +46,6 @@ fn main() {
             // 先加载设置（自启动/快捷键/引擎都依赖它）
             let settings = system::load_settings();
 
-            // 系统右键菜单（文件/文件夹右键 → 智能翻译）：启动时自动注册/刷新路径
-            system::register_right_click_menu(app.handle());
-
             // 同步内置符号纠错开关到 OCR 纠错链路
             crate::engines::BUILTIN_SYMBOLS_ON.store(
                 settings.builtin_symbols_enabled,
@@ -109,19 +106,6 @@ fn main() {
                         let _ = w.hide();
                     }
                 });
-            }
-
-            // 系统右键菜单“智能翻译”入口：模拟 Ctrl+C 捕获选中文本并走划词翻译
-            if std::env::args().any(|a| a == "--selection-translate") {
-                let handle = app.handle().clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(800)); // 等窗口服务就绪
-                    if let Some(text) = selection::capture_selected_text() {
-                        use tauri::Emitter;
-                        let _ = handle.emit_to("main", "translate-selection", text);
-                    }
-                });
-                system::show_main_window(app.handle());
             }
 
             // 初始化翻译管理器状态（术语库从 terms.json 加载）

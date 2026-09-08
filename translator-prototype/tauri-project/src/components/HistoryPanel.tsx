@@ -102,10 +102,17 @@ const HistoryPanel: React.FC = () => {
                 </span>
                 <button
                   className="mini-btn"
+                  onClick={() => handleCopy(h.source)}
+                  title="复制原文"
+                >
+                  复制原文
+                </button>
+                <button
+                  className="mini-btn"
                   onClick={() => handleCopy(h.translation)}
                   title="复制译文"
                 >
-                  复制
+                  复制译文
                 </button>
                 <button
                   className="mini-btn"

@@ -189,6 +189,34 @@ pub async fn import_package_text(
     content: String,
 ) -> Result<String, String> {
     let mut mappings: Vec<(String, String)> = Vec::new();
+    let trimmed = content.trim_start();
+    // JSON 支持：[{"source":"..","translation":".."}] 或 {"原文":"译文", ...}
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        match serde_json::from_str::<serde_json::Value>(trimmed) {
+            Ok(serde_json::Value::Array(arr)) => {
+                for item in arr {
+                    let f = item.get("source").and_then(|v| v.as_str()).map(|s| s.trim().to_string());
+                    let t = item.get("translation").and_then(|v| v.as_str()).map(|s| s.trim().to_string());
+                    if let (Some(f), Some(t)) = (f, t) {
+                        if !f.is_empty() && !t.is_empty() {
+                            mappings.push((f, t));
+                        }
+                    }
+                }
+            }
+            Ok(serde_json::Value::Object(map)) => {
+                for (f, v) in map {
+                    if let Some(t) = v.as_str() {
+                        if !f.trim().is_empty() && !t.trim().is_empty() {
+                            mappings.push((f.trim().to_string(), t.trim().to_string()));
+                        }
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(e) => return Err(format!("JSON 解析失败: {e}")),
+        }
+    } else {
     for line in content.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -204,6 +232,7 @@ pub async fn import_package_text(
                 mappings.push((from, to));
             }
         }
+    }
     }
     if mappings.is_empty() {
         return Err("未解析到有效映射（需两列：原文[逗号/Tab/→]译文）".to_string());

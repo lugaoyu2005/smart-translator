@@ -32,6 +32,7 @@ const TermsPanel: React.FC = () => {
   const [newSource, setNewSource] = useState("");
   const [newTranslation, setNewTranslation] = useState("");
   const [message, setMessage] = useState("");
+  const [editingPkg, setEditingPkg] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const refresh = async () => {
@@ -237,7 +238,7 @@ const TermsPanel: React.FC = () => {
 
       {/* 术语包 */}
       <div className="form-group">
-        <label className="form-label">
+        <label className="form-label with-link">
           术语包（当前方案启用项）
           <button className="provider-link" onClick={newPackage} title="新建术语包">
             +
@@ -252,7 +253,7 @@ const TermsPanel: React.FC = () => {
           <input
             ref={fileInputRef}
             type="file"
-            accept=".csv,.tsv,.txt"
+            accept=".csv,.tsv,.txt,.json"
             style={{ display: "none" }}
             onChange={handleImportFile}
           />
@@ -275,17 +276,41 @@ const TermsPanel: React.FC = () => {
                 <span className="package-count">{p.mappings.length} 条</span>
               </span>
               {!p.builtin && (
-                <button
-                  className="package-delete"
-                  onClick={() => deletePackage(p.id)}
-                  title="删除术语包"
-                >
-                  ✕
-                </button>
+                <>
+                  <button
+                    className="scheme-mini-btn"
+                    onClick={() =>
+                      setEditingPkg(editingPkg === p.id ? null : p.id)
+                    }
+                    title="查看/编辑映射"
+                  >
+                    {editingPkg === p.id ? "收起" : "编辑"}
+                  </button>
+                  <button
+                    className="package-delete"
+                    onClick={() => deletePackage(p.id)}
+                    title="删除术语包"
+                  >
+                    ✕
+                  </button>
+                </>
               )}
             </div>
           );
         })}
+        {/* 包映射编辑（展开） */}
+        {packages
+          .filter((p) => editingPkg === p.id && !p.builtin)
+          .map((p) => (
+            <PackageEditor
+              key={`edit-${p.id}`}
+              pkg={p}
+              onSaved={(msg) => {
+                setMessage(msg);
+                refresh();
+              }}
+            />
+          ))}
       </div>
 
       {/* 术语增删 */}
@@ -361,6 +386,73 @@ const TermsPanel: React.FC = () => {
           <div className="term-empty">暂无术语（添加后将仅归属当前激活方案）</div>
         )}
       </div>
+    </div>
+  );
+};
+
+// 包映射编辑器：查看/删除/新增映射，保存写回
+const PackageEditor: React.FC<{
+  pkg: TermPackage;
+  onSaved: (msg: string) => void;
+}> = ({ pkg, onSaved }) => {
+  const [rows, setRows] = useState<[string, string][]>(pkg.mappings);
+  const [nf, setNf] = useState("");
+  const [nt, setNt] = useState("");
+  return (
+    <div className="package-editor">
+      {rows.map(([f, t], i) => (
+        <div className="package-editor-row" key={i}>
+          <span className="pkg-from">{f}</span>
+          <span>→</span>
+          <span className="pkg-to">{t}</span>
+          <button
+            className="scheme-mini-btn"
+            onClick={() => setRows(rows.filter((_, k) => k !== i))}
+            title="删除该映射"
+          >
+            ✕
+          </button>
+        </div>
+      ))}
+      <div className="package-editor-row">
+        <input
+          className="form-input"
+          placeholder="原文"
+          value={nf}
+          onChange={(e) => setNf(e.target.value)}
+        />
+        <input
+          className="form-input"
+          placeholder="译文"
+          value={nt}
+          onChange={(e) => setNt(e.target.value)}
+        />
+        <button
+          className="scheme-mini-btn"
+          onClick={() => {
+            if (nf.trim() && nt.trim()) {
+              setRows([...rows, [nf.trim(), nt.trim()]]);
+              setNf("");
+              setNt("");
+            }
+          }}
+        >
+          + 添加
+        </button>
+      </div>
+      <button
+        className="button primary"
+        onClick={async () => {
+          try {
+            await invoke("save_package", { id: pkg.id, name: pkg.name, mappings: rows });
+            onSaved("术语包已保存");
+          } catch (e) {
+            onSaved(String(e));
+          }
+        }}
+      >
+        保存修改
+      </button>
     </div>
   );
 };
