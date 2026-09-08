@@ -244,9 +244,9 @@ const TermsPanel: React.FC = () => {
             +
           </button>
           <button
-            className="provider-link"
+            className="link-text-btn"
             onClick={() => fileInputRef.current?.click()}
-            title="导入术语包文件（CSV/TSV/TXT，两列：原文[逗号/Tab/→]译文）"
+            title="导入术语包文件（CSV/TSV/TXT/JSON，两列：原文[逗号/Tab/→]译文）"
           >
             导入
           </button>
