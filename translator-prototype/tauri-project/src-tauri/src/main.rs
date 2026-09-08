@@ -131,7 +131,7 @@ fn main() {
             history::delete_history_entry,
             history::clear_history,
             system::trigger_screenshot_cmd,
-            system::unregister_esc_exit,
+            system::poll_esc,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

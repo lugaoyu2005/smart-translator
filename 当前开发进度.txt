@@ -162,3 +162,10 @@ RapidOCR本地OCR	✅ 完成	PaddleOCR PP-OCRv6 模型+ONNX Runtime推理，完�
 - 决策：放弃“窗口常驻穿透”模型，回退为“预热+隐藏待命”——启动时置穿透显示一次（idle零渲染无感知，完成合成初始化）后隐藏；此后触发/退出均为显隐切换；退出强制 win.hide() 兜底（隐藏窗口不可能拦截任何输入，穿透恢复失败也有兜底）；TOOLWINDOW 保留
 - 穿透切换统一在隐藏态进行（行为一致对称）；触发路径不变（hide→取消穿透→show→focus→事件）
 - release exe 已重打包
+
+## 2026-09-08 截图焦点链路深度修复（第二十轮，自动化验证通过）
+- 深度测试定位：快捷键触发后窗口显示但从未成为前台（Windows 拒绝后台进程 SetForegroundWindow）——键盘输入全给别的窗口，ESC/按键全失效；ESC 热键兜底 on_shortcut("Escape") 也静默注册失败
+- 修复一：ALT 击键 hack——keybd_event(VK_MENU) 使本进程获得前台设置权后 SetForegroundWindow+SetWindowPos TOPMOST，实测触发后前台归属正确
+- 修复二：弃用热键兜底，改为 GetAsyncKeyState 轮询（poll_esc 命令，150ms，读全局物理键状态与焦点无关）；idle 态不轮询
+- 自动化测试（SendKeys+Win32窗口/前台检查）全链路通过：触发显示+焦点到手 / ESC退出隐藏+焦点释放 / 重复触发回归 / 清理
+- cargo test 19 通过；release exe 已重打包并重启
