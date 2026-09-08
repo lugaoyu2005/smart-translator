@@ -11,14 +11,12 @@ interface SidebarProps {
   menuItems: MenuItem[];
   activeMenu: string;
   onMenuChange: (menu: string) => void;
-  onStartScreenshot: () => void;
 }
 
 const Sidebar: React.FC<SidebarProps> = ({
   menuItems,
   activeMenu,
   onMenuChange,
-  onStartScreenshot,
 }) => {
   return (
     <div className="sidebar">
@@ -37,11 +35,6 @@ const Sidebar: React.FC<SidebarProps> = ({
         ))}
       </div>
 
-      <div className="sidebar-footer">
-        <button className="screenshot-button" onClick={onStartScreenshot}>
-          📷 启动截图翻译
-        </button>
-      </div>
     </div>
   );
 };

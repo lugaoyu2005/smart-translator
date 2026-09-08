@@ -62,6 +62,38 @@ pub struct AppSettings {
     // 供应商凭据（框架阶段：仅存储，翻译实现后续补齐）
     #[serde(default)]
     pub providers: ProviderSettings,
+    // 启动行为：true=主界面显示在前台 false=隐藏到托盘（默认）
+    #[serde(default)]
+    pub startup_show_window: bool,
+    // 多自定义 OpenAI 兼容供应商（每个生成独立引擎）
+    #[serde(default)]
+    pub custom_providers: Vec<CustomProvider>,
+    // 离线翻译模型选择（opus-mt 可用；nllb-200 下一版本接入）
+    #[serde(default = "default_offline_model")]
+    pub offline_model: String,
+    // 常用符号纠错包（内置部首/箭头等误识别纠正）总开关
+    #[serde(default = "default_true")]
+    pub builtin_symbols_enabled: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct CustomProvider {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub model: String,
+}
+
+fn default_offline_model() -> String {
+    "opus-mt".to_string()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_current_engine() -> String {
@@ -88,7 +120,8 @@ fn default_screenshot_components() -> Vec<String> {
     vec![
         "engine".to_string(),
         "lang".to_string(),
-        "copy".to_string(),
+        "copy_src".to_string(),
+        "copy_dst".to_string(),
         "close".to_string(),
         "settings".to_string(),
     ]
@@ -130,6 +163,7 @@ impl Default for AppSettings {
         hotkeys.insert("translate".to_string(), "Ctrl+Alt+T".to_string());
         hotkeys.insert("screenshot".to_string(), "Ctrl+Alt+S".to_string());
         hotkeys.insert("select".to_string(), "Ctrl+Alt+X".to_string());
+        hotkeys.insert("reverse".to_string(), "Ctrl+Alt+B".to_string());
 
         Self {
             autostart: true,
@@ -160,6 +194,10 @@ impl Default for AppSettings {
             window_last_width: 0,
             window_last_height: 0,
             providers: ProviderSettings::default(),
+            startup_show_window: false,
+            custom_providers: Vec::new(),
+            offline_model: default_offline_model(),
+            builtin_symbols_enabled: true,
         }
     }
 }
@@ -187,6 +225,27 @@ fn migrate(settings: &mut AppSettings) {
         settings
             .hotkeys
             .insert("select".to_string(), "Ctrl+Alt+X".to_string());
+    }
+    // 反转原译快捷键（截图会话内生效）
+    if !settings.hotkeys.contains_key("reverse") {
+        settings
+            .hotkeys
+            .insert("reverse".to_string(), "Ctrl+Alt+B".to_string());
+    }
+    // 菜单组 copy 组件拆分为复制原文/复制译文
+    if settings.screenshot_components.iter().any(|c| c == "copy") {
+        let pos = settings
+            .screenshot_components
+            .iter()
+            .position(|c| c == "copy")
+            .unwrap();
+        settings.screenshot_components.remove(pos);
+        settings
+            .screenshot_components
+            .insert(pos, "copy_dst".to_string());
+        settings
+            .screenshot_components
+            .insert(pos, "copy_src".to_string());
     }
     // 快捷键格式校验：设置页为自由文本输入，误输入（如"Ctrl+Alt+TCt"）会使注册失败，
     // 无法识别的值回落默认值
@@ -399,6 +458,61 @@ pub fn poll_esc() -> Result<bool, String> {
     Ok(false)
 }
 
+/// Tauri命令：手动预下载离线翻译模型（当前默认方向相关语言对，进度经 offline-mt-status 事件推送）
+#[tauri::command]
+pub async fn download_offline_model() -> Result<(), String> {
+    let direction = load_settings().default_translation_direction;
+    let (from, to) = direction
+        .split_once("->")
+        .map(|(f, t)| (f.to_string(), t.to_string()))
+        .unwrap_or_else(|| ("auto".to_string(), "zh".to_string()));
+    let from = if from == "auto" { "en".to_string() } else { from };
+    let hops = crate::offline_mt::route(&from, &to);
+    if hops.is_empty() {
+        return Err(format!("当前方向 {from}→{to} 暂无离线模型"));
+    }
+    for (f, t) in &hops {
+        crate::offline_mt::ensure_pair_models(f, t).await?;
+    }
+    Ok(())
+}
+
+/// Tauri命令：快捷键录入模式——临时注销全部全局热键（录入期间按组合键不会被系统热键抢先）；
+/// 录入完成后重新按当前设置注册
+#[tauri::command]
+pub fn set_hotkeys_suspended(app: tauri::AppHandle, suspended: bool) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    if suspended {
+        app.global_shortcut().unregister_all().map_err(|e| e.to_string())?;
+    } else {
+        let settings = load_settings();
+        register_hotkeys(&app, &settings)?;
+    }
+    Ok(())
+}
+
+/// 注册系统右键菜单（文件/文件夹右键 → 智能翻译）：HKCU 类根，无需管理员；
+/// 每次启动刷新（exe 路径变化自动更新）。选中文本的右键菜单为各应用私有，系统无法全局注入
+pub fn register_right_click_menu(app: &AppHandle) {
+    use std::os::windows::process::CommandExt;
+    let Ok(exe) = std::env::current_exe() else { return };
+    let Some(exe_str) = exe.to_str() else { return };
+    let cmd = format!("\"{}\"", exe_str);
+    for class in ["*", "Directory"] {
+        let key = format!("HKCU\\Software\\Classes\\{}\\shell\\SmartTranslator", class);
+        let _ = std::process::Command::new("reg")
+            .args(["add", &key, "/ve", "/d", "智能翻译", "/f"])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .spawn();
+        let cmd_key = format!("{}\\command", key);
+        let _ = std::process::Command::new("reg")
+            .args(["add", &cmd_key, "/ve", "/d", &format!("{} --selection-translate", cmd), "/f"])
+            .creation_flags(0x0800_0000)
+            .spawn();
+    }
+    let _ = app; // 预留：菜单图标需要资源句柄
+}
+
 /// Tauri命令：主窗口“开始截图”按钮与快捷键/托盘走同一触发路径
 #[tauri::command]
 pub fn trigger_screenshot_cmd(app: tauri::AppHandle) -> Result<(), String> {
@@ -599,6 +713,11 @@ pub async fn save_app_settings(
     app: tauri::AppHandle,
     settings: AppSettings,
 ) -> Result<(), String> {
+    // 同步内置符号纠错开关（OCR 纠错链路读取）
+    crate::engines::BUILTIN_SYMBOLS_ON.store(
+        settings.builtin_symbols_enabled,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let path = settings_path();
     let json = serde_json::to_string_pretty(&settings)
         .map_err(|e| format!("序列化设置失败: {e}"))?;

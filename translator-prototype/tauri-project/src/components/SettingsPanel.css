@@ -8,7 +8,8 @@
   box-sizing: border-box;
 }
 
-.settings-panel > .settings-section {
+.settings-panel > .settings-section,
+.settings-panel > .terms-panel {
   flex: 1 0 auto;
 }
 
@@ -324,4 +325,206 @@ input:checked + .toggle-slider:before {
 
 .about-info p {
   margin-bottom: 8px;
+}
+/* ===== 快捷键录入框 ===== */
+.hotkey-input {
+  min-width: 220px;
+  padding: 8px 14px;
+  border: 1.5px solid #1976d2;
+  border-radius: 8px;
+  background: #fff;
+  color: #1976d2;
+  font-size: 13px;
+  cursor: pointer;
+}
+.hotkey-input.recording {
+  background: #e3f2fd;
+  border-style: dashed;
+  animation: hotkey-pulse 1s infinite;
+}
+@keyframes hotkey-pulse {
+  50% { background: #bbdefb; }
+}
+
+/* ===== 菜单组件 chips（点击切换 · 长按拖动排序）===== */
+.component-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.component-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1.5px solid #c8c8c8;
+  border-radius: 8px;
+  background: #f2f2f2;
+  color: #888;
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+}
+.component-chip.enabled {
+  border-color: #1976d2;
+  background: #e3f2fd;
+  color: #1976d2;
+}
+.component-chip.dragging {
+  opacity: 0.5;
+  border-style: dashed;
+}
+.component-tip {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #999;
+}
+
+/* ===== 常用 AI 预设（API 右侧 2×n 网格）===== */
+.preset-area {
+  margin-top: 10px;
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+.preset-grid {
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 8px;
+}
+.preset-btn {
+  padding: 7px 10px;
+  border: 1.5px solid #1976d2;
+  border-radius: 8px;
+  background: transparent;
+  color: #1976d2;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.preset-btn:hover {
+  background: #1976d2;
+  color: #fff;
+}
+.custom-provider-add {
+  padding: 7px 12px;
+  border: 1px dashed #999;
+  border-radius: 8px;
+  background: transparent;
+  color: #666;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+/* ===== 多自定义供应商行 ===== */
+.custom-provider-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-bottom: 10px;
+}
+.custom-provider-fields {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr 2fr;
+  gap: 8px;
+}
+.custom-provider-remove {
+  width: 30px;
+  height: 30px;
+  border: 1px solid #e57373;
+  border-radius: 8px;
+  background: transparent;
+  color: #e57373;
+  cursor: pointer;
+}
+.custom-provider-remove:hover {
+  background: #e57373;
+  color: #fff;
+}
+
+/* ===== 设置页标题旁操作按钮（启动截图翻译）===== */
+.title-action-btn {
+  margin-left: 14px;
+  padding: 6px 14px;
+  border: 1.5px solid #1976d2;
+  border-radius: 8px;
+  background: transparent;
+  color: #1976d2;
+  font-size: 13px;
+  cursor: pointer;
+  vertical-align: middle;
+}
+.title-action-btn:hover {
+  background: #1976d2;
+  color: #fff;
+}
+
+/* ===== 保存失败提示 ===== */
+.saved-title.failed {
+  color: #e57373;
+}
+
+/* ===== 术语管理：方案 tabs / 术语包 ===== */
+.scheme-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+.scheme-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border: 1.5px solid #c8c8c8;
+  border-radius: 8px;
+  background: #f2f2f2;
+  cursor: pointer;
+  font-size: 13px;
+}
+.scheme-tab.active {
+  border-color: #1976d2;
+  background: #e3f2fd;
+  color: #1976d2;
+  font-weight: 600;
+}
+.scheme-mini-btn {
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 2px;
+}
+.scheme-add {
+  width: 34px;
+  border: 1.5px dashed #1976d2;
+  border-radius: 8px;
+  background: transparent;
+  color: #1976d2;
+  font-size: 16px;
+  cursor: pointer;
+}
+.package-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+}
+.package-name {
+  flex: 1;
+}
+.package-count {
+  margin-left: 8px;
+  color: #999;
+  font-size: 12px;
+}
+.package-delete {
+  border: 1px solid #e57373;
+  border-radius: 6px;
+  background: transparent;
+  color: #e57373;
+  cursor: pointer;
 }

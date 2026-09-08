@@ -181,3 +181,15 @@ RapidOCR本地OCR	✅ 完成	PaddleOCR PP-OCRv6 模型+ONNX Runtime推理，完�
 - 发布首个 Release v0.1.0：tag 指向 3469dd0，附 Smart-Translator_0.1.0_x64_green.exe（43.5MB）与 _setup.msi（23.6MB，MSI 已按最新代码重打），Release 说明含功能清单与使用说明
 - 顺带修复：设置页快捷键自由文本误输入（本地实测出现 Ctrl+Alt+TCt 导致翻译快捷键失效）——migrate 增加快捷键格式校验（须含修饰键且末段为字母数字或Fn），非法值回落默认
 - release exe 已重打包重启
+
+## 2026-09-09 设置页大重构 + 新功能批次（第二十三轮，12项需求全落地）
+- 基础设置：改名；新增“启动时主界面显示前台/隐藏托盘”开关；划词系统右键菜单（文件/文件夹右键→智能翻译，启动自动注册HKCU，参数--selection-translate触发捕获）；真实网络状态
+- 翻译引擎：徽标改“未接入”；API区仅启用引擎显示；多自定义OpenAI兼容供应商（每个独立引擎名“自定义AI-名称”）+ 常用AI预设（DeepSeek/通义/Kimi/GLM/OpenAI/Gemini/Claude/SiliconFlow）2×n网格置于API区右侧空白处；离线模型下拉（OPUS-MT可用/NLLB-200标注下版本）+手动下载按钮；术语优先级名词解释
+- OCR引擎独立区块置于翻译引擎下方；菜单组组件改chips交互（SVG图标+点击增删+长按拖动排序，无radio）
+- 翻译测试：引擎徽章可点击指定测试引擎（translate_text加engine参数走translate_with）；修复⇄反换（auto置灰提示+交换后自动重译）
+- 截图菜单复制拆分为“复制原文/复制译文”两按钮；反转快捷键读配置
+- 术语管理重构：术语包（内置常用符号纠错包45条固化可开关=部首偏旁提前干预）+使用方案（方案一/二/三可重命名可新增，激活方案决定生效术语与包）+文件导入（CSV/TSV/TXT两列）
+- 快捷键集中四项（含反转）+录入模式（后端set_hotkeys_suspended临时注销全局热键，解决录入被抢先）
+- 删除高级设置与划词翻译区块（划词恒启用）；启动截图翻译按钮移至截图翻译标题旁；关于页版本0.2.0+GitHub地址；保存失败alert统一GUI弹窗；保存栏穿模修复（terms-panel纳入flex沉底）
+- 冗余清理：死命令capture_region_ocr/perform_ocr/capture_screenshot/get_extract_button_info删除；应用图标换langage.ico（16-256七尺寸级联）
+- cargo test 19 通过；npm run build 通过；release exe 重打包

@@ -194,70 +194,16 @@ mod win {
     /// 内置符号纠错表（穷举常用误识别，术语管理里可继续追加用户映射）：
     /// OCR输出字符 → 正确字符。只收录"正常文本几乎不会出现"的形近字/变体，
     /// 避免误伤正文（如 一/丁 等常用字绝不收录）
-    const BUILTIN_SYMBOL_FIXES: &[(&str, &str)] = &[
-        // 箭头：部首/笔画形近字（→ ← ↑ ↓ 的常见误识别产物）
-        ("乛", "→"),
-        ("⺂", "→"),
-        ("⺡", "→"),
-        ("乁", "←"),
-        // 箭头变体统一为基本箭头
-        ("⇒", "→"),
-        ("⇨", "→"),
-        ("➔", "→"),
-        ("➜", "→"),
-        ("➤", "→"),
-        ("⇐", "←"),
-        ("⇑", "↑"),
-        ("⇓", "↓"),
-        // 竖线形近字/全角
-        ("丨", "|"),
-        ("︱", "|"),
-        ("｜", "|"),
-        // 省略号/艾特
-        ("⋯", "…"),
-        ("＠", "@"),
-        // 带圈数字 → 阿拉伯数字（引擎对纯数字的处理与排版更稳）
-        ("①", "1"),
-        ("②", "2"),
-        ("③", "3"),
-        ("④", "4"),
-        ("⑤", "5"),
-        ("⑥", "6"),
-        ("⑦", "7"),
-        ("⑧", "8"),
-        ("⑨", "9"),
-        ("⑩", "10"),
-        ("⑪", "11"),
-        ("⑫", "12"),
-        ("⑬", "13"),
-        ("⑭", "14"),
-        ("⑮", "15"),
-        ("⑯", "16"),
-        ("⑰", "17"),
-        ("⑱", "18"),
-        ("⑲", "19"),
-        ("⑳", "20"),
-        // 带括号数字
-        ("⑴", "(1)"),
-        ("⑵", "(2)"),
-        ("⑶", "(3)"),
-        ("⑷", "(4)"),
-        ("⑸", "(5)"),
-        ("⑹", "(6)"),
-        ("⑺", "(7)"),
-        ("⑻", "(8)"),
-        ("⑼", "(9)"),
-        ("⑽", "(10)"),
-    ];
-
-    /// 应用符号纠错：先内置穷举表，再用户术语映射（术语管理中 1-2 字非字母数字源词）
+    /// 应用符号纠错：内置穷举表（受“常用符号纠错包”开关控制）+ 用户术语映射
     pub(crate) fn apply_symbol_corrections(
         text: &str,
         corrections: &[(String, String)],
     ) -> String {
         let mut result = text.to_string();
-        for (from, to) in BUILTIN_SYMBOL_FIXES {
-            result = result.replace(from, to);
+        if crate::engines::builtin_symbols_on() {
+            for (from, to) in crate::engines::BUILTIN_SYMBOL_FIXES {
+                result = result.replace(from, to);
+            }
         }
         for (from, to) in corrections {
             result = result.replace(from.as_str(), to.as_str());
@@ -523,29 +469,6 @@ mod win {
 
 /// 截图+OCR一体命令：捕获屏幕指定区域并识别，返回结构化行数据
 /// （避免像素数组跨IPC传输，单次调用完成）
-#[tauri::command]
-pub async fn capture_region_ocr(
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-) -> Result<OcrResult, String> {
-    #[cfg(target_os = "windows")]
-    {
-        tauri::async_runtime::spawn_blocking(move || {
-            let data = win::capture_region(x, y, width, height)?;
-            win::ocr_from_pixels(&data.pixels, data.width, data.height, &[])
-        })
-        .await
-        .map_err(|e| format!("OCR任务执行失败: {e}"))?
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = (x, y, width, height);
-        Err("当前平台暂不支持截图OCR".to_string())
-    }
-}
-
 /// 捕获屏幕指定区域并暂存于后端内存（不跨IPC传像素）
 /// 配合 ocr_stored_capture 使用：截图（百毫秒级）完成后前端立即恢复UI，
 /// 较慢的OCR在窗口可见状态下执行，消除"松手后纯空白"的等待期
@@ -578,6 +501,10 @@ pub async fn ocr_stored_capture(
         // 从术语库提取符号映射（短源词且不含字母数字，避免把普通术语误当符号）
         let corrections: Vec<(String, String)> = {
             let manager = state.manager.lock().await;
+            // 同步符号纠错开关：设置总开关 且 激活方案勾选了内置符号包
+            let sym_on = crate::engines::builtin_symbols_on()
+                && manager.term_base().builtin_symbols_active();
+            crate::engines::BUILTIN_SYMBOLS_ON.store(sym_on, std::sync::atomic::Ordering::Relaxed);
             manager
                 .list_terms()
                 .into_iter()
@@ -850,39 +777,8 @@ pub fn capture_region(x: i32, y: i32, width: i32, height: i32) -> Result<Screens
 }
 
 /// 从BGRA像素执行OCR，返回结构化行数据（文本+紧凑矩形，物理像素）
-#[tauri::command]
-pub fn perform_ocr(pixels: Vec<u8>, width: i32, height: i32) -> Result<OcrResult, String> {
-    #[cfg(target_os = "windows")]
-    {
-        win::ocr_from_pixels(&pixels, width, height, &[])
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = (pixels, width, height);
-        Err("当前平台暂不支持OCR".to_string())
-    }
-}
-
 /// 截图（兼容旧命令）：占位
-#[tauri::command]
-pub async fn capture_screenshot() -> Result<Vec<u8>, String> {
-    Ok(Vec::new())
-}
-
 /// 获取提取按钮信息（兼容旧命令）
-#[tauri::command]
-pub async fn get_extract_button_info() -> Result<ExtractButton, String> {
-    Ok(ExtractButton {
-        x: 100.0,
-        y: 200.0,
-        width: 120.0,
-        height: 40.0,
-        opacity: 0.1,
-        visible: true,
-        draggable: true,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -46,6 +46,15 @@ fn main() {
             // 先加载设置（自启动/快捷键/引擎都依赖它）
             let settings = system::load_settings();
 
+            // 系统右键菜单（文件/文件夹右键 → 智能翻译）：启动时自动注册/刷新路径
+            system::register_right_click_menu(app.handle());
+
+            // 同步内置符号纠错开关到 OCR 纠错链路
+            crate::engines::BUILTIN_SYMBOLS_ON.store(
+                settings.builtin_symbols_enabled,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+
 
             // 离线翻译下载进度推送给前端（测试等无GUI场景不注入则静默跳过）
             let _ = offline_mt::APP_HANDLE.set(app.handle().clone());
@@ -58,6 +67,11 @@ fn main() {
                 };
                 if w >= 400 && h >= 300 {
                     let _ = main_win.set_size(tauri::LogicalSize::new(w as f64, h as f64));
+                }
+                // 启动行为：显示主界面在前台 / 隐藏在托盘（默认）
+                if settings.startup_show_window {
+                    let _ = main_win.show();
+                    let _ = main_win.set_focus();
                 }
             }
 
@@ -97,6 +111,19 @@ fn main() {
                 });
             }
 
+            // 系统右键菜单“智能翻译”入口：模拟 Ctrl+C 捕获选中文本并走划词翻译
+            if std::env::args().any(|a| a == "--selection-translate") {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(800)); // 等窗口服务就绪
+                    if let Some(text) = selection::capture_selected_text() {
+                        use tauri::Emitter;
+                        let _ = handle.emit_to("main", "translate-selection", text);
+                    }
+                });
+                system::show_main_window(app.handle());
+            }
+
             // 初始化翻译管理器状态（术语库从 terms.json 加载）
             let manager = translation::build_manager(&settings);
             app.manage(AppState {
@@ -116,13 +143,9 @@ fn main() {
             terms::add_term,
             terms::delete_term,
             terms::delete_term_translation,
-            screenshot::capture_region_ocr,
             screenshot::capture_region_store,
             screenshot::ocr_stored_capture,
             screenshot::capture_region,
-            screenshot::perform_ocr,
-            screenshot::capture_screenshot,
-            screenshot::get_extract_button_info,
             system::get_network_status,
             system::open_external,
             system::get_app_settings,
@@ -132,6 +155,19 @@ fn main() {
             history::clear_history,
             system::trigger_screenshot_cmd,
             system::poll_esc,
+            system::set_hotkeys_suspended,
+            system::download_offline_model,
+            terms::list_packages,
+            terms::save_package,
+            terms::delete_package,
+            terms::import_package_text,
+            terms::list_schemes,
+            terms::get_active_scheme,
+            terms::add_scheme,
+            terms::rename_scheme,
+            terms::delete_scheme,
+            terms::activate_scheme,
+            terms::set_scheme_packages,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

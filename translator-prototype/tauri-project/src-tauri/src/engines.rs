@@ -527,6 +527,7 @@ impl TranslationEngine for DeepLEngine {
 // ============ 自定义 OpenAI 兼容引擎 ============
 
 pub struct OpenAICompatEngine {
+    display_name: String,
     base_url: String,
     api_key: String,
     model: String,
@@ -535,7 +536,13 @@ pub struct OpenAICompatEngine {
 
 impl OpenAICompatEngine {
     pub fn new(base_url: &str, api_key: &str, model: &str) -> Self {
+        Self::new_named("自定义AI", base_url, api_key, model)
+    }
+
+    /// 多自定义供应商：每个供应商独立引擎名（如“自定义AI-DeepSeek”）
+    pub fn new_named(display_name: &str, base_url: &str, api_key: &str, model: &str) -> Self {
         Self {
+            display_name: display_name.to_string(),
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
             model: model.to_string(),
@@ -565,7 +572,7 @@ impl OpenAICompatEngine {
 #[async_trait::async_trait]
 impl TranslationEngine for OpenAICompatEngine {
     fn name(&self) -> &str {
-        "自定义AI"
+        &self.display_name
     }
 
     fn engine_type(&self) -> EngineType {
@@ -901,6 +908,73 @@ impl AliEngine {
 
 // ============ 术语库（一词多义优先级） ============
 
+/// 内置符号纠错表（OCR 部首/笔画/箭头等常见误识别 → 正确符号），
+/// 由“常用符号纠错包”（术语管理）控制是否应用
+pub const BUILTIN_SYMBOL_FIXES: &[(&str, &str)] = &[
+    // 箭头：部首/笔画形近字（→ ← ↑ ↓ 的常见误识别产物）
+    ("乛", "→"),
+    ("⺂", "→"),
+    ("⺡", "→"),
+    ("乁", "←"),
+    // 箭头变体统一为基本箭头
+    ("⇒", "→"),
+    ("⇨", "→"),
+    ("➔", "→"),
+    ("➜", "→"),
+    ("➤", "→"),
+    ("⇐", "←"),
+    ("⇑", "↑"),
+    ("⇓", "↓"),
+    // 竖线形近字/全角
+    ("丨", "|"),
+    ("︱", "|"),
+    ("｜", "|"),
+    // 省略号/艾特
+    ("⋯", "…"),
+    ("＠", "@"),
+    // 带圈数字 → 阿拉伯数字（引擎对纯数字的处理与排版更稳）
+    ("①", "1"),
+    ("②", "2"),
+    ("③", "3"),
+    ("④", "4"),
+    ("⑤", "5"),
+    ("⑥", "6"),
+    ("⑦", "7"),
+    ("⑧", "8"),
+    ("⑨", "9"),
+    ("⑩", "10"),
+    ("⑪", "11"),
+    ("⑫", "12"),
+    ("⑬", "13"),
+    ("⑭", "14"),
+    ("⑮", "15"),
+    ("⑯", "16"),
+    ("⑰", "17"),
+    ("⑱", "18"),
+    ("⑲", "19"),
+    ("⑳", "20"),
+    // 带括号数字
+    ("⑴", "(1)"),
+    ("⑵", "(2)"),
+    ("⑶", "(3)"),
+    ("⑷", "(4)"),
+    ("⑸", "(5)"),
+    ("⑹", "(6)"),
+    ("⑺", "(7)"),
+    ("⑻", "(8)"),
+    ("⑼", "(9)"),
+    ("⑽", "(10)"),
+];
+/// 更多带圈数字等在 screenshot.rs 侧补充应用（数量较多，此处覆盖高频部首与箭头）
+
+/// 内置符号纠错开关（settings.builtin_symbols_enabled 同步，Atomic 全局）
+pub static BUILTIN_SYMBOLS_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn builtin_symbols_on() -> bool {
+    use std::sync::atomic::Ordering;
+    BUILTIN_SYMBOLS_ON.load(Ordering::Relaxed)
+}
+
 /// 术语条目：一词多义，按优先级排序
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TermEntry {
@@ -928,16 +1002,122 @@ impl TermEntry {
     }
 }
 
-/// 术语库：支持手动设置优先级 + 使用频率自动调整
-#[derive(Debug, Serialize, Deserialize, Default)]
+/// 术语包：批量映射规则（内置符号纠错包 + 用户导入/新建包）
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct TermPackage {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub mappings: Vec<(String, String)>,
+    /// 内置包不可删除，内容来自 BUILTIN_SYMBOL_FIXES
+    #[serde(default)]
+    pub builtin: bool,
+}
+
+/// 使用方案：一套启用的术语包 + 术语集合（空 enabled_entry_keys = 全部术语生效）
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TermScheme {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub enabled_packages: Vec<String>,
+    #[serde(default)]
+    pub enabled_entry_keys: Vec<String>,
+}
+
+/// 术语库：支持手动设置优先级 + 使用频率自动调整 + 术语包/使用方案
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TermBase {
     pub entries: HashMap<String, TermEntry>,
+    #[serde(default)]
+    pub packages: HashMap<String, TermPackage>,
+    #[serde(default)]
+    pub schemes: Vec<TermScheme>,
+    #[serde(default)]
+    pub active_scheme: String,
     /// 是否有未持久化的变更（自动调整计数等），由命令层检查后落盘
     #[serde(skip)]
     pub dirty: bool,
 }
 
+impl Default for TermBase {
+    fn default() -> Self {
+        let mut tb = Self {
+            entries: HashMap::new(),
+            packages: HashMap::new(),
+            schemes: Vec::new(),
+            active_scheme: "scheme_1".to_string(),
+            dirty: false,
+        };
+        tb.ensure_defaults();
+        tb
+    }
+}
+
 impl TermBase {
+    /// 确保内置符号包与默认三方案存在（加载/迁移时调用）
+    pub fn ensure_defaults(&mut self) {
+        if !self.packages.contains_key("builtin_symbols") {
+            self.packages.insert(
+                "builtin_symbols".to_string(),
+                TermPackage {
+                    id: "builtin_symbols".to_string(),
+                    name: "常用符号纠错（内置）".to_string(),
+                    mappings: BUILTIN_SYMBOL_FIXES
+                        .iter()
+                        .map(|(a, b)| (a.to_string(), b.to_string()))
+                        .collect(),
+                    builtin: true,
+                },
+            );
+        }
+        if self.schemes.is_empty() {
+            self.schemes = vec![
+                TermScheme {
+                    id: "scheme_1".to_string(),
+                    name: "方案一".to_string(),
+                    enabled_packages: vec!["builtin_symbols".to_string()],
+                    enabled_entry_keys: vec![],
+                },
+                TermScheme {
+                    id: "scheme_2".to_string(),
+                    name: "方案二".to_string(),
+                    enabled_packages: vec![],
+                    enabled_entry_keys: vec![],
+                },
+                TermScheme {
+                    id: "scheme_3".to_string(),
+                    name: "方案三".to_string(),
+                    enabled_packages: vec![],
+                    enabled_entry_keys: vec![],
+                },
+            ];
+        }
+        if self.active_scheme.is_empty()
+            || !self.schemes.iter().any(|s| s.id == self.active_scheme)
+        {
+            self.active_scheme = self.schemes[0].id.clone();
+        }
+    }
+
+    /// 当前激活方案（不存在时回落第一个）
+    pub fn active_scheme(&self) -> &TermScheme {
+        self.schemes
+            .iter()
+            .find(|s| s.id == self.active_scheme)
+            .unwrap_or(&self.schemes[0])
+    }
+
+    /// 内置符号纠错包是否在激活方案中启用（OCR 纠错链路使用）
+    pub fn builtin_symbols_active(&self) -> bool {
+        self.scheme_has_package("builtin_symbols")
+    }
+
+    /// 包是否在激活方案中启用
+    fn scheme_has_package(&self, pkg_id: &str) -> bool {
+        self.active_scheme().enabled_packages.iter().any(|p| p == pkg_id)
+    }
+
     /// 手动设置某词某译法的优先级
     pub fn set_priority(&mut self, source: &str, translation: &str, priority: u32) {
         let entry = self.entries.entry(source.to_string()).or_insert(TermEntry {
@@ -1030,16 +1210,44 @@ impl TermBase {
         entry.best_translation().map(|s| s.to_string())
     }
 
-    /// 应用术语替换：将文本中的术语替换为最优译法
+    /// 应用术语替换：激活方案的术语 + 启用术语包的映射（按长度降序，优先匹配长词）
     pub fn apply_to_text(&mut self, text: &str) -> String {
-        let mut result = text.to_string();
-        // 收集所有术语（按长度降序，优先匹配长词）；克隆避免借用冲突
-        let mut terms: Vec<String> = self.entries.keys().cloned().collect();
-        terms.sort_by_key(|t| std::cmp::Reverse(t.chars().count()));
+        self.ensure_defaults();
+        let mut replacements: Vec<(String, String)> = Vec::new();
 
+        // 1) 激活方案内的术语（enabled_entry_keys 为空 = 全部生效）
+        let keys = &self.active_scheme().enabled_entry_keys;
+        let mut terms: Vec<String> = if keys.is_empty() {
+            self.entries.keys().cloned().collect()
+        } else {
+            self.entries
+                .keys()
+                .filter(|k| keys.contains(k))
+                .cloned()
+                .collect()
+        };
+        terms.sort_by_key(|t| std::cmp::Reverse(t.chars().count()));
         for term in terms {
             if let Some(translation) = self.lookup(&term) {
-                result = result.replace(&term, &translation);
+                replacements.push((term, translation));
+            }
+        }
+
+        // 2) 启用的术语包映射
+        let pkg_ids: Vec<String> = self.active_scheme().enabled_packages.clone();
+        for pid in &pkg_ids {
+            if let Some(pkg) = self.packages.get(pid) {
+                for (from, to) in &pkg.mappings {
+                    replacements.push((from.clone(), to.clone()));
+                }
+            }
+        }
+
+        replacements.sort_by_key(|(f, _)| std::cmp::Reverse(f.chars().count()));
+        let mut result = text.to_string();
+        for (from, to) in replacements {
+            if !from.is_empty() {
+                result = result.replace(&from, &to);
             }
         }
         result
@@ -1159,6 +1367,29 @@ impl TranslationManager {
             }
         }
         Err(last_err)
+    }
+
+    /// 单文本翻译（指定引擎名称，用于翻译测试页手动选引擎）
+    pub async fn translate_with(
+        &mut self,
+        engine_name: &str,
+        text: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<TranslationResult, String> {
+        let processed = self.term_base.apply_to_text(text);
+        for engine in &self.engines {
+            if engine.name() == engine_name {
+                let out = engine.translate(&processed, from, to).await?;
+                return Ok(TranslationResult {
+                    translated_text: out,
+                    engine_used: engine.name().to_string(),
+                    from: from.to_string(),
+                    to: to.to_string(),
+                });
+            }
+        }
+        Err(format!("未找到引擎: {engine_name}"))
     }
 
     /// 批量翻译（指定引擎名称，用于手动切换翻译源）

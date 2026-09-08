@@ -52,11 +52,25 @@ pub fn build_manager(settings: &crate::system::AppSettings) -> TranslationManage
     if enabled("deepl") {
         engines.push(Box::new(DeepLEngine::new(&providers.deepl_api_key)));
     }
-    if enabled("custom") {
+    // 多自定义 OpenAI 兼容供应商（每个独立引擎；旧单供应商字段向后兼容）
+    if settings.custom_providers.is_empty() && !providers.custom_openai_base_url.is_empty() {
         engines.push(Box::new(OpenAICompatEngine::new(
             &providers.custom_openai_base_url,
             &providers.custom_openai_api_key,
             &providers.custom_openai_model,
+        )));
+    }
+    for cp in &settings.custom_providers {
+        if cp.base_url.trim().is_empty() {
+            continue;
+        }
+        let display = if cp.name.trim().is_empty() {
+            "自定义AI".to_string()
+        } else {
+            format!("自定义AI-{}", cp.name.trim())
+        };
+        engines.push(Box::new(OpenAICompatEngine::new_named(
+            &display, &cp.base_url, &cp.api_key, &cp.model,
         )));
     }
     // 离线翻译（OPUS-MT 本地模型）排在末尾：在线引擎优先，全部失败时自动兜底；
@@ -83,6 +97,7 @@ pub async fn translate_text(
     text: String,
     from: String,
     to: String,
+    engine: Option<String>,
 ) -> Result<TranslationResult, String> {
     // 预处理：处理 MiniMap / Mini_Map 等格式
     let processed = preprocess_text(&text);
@@ -94,7 +109,14 @@ pub async fn translate_text(
 
     let mut manager = state.manager.lock().await;
 
-    let result = manager.translate(&processed, &from, &to).await;
+    // 指定引擎（翻译测试页手动选引擎）；None=按优先级自动
+    let result = if let Some(name) = engine.as_deref().filter(|s| !s.trim().is_empty()) {
+        manager
+            .translate_with(name.trim(), &processed, &from, &to)
+            .await
+    } else {
+        manager.translate(&processed, &from, &to).await
+    };
 
     // 术语库使用计数有自动调整时落盘
     if manager.take_term_dirty() {

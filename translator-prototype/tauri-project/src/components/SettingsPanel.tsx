@@ -1,21 +1,21 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { emit } from "@tauri-apps/api/event";
-import "./SettingsPanel.css";
 import TermsPanel from "./TermsPanel";
 import HistoryPanel from "./HistoryPanel";
+import "./SettingsPanel.css";
 
-// 菜单组组件定义（工具箱：设置里可增删、排序）
+// ===== 常量 =====
+
+// 截图菜单组件（chips 展示顺序默认值，长按拖动可排序）
 const GROUP_COMPONENTS = [
   { id: "engine", label: "翻译引擎" },
   { id: "lang", label: "原/译语言" },
-  { id: "copy", label: "复制（原/译）" },
+  { id: "copy_src", label: "复制原文" },
+  { id: "copy_dst", label: "复制译文" },
   { id: "close", label: "关闭" },
   { id: "settings", label: "设置" },
 ];
 
-// 在线翻译引擎清单：status 非空 = 框架阶段（翻译实现后续接入）
-// status 一律由代码动态计算（已接入/已接入·待填密钥），字段废弃
 const ONLINE_PROVIDERS = [
   { id: "baidu", label: "百度翻译", engine: "百度翻译" },
   { id: "youdao", label: "有道智云", engine: "有道智云" },
@@ -27,18 +27,242 @@ const ONLINE_PROVIDERS = [
   { id: "custom", label: "自定义AI（OpenAI兼容）", engine: "自定义AI" },
 ];
 
-// OCR 引擎清单：ready=true 当前可用
 const OCR_ENGINES = [
-  { id: "windows", label: "Windows 内置 OCR", status: "已接入 · 本地 · 免费" },
-  { id: "youdao", label: "有道 OCR", status: "已接入 · 云 · 体验金计费" },
-  { id: "rapidocr", label: "RapidOCR 本地", status: "已接入 · 本地 · 免费 · 离线" },
-  { id: "tesseract", label: "Tesseract", status: "未接入" },
+  { id: "windows", label: "Windows 内置 OCR", desc: "本地 · 免费 · 系统自带" },
+  { id: "youdao", label: "有道 OCR", desc: "云端 · 体验金计费" },
+  { id: "rapidocr", label: "RapidOCR 本地", desc: "本地 · 免费 · 离线（首次下载约15MB）" },
 ];
+
+// 常用 AI 供应商预设（OpenAI 兼容端点，点击预填后仅需填 Key）
+const AI_PRESETS = [
+  { name: "DeepSeek", url: "https://api.deepseek.com/v1", model: "deepseek-chat" },
+  {
+    name: "通义千问",
+    url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    model: "qwen-plus",
+  },
+  { name: "Kimi", url: "https://api.moonshot.cn/v1", model: "moonshot-v1-8k" },
+  {
+    name: "智谱GLM",
+    url: "https://open.bigmodel.cn/api/paas/v4",
+    model: "glm-4-flash",
+  },
+  { name: "OpenAI", url: "https://api.openai.com/v1", model: "gpt-4o-mini" },
+  {
+    name: "Gemini",
+    url: "https://generativelanguage.googleapis.com/v1beta/openai",
+    model: "gemini-1.5-flash",
+  },
+  {
+    name: "Claude",
+    url: "https://api.anthropic.com/v1",
+    model: "claude-3-5-sonnet",
+  },
+  {
+    name: "SiliconFlow",
+    url: "https://api.siliconflow.cn/v1",
+    model: "Qwen/Qwen2.5-7B-Instruct",
+  },
+];
+
+// 菜单组件 SVG 小图标（文字后方展示）
+const ComponentIcon: React.FC<{ id: string }> = ({ id }) => {
+  const common = { width: 14, height: 14, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
+  switch (id) {
+    case "engine":
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="3" />
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+        </svg>
+      );
+    case "lang":
+      return (
+        <svg {...common}>
+          <path d="M5 8l6 6" />
+          <path d="M4 14l6-6 2-3" />
+          <path d="M2 5h12" />
+          <path d="M7 2h1" />
+          <path d="M22 22l-5-10-5 10" />
+          <path d="M14 18h6" />
+        </svg>
+      );
+    case "copy_src":
+    case "copy_dst":
+      return (
+        <svg {...common}>
+          <rect x="9" y="9" width="13" height="13" rx="2" />
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+        </svg>
+      );
+    case "close":
+      return (
+        <svg {...common}>
+          <line x1="18" y1="6" x2="6" y2="18" />
+          <line x1="6" y1="6" x2="18" y2="18" />
+        </svg>
+      );
+    case "settings":
+      return (
+        <svg {...common}>
+          <line x1="4" y1="21" x2="4" y2="14" />
+          <line x1="4" y1="10" x2="4" y2="3" />
+          <line x1="12" y1="21" x2="12" y2="12" />
+          <line x1="12" y1="8" x2="12" y2="3" />
+          <line x1="20" y1="21" x2="20" y2="16" />
+          <line x1="20" y1="12" x2="20" y2="3" />
+          <line x1="1" y1="14" x2="7" y2="14" />
+          <line x1="9" y1="8" x2="15" y2="8" />
+          <line x1="17" y1="16" x2="23" y2="16" />
+        </svg>
+      );
+    default:
+      return null;
+  }
+};
+
+// ===== 快捷键录入框：点击后捕获组合键（录入期间全局热键被临时注销，不会被抢先触发）=====
+const HotkeyInput: React.FC<{ value: string; onChange: (v: string) => void }> = ({
+  value,
+  onChange,
+}) => {
+  const [recording, setRecording] = useState(false);
+  useEffect(() => {
+    if (!recording) return;
+    const onKey = async (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === "Escape") {
+        setRecording(false);
+        invoke("set_hotkeys_suspended", { suspended: false }).catch(() => {});
+        return;
+      }
+      if (e.key === "Control" || e.key === "Alt" || e.key === "Shift" || e.key === "Meta") {
+        return; // 等待完整组合
+      }
+      const parts: string[] = [];
+      if (e.ctrlKey) parts.push("Ctrl");
+      if (e.altKey) parts.push("Alt");
+      if (e.shiftKey) parts.push("Shift");
+      parts.push(e.key.length === 1 ? e.key.toUpperCase() : e.key);
+      onChange(parts.join("+"));
+      setRecording(false);
+      invoke("set_hotkeys_suspended", { suspended: false }).catch(() => {});
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [recording, onChange]);
+
+  return (
+    <button
+      type="button"
+      className={`hotkey-input ${recording ? "recording" : ""}`}
+      onClick={async () => {
+        setRecording(true);
+        invoke("set_hotkeys_suspended", { suspended: true }).catch(() => {});
+      }}
+      title="点击后按下新的组合键；Esc 取消"
+    >
+      {recording ? "请按下组合键（Esc 取消）" : value || "点击设置"}
+    </button>
+  );
+};
+
+// ===== 菜单组件 chips：点击切换增删，长按 500ms 进入左右拖动排序 =====
+const ComponentChips: React.FC<{
+  order: string[];
+  onOrderChange: (next: string[]) => void;
+}> = ({ order, onOrderChange }) => {
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const chipRefs = useRef<Record<string, HTMLDivElement | null>>({});
+
+  const allIds = GROUP_COMPONENTS.map((d) => d.id);
+  // 显示顺序 = 配置顺序 + 未启用的组件（追加在后，同样可拖动）
+  const visibleOrder: string[] = [
+    ...order.filter((id) => allIds.includes(id)),
+    ...allIds.filter((id) => !order.includes(id)),
+  ];
+
+  const startHold = (id: string) => {
+    holdTimer.current = setTimeout(() => setDraggingId(id), 500);
+  };
+  const cancelHold = () => {
+    if (holdTimer.current) clearTimeout(holdTimer.current);
+  };
+
+  useEffect(() => {
+    if (!draggingId) return;
+    const onMove = (e: MouseEvent) => {
+      let targetId: string | null = null;
+      for (const id of visibleOrder) {
+        const el = chipRefs.current[id];
+        if (!el) continue;
+        const r = el.getBoundingClientRect();
+        if (e.clientX >= r.left && e.clientX <= r.right) {
+          targetId = id;
+          break;
+        }
+      }
+      if (!targetId || targetId === draggingId) return;
+      const next = visibleOrder.filter((id) => id !== draggingId);
+      const ti = next.indexOf(targetId);
+      next.splice(ti, 0, draggingId);
+      onOrderChange(next);
+    };
+    const onUp = () => setDraggingId(null);
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [draggingId, visibleOrder, onOrderChange]);
+
+  return (
+    <div className="component-chips">
+      {visibleOrder.map((id) => {
+        const def = GROUP_COMPONENTS.find((d) => d.id === id);
+        if (!def) return null;
+        const enabled = order.includes(id);
+        return (
+          <div
+            key={id}
+            ref={(el) => {
+              chipRefs.current[id] = el;
+            }}
+            className={`component-chip ${enabled ? "enabled" : ""} ${
+              draggingId === id ? "dragging" : ""
+            }`}
+            onMouseDown={() => startHold(id)}
+            onMouseUp={cancelHold}
+            onMouseLeave={cancelHold}
+            onClick={() => {
+              if (draggingId) return; // 拖动结束的那次点击不当作切换
+              onOrderChange(
+                enabled ? order.filter((x) => x !== id) : [...order, id]
+              );
+            }}
+            title="点击启用/禁用 · 长按拖动排序"
+          >
+            <ComponentIcon id={id} />
+            <span>{def.label}</span>
+          </div>
+        );
+      })}
+      <div className="component-tip">
+        点击启用/禁用组件 · 长按组件可左右拖动排序 · 从左到右显示在截图菜单组中
+      </div>
+    </div>
+  );
+};
+
+// ===== 组件 =====
 
 interface SettingsPanelProps {
   activeMenu: string;
   settings: any;
-  onSaveSettings: (settings: any) => void;
+  onSaveSettings: (newSettings: any) => void;
 }
 
 const SettingsPanel: React.FC<SettingsPanelProps> = ({
@@ -47,64 +271,28 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
   onSaveSettings,
 }) => {
   const [localSettings, setLocalSettings] = useState<any>(settings);
+  const [customProviders, setCustomProviders] = useState<any[]>(
+    settings?.custom_providers || []
+  );
+  const [netOk, setNetOk] = useState<boolean | null>(null);
 
   useEffect(() => {
     setLocalSettings(settings);
+    setCustomProviders(settings?.custom_providers || []);
   }, [settings]);
 
+  useEffect(() => {
+    if (activeMenu !== "basic") return;
+    invoke<any>("get_network_status")
+      .then((n) => setNetOk(!!n?.is_online))
+      .catch(() => setNetOk(null));
+  }, [activeMenu]);
+
   const handleSettingChange = (key: string, value: any) => {
-    setLocalSettings((prev: any) => ({
-      ...prev,
-      [key]: value,
-    }));
+    setLocalSettings((prev: any) => ({ ...prev, [key]: value }));
   };
 
-  const handleSave = async () => {
-    // 先等设置落盘，再重载引擎：两者并发时 reload_engines 可能读到旧配置，
-    // 导致截图窗口引擎列表与设置不同步
-    await onSaveSettings(localSettings);
-    // 保存后重新加载引擎（应用新的API密钥）
-    try {
-      await invoke("reload_engines");
-    } catch (e) {
-      console.error("重新加载引擎失败:", e);
-    }
-    // 通知截图窗口：设置实时生效
-    try {
-      await emit("screenshot-settings-updated");
-    } catch (e) {
-      console.error("通知截图窗口失败:", e);
-    }
-  };
-
-  // 菜单组组件：启用/禁用（保持定义顺序）
-  const toggleComponent = (id: string, enabled: boolean) => {
-    const comps: string[] = localSettings?.screenshot_components || [
-      "engine",
-      "copy",
-      "close",
-      "settings",
-    ];
-    const next = enabled
-      ? [...comps, id]
-      : comps.filter((c: string) => c !== id);
-    const ordered = GROUP_COMPONENTS.map((d) => d.id).filter((gid) =>
-      next.includes(gid)
-    );
-    handleSettingChange("screenshot_components", ordered);
-  };
-
-  // 菜单组组件：上移/下移
-  const moveComponent = (id: string, dir: -1 | 1) => {
-    const comps: string[] = [...(localSettings?.screenshot_components || [])];
-    const idx = comps.indexOf(id);
-    const target = idx + dir;
-    if (idx < 0 || target < 0 || target >= comps.length) return;
-    [comps[idx], comps[target]] = [comps[target], comps[idx]];
-    handleSettingChange("screenshot_components", comps);
-  };
-
-  // 供应商凭据是否已填写（决定"已接入 / 已接入·待填密钥"徽标）
+  // 供应商凭据是否已填写（徽标：已接入 / 未接入）
   const providerReady = (id: string): boolean => {
     const s: any = localSettings;
     if (!s) return false;
@@ -121,14 +309,11 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         return !!(s.providers?.tencent_secret_id && s.providers?.tencent_secret_key);
       case "ali":
         return !!(s.providers?.ali_access_key_id && s.providers?.ali_access_key_secret);
-      case "custom":
-        return !!(s.providers?.custom_openai_base_url && s.providers?.custom_openai_api_key);
       default:
         return false;
     }
   };
 
-  // 在线翻译引擎：启用/停用（双向绑定截图翻译引擎菜单）
   const toggleOnlineApi = (id: string, on: boolean) => {
     const apis: string[] = localSettings?.online_apis || [];
     handleSettingChange(
@@ -137,458 +322,492 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
     );
   };
 
-  // 供应商凭据字段更新
-  const setProviderKey = (field: string, value: string) => {
+  const setProviderKey = (key: string, value: string) => {
     handleSettingChange("providers", {
-      ...(localSettings?.providers || {}),
-      [field]: value,
+      ...localSettings?.providers,
+      [key]: value,
     });
   };
 
-  const renderBasicSettings = () => (
-    <div className="settings-section">
-      <h3 className="section-title">基本设置</h3>
-      
-      <div className="form-group">
-        <label className="form-label">开机自启动</label>
-        <label className="toggle-switch">
-          <input
-            type="checkbox"
-            checked={localSettings?.autostart || false}
-            onChange={(e) => handleSettingChange("autostart", e.target.checked)}
-          />
-          <span className="toggle-slider"></span>
-        </label>
-        <span className="toggle-label">启用开机自启动</span>
-      </div>
-      
-      <div className="form-group">
-        <label className="form-label">默认翻译方向</label>
-        <select
-          className="form-select"
-          value={localSettings?.default_translation_direction || "auto->zh"}
-          onChange={(e) => handleSettingChange("default_translation_direction", e.target.value)}
-        >
-          <option value="auto->zh">自动检测 → 中文</option>
-          <option value="zh->en">中文 → 英文</option>
-          <option value="en->zh">英文 → 中文</option>
-          <option value="zh->ja">中文 → 日文</option>
-        </select>
-      </div>
-      
-      <div className="form-group">
-        <label className="form-label">主窗口大小</label>
-        <div className="toggle-group">
-          <label className="toggle-switch">
-            <input
-              type="checkbox"
-              checked={(localSettings?.window_size_mode || "last") === "fixed"}
-              onChange={(e) =>
-                handleSettingChange(
-                  "window_size_mode",
-                  e.target.checked ? "fixed" : "last"
-                )
-              }
-            />
-            <span className="toggle-slider"></span>
-          </label>
-          <span className="toggle-label">
-            固定大小（关闭 = 记住上次调整后的大小）
-          </span>
-        </div>
-        {(localSettings?.window_size_mode || "last") === "fixed" && (
-          <div className="api-keys">
-            <input
-              type="number"
-              className="form-input"
-              placeholder="宽（≥400）"
-              min={400}
-              value={localSettings?.window_fixed_width || 1200}
-              onChange={(e) =>
-                handleSettingChange(
-                  "window_fixed_width",
-                  Math.max(400, parseInt(e.target.value) || 1200)
-                )
-              }
-            />
-            <input
-              type="number"
-              className="form-input"
-              placeholder="高（≥300）"
-              min={300}
-              value={localSettings?.window_fixed_height || 800}
-              onChange={(e) =>
-                handleSettingChange(
-                  "window_fixed_height",
-                  Math.max(300, parseInt(e.target.value) || 800)
-                )
-              }
-            />
-          </div>
-        )}
-      </div>
+  // ===== 自定义多供应商 =====
+  const updateProvider = (idx: number, field: string, value: string) => {
+    const next = customProviders.map((p, i) =>
+      i === idx ? { ...p, [field]: value } : p
+    );
+    setCustomProviders(next);
+    handleSettingChange("custom_providers", next);
+  };
+  const addProvider = (preset?: (typeof AI_PRESETS)[number]) => {
+    const np = {
+      id: `cp_${Date.now()}`,
+      name: preset?.name || "",
+      base_url: preset?.url || "",
+      api_key: "",
+      model: preset?.model || "",
+    };
+    const next = [...customProviders, np];
+    setCustomProviders(next);
+    handleSettingChange("custom_providers", next);
+  };
+  const removeProvider = (idx: number) => {
+    const next = customProviders.filter((_, i) => i !== idx);
+    setCustomProviders(next);
+    handleSettingChange("custom_providers", next);
+  };
 
-      <div className="form-group">
-        <label className="form-label">网络状态</label>
-        <div className="network-status">
-          <div className={`status-indicator ${true ? "online" : "offline"}`}></div>
-          <span>在线状态 - 使用在线翻译</span>
+  // ===== 菜单组件 chips =====
+  const screenshotComponents: string[] = localSettings?.screenshot_components || [
+    "engine",
+    "lang",
+    "copy_src",
+    "copy_dst",
+    "close",
+    "settings",
+  ];
+
+  const handleSave = () => {
+    onSaveSettings({ ...localSettings, custom_providers: customProviders });
+  };
+
+  // ===== 各页面 =====
+
+  const renderBasicSettings = () => {
+    return (
+      <div className="settings-section">
+        <h3 className="section-title">基础设置</h3>
+
+        <div className="form-group">
+          <div className="toggle-group">
+            <label className="toggle-switch">
+              <input
+                type="checkbox"
+                checked={localSettings?.autostart || false}
+                onChange={(e) => handleSettingChange("autostart", e.target.checked)}
+              />
+              <span className="toggle-slider"></span>
+            </label>
+            <span className="toggle-label">开机自启动</span>
+          </div>
+        </div>
+
+        <div className="form-group">
+          <label className="form-label">启动时主界面</label>
+          <div className="toggle-group">
+            <label className="toggle-switch">
+              <input
+                type="checkbox"
+                checked={localSettings?.startup_show_window || false}
+                onChange={(e) =>
+                  handleSettingChange("startup_show_window", e.target.checked)
+                }
+              />
+              <span className="toggle-slider"></span>
+            </label>
+            <span className="toggle-label">
+              {localSettings?.startup_show_window
+                ? "显示在前台"
+                : "隐藏在托盘（点击任务栏托盘图标唤出）"}
+            </span>
+          </div>
+        </div>
+
+        <div className="form-group">
+          <label className="form-label">默认翻译方向</label>
+          <select
+            className="form-select"
+            value={localSettings?.default_translation_direction || "auto->zh"}
+            onChange={(e) =>
+              handleSettingChange("default_translation_direction", e.target.value)
+            }
+          >
+            <option value="auto->zh">自动检测 → 中文</option>
+            <option value="zh->en">中文 → 英语</option>
+            <option value="en->zh">英语 → 中文</option>
+            <option value="zh->ja">中文 → 日语</option>
+          </select>
+        </div>
+
+        <div className="form-group">
+          <label className="form-label">主窗口大小</label>
+          <div className="toggle-group">
+            <label className="toggle-switch">
+              <input
+                type="checkbox"
+                checked={localSettings?.window_size_mode === "fixed"}
+                onChange={(e) =>
+                  handleSettingChange(
+                    "window_size_mode",
+                    e.target.checked ? "fixed" : "last"
+                  )
+                }
+              />
+              <span className="toggle-slider"></span>
+            </label>
+            <span className="toggle-label">
+              {localSettings?.window_size_mode === "fixed"
+                ? "固定大小"
+                : "记住上次大小"}
+            </span>
+          </div>
+          {localSettings?.window_size_mode === "fixed" && (
+            <div className="api-keys">
+              <input
+                type="number"
+                className="form-input"
+                placeholder="宽"
+                value={localSettings?.window_fixed_width || 1200}
+                onChange={(e) =>
+                  handleSettingChange("window_fixed_width", Number(e.target.value))
+                }
+              />
+              <input
+                type="number"
+                className="form-input"
+                placeholder="高"
+                value={localSettings?.window_fixed_height || 800}
+                onChange={(e) =>
+                  handleSettingChange("window_fixed_height", Number(e.target.value))
+                }
+              />
+            </div>
+          )}
+        </div>
+
+        <div className="form-group">
+          <label className="form-label">网络状态</label>
+          <div className="toggle-group">
+            <span
+              className={`status-indicator ${netOk === false ? "offline" : "online"}`}
+            ></span>
+            <span className="toggle-label">
+              {netOk === null
+                ? "检测中…"
+                : netOk
+                ? "在线 - 可使用在线翻译引擎"
+                : "离线 - 将自动使用离线翻译"}
+            </span>
+          </div>
+        </div>
+
+        <div className="form-group">
+          <label className="form-label">系统右键菜单</label>
+          <p className="form-hint">
+            已自动启用：在文件/文件夹上右键可见“智能翻译”菜单项，点击后捕获屏幕选中文本并翻译。
+            选中文本的右键菜单由各应用私有（系统限制无法全局注入），请使用 Ctrl+Alt+X 划词。
+          </p>
         </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   const renderTranslationSettings = () => {
     const enabledRealProviders = ONLINE_PROVIDERS.filter((p) =>
       localSettings?.online_apis?.includes(p.id)
     );
     return (
-    <div className="settings-section">
-      <h3 className="section-title">翻译引擎</h3>
+      <div className="settings-section">
+        <h3 className="section-title">翻译引擎</h3>
 
-      <div className="form-group">
-        <label className="form-label">在线翻译引擎</label>
-        {ONLINE_PROVIDERS.map((p) => (
-          <div className="toggle-group" key={p.id}>
-            <label className="toggle-switch">
-              <input
-                type="checkbox"
-                checked={localSettings?.online_apis?.includes(p.id) || false}
-                onChange={(e) => toggleOnlineApi(p.id, e.target.checked)}
-              />
-              <span className="toggle-slider"></span>
-            </label>
-            <span className="toggle-label">
-              {p.label}
-              <span className="provider-badge">
-                {providerReady(p.id) ? "已接入" : "已接入 · 待填密钥"}
-              </span>
-            </span>
-          </div>
-        ))}
-        <p className="form-hint">启用的引擎与离线翻译会出现在截图翻译的引擎菜单中</p>
-      </div>
-
-      {(enabledRealProviders.length > 0 || localSettings?.offline_engine !== "disabled") && (
         <div className="form-group">
-          <label className="form-label">当前翻译源（默认引擎）</label>
-          <select
-            className="form-select"
-            value={
-              localSettings?.current_engine ||
-              enabledRealProviders[0]?.engine ||
-              "离线翻译"
-            }
-            onChange={(e) => handleSettingChange("current_engine", e.target.value)}
-          >
-            {enabledRealProviders.map((p) => (
-              <option key={p.id} value={p.engine}>
+          <label className="form-label">在线翻译引擎</label>
+          {ONLINE_PROVIDERS.map((p) => (
+            <div className="toggle-group" key={p.id}>
+              <label className="toggle-switch">
+                <input
+                  type="checkbox"
+                  checked={localSettings?.online_apis?.includes(p.id) || false}
+                  onChange={(e) => toggleOnlineApi(p.id, e.target.checked)}
+                />
+                <span className="toggle-slider"></span>
+              </label>
+              <span className="toggle-label">
                 {p.label}
-              </option>
+                {p.id !== "custom" && (
+                  <span className="provider-badge">
+                    {providerReady(p.id) ? "已接入" : "未接入"}
+                  </span>
+                )}
+              </span>
+            </div>
+          ))}
+          <p className="form-hint">
+            启用的引擎与离线翻译会出现在截图翻译的引擎菜单中（启用的引擎在下方填写密钥）
+          </p>
+        </div>
+
+        {/* 启用引擎的 API 密钥区（未启用隐藏，不挡视野） */}
+        {localSettings?.online_apis?.includes("baidu") && (
+          <div className="form-group">
+            <label className="form-label">百度翻译 API</label>
+            <div className="api-keys">
+              <input
+                type="text"
+                className="form-input"
+                placeholder="百度 APP ID"
+                value={localSettings?.baidu_app_id || ""}
+                onChange={(e) => handleSettingChange("baidu_app_id", e.target.value)}
+              />
+              <input
+                type="password"
+                className="form-input"
+                placeholder="百度 密钥"
+                value={localSettings?.baidu_secret || ""}
+                onChange={(e) => handleSettingChange("baidu_secret", e.target.value)}
+              />
+            </div>
+          </div>
+        )}
+
+        {localSettings?.online_apis?.includes("youdao") && (
+          <div className="form-group">
+            <label className="form-label">有道智云 API</label>
+            <div className="api-keys">
+              <input
+                type="text"
+                className="form-input"
+                placeholder="有道 应用ID"
+                value={localSettings?.youdao_app_key || ""}
+                onChange={(e) => handleSettingChange("youdao_app_key", e.target.value)}
+              />
+              <input
+                type="password"
+                className="form-input"
+                placeholder="有道 应用密钥"
+                value={localSettings?.youdao_app_secret || ""}
+                onChange={(e) => handleSettingChange("youdao_app_secret", e.target.value)}
+              />
+            </div>
+          </div>
+        )}
+
+        {localSettings?.online_apis?.includes("niutrans") && (
+          <div className="form-group">
+            <label className="form-label">小牛翻译 API</label>
+            <div className="api-keys">
+              <input
+                type="password"
+                className="form-input"
+                placeholder="API Key"
+                value={localSettings?.providers?.niutrans_api_key || ""}
+                onChange={(e) => setProviderKey("niutrans_api_key", e.target.value)}
+              />
+            </div>
+          </div>
+        )}
+
+        {localSettings?.online_apis?.includes("deepl") && (
+          <div className="form-group">
+            <label className="form-label">DeepL API</label>
+            <div className="api-keys">
+              <input
+                type="password"
+                className="form-input"
+                placeholder="DeepL Auth Key（Free版以 ..fx 结尾）"
+                value={localSettings?.providers?.deepl_api_key || ""}
+                onChange={(e) => setProviderKey("deepl_api_key", e.target.value)}
+              />
+            </div>
+          </div>
+        )}
+
+        {localSettings?.online_apis?.includes("tencent") && (
+          <div className="form-group">
+            <label className="form-label">腾讯云翻译 API</label>
+            <div className="api-keys">
+              <input
+                type="text"
+                className="form-input"
+                placeholder="SecretId"
+                value={localSettings?.providers?.tencent_secret_id || ""}
+                onChange={(e) => setProviderKey("tencent_secret_id", e.target.value)}
+              />
+              <input
+                type="password"
+                className="form-input"
+                placeholder="SecretKey"
+                value={localSettings?.providers?.tencent_secret_key || ""}
+                onChange={(e) => setProviderKey("tencent_secret_key", e.target.value)}
+              />
+            </div>
+          </div>
+        )}
+
+        {localSettings?.online_apis?.includes("ali") && (
+          <div className="form-group">
+            <label className="form-label">阿里云翻译 API</label>
+            <div className="api-keys">
+              <input
+                type="text"
+                className="form-input"
+                placeholder="AccessKey ID"
+                value={localSettings?.providers?.ali_access_key_id || ""}
+                onChange={(e) => setProviderKey("ali_access_key_id", e.target.value)}
+              />
+              <input
+                type="password"
+                className="form-input"
+                placeholder="AccessKey Secret"
+                value={localSettings?.providers?.ali_access_key_secret || ""}
+                onChange={(e) => setProviderKey("ali_access_key_secret", e.target.value)}
+              />
+            </div>
+          </div>
+        )}
+
+        {localSettings?.online_apis?.includes("custom") && (
+          <div className="form-group">
+            <label className="form-label">自定义AI（OpenAI 兼容）· 支持多个供应商</label>
+
+            {customProviders.map((cp, idx) => (
+              <div className="custom-provider-row" key={cp.id || idx}>
+                <div className="custom-provider-fields">
+                  <input
+                    type="text"
+                    className="form-input"
+                    placeholder="供应商名称（如 DeepSeek）"
+                    value={cp.name || ""}
+                    onChange={(e) => updateProvider(idx, "name", e.target.value)}
+                  />
+                  <input
+                    type="text"
+                    className="form-input"
+                    placeholder="Base URL"
+                    value={cp.base_url || ""}
+                    onChange={(e) => updateProvider(idx, "base_url", e.target.value)}
+                  />
+                  <input
+                    type="password"
+                    className="form-input"
+                    placeholder="API Key"
+                    value={cp.api_key || ""}
+                    onChange={(e) => updateProvider(idx, "api_key", e.target.value)}
+                  />
+                  <input
+                    type="text"
+                    className="form-input"
+                    placeholder="模型名"
+                    value={cp.model || ""}
+                    onChange={(e) => updateProvider(idx, "model", e.target.value)}
+                  />
+                </div>
+                <button
+                  className="custom-provider-remove"
+                  onClick={() => removeProvider(idx)}
+                  title="删除此供应商"
+                >
+                  ✕
+                </button>
+              </div>
             ))}
-            {localSettings?.offline_engine !== "disabled" && (
-              <option value="离线翻译">离线翻译（本地模型）</option>
-            )}
-          </select>
-          <div className="form-hint">与截图翻译菜单双向绑定；离线翻译作为默认源时完全无需联网</div>
-        </div>
-      )}
 
-        <div className="form-group">
-          <label className="form-label with-link">
-            百度翻译 API
-            <button
-              className="provider-link"
-              onClick={() =>
-                invoke("open_external", { url: "https://fanyi-api.baidu.com/" })
+            {/* 常用 AI 预设：右侧空白处 2行×n列 */}
+            <div className="preset-area">
+              <div className="preset-grid">
+                {AI_PRESETS.map((ps) => (
+                  <button
+                    key={ps.name}
+                    className="preset-btn"
+                    onClick={() => addProvider(ps)}
+                    title={`点击添加 ${ps.name} 供应商（预填地址与模型，仅需填 Key）`}
+                  >
+                    + {ps.name}
+                  </button>
+                ))}
+              </div>
+              <button className="custom-provider-add" onClick={() => addProvider()}>
+                + 手动添加供应商
+              </button>
+            </div>
+          </div>
+        )}
+
+        {localSettings?.online_apis?.length === 0 && (
+          <div className="form-group">
+            <p className="form-hint">
+              未启用任何在线引擎——离线翻译仍可工作（见下方离线翻译引擎）
+            </p>
+          </div>
+        )}
+
+        {/* 当前翻译源 */}
+        {(enabledRealProviders.length > 0 ||
+          localSettings?.offline_engine !== "disabled") && (
+          <div className="form-group">
+            <label className="form-label">当前翻译源（默认引擎）</label>
+            <select
+              className="form-select"
+              value={
+                localSettings?.current_engine ||
+                enabledRealProviders[0]?.engine ||
+                "离线翻译"
               }
-              title="打开官网申请/查看密钥"
+              onChange={(e) => handleSettingChange("current_engine", e.target.value)}
             >
-              →
-            </button>
-          </label>
-          <div className="api-keys">
-            <input
-              type="text"
-              className="form-input"
-              placeholder="百度 APP ID"
-              value={localSettings?.baidu_app_id || ""}
-              onChange={(e) => handleSettingChange("baidu_app_id", e.target.value)}
-            />
-            <input
-              type="password"
-              className="form-input"
-              placeholder="百度 密钥"
-              value={localSettings?.baidu_secret || ""}
-              onChange={(e) => handleSettingChange("baidu_secret", e.target.value)}
-            />
+              {enabledRealProviders.map((p) => (
+                <option key={p.id} value={p.engine}>
+                  {p.label}
+                </option>
+              ))}
+              {localSettings?.offline_engine !== "disabled" && (
+                <option value="离线翻译">离线翻译（本地模型）</option>
+              )}
+            </select>
+            <div className="form-hint">
+              与截图翻译菜单双向绑定；离线翻译作为默认源时完全无需联网
+            </div>
           </div>
-        </div>
-
-        <div className="form-group">
-          <label className="form-label with-link">
-            有道智云 API
-            <button
-              className="provider-link"
-              onClick={() => invoke("open_external", { url: "https://ai.youdao.com/" })}
-              title="打开官网申请/查看密钥"
-            >
-              →
-            </button>
-          </label>
-          <div className="api-keys">
-            <input
-              type="text"
-              className="form-input"
-              placeholder="有道 应用ID"
-              value={localSettings?.youdao_app_key || ""}
-              onChange={(e) => handleSettingChange("youdao_app_key", e.target.value)}
-            />
-            <input
-              type="password"
-              className="form-input"
-              placeholder="有道 应用密钥"
-              value={localSettings?.youdao_app_secret || ""}
-              onChange={(e) => handleSettingChange("youdao_app_secret", e.target.value)}
-            />
-          </div>
-        </div>
-
-        <div className="form-group">
-          <label className="form-label with-link">
-            小牛翻译 API
-            <button
-              className="provider-link"
-              onClick={() => invoke("open_external", { url: "https://niutrans.com/" })}
-              title="打开官网申请/查看密钥"
-            >
-              →
-            </button>
-          </label>
-          <div className="api-keys">
-            <input
-              type="password"
-              className="form-input"
-              placeholder="API Key"
-              value={localSettings?.providers?.niutrans_api_key || ""}
-              onChange={(e) => setProviderKey("niutrans_api_key", e.target.value)}
-            />
-          </div>
-        </div>
-
-        <div className="form-group">
-          <label className="form-label with-link">
-            DeepL API
-            <button
-              className="provider-link"
-              onClick={() => invoke("open_external", { url: "https://www.deepl.com/zh/pro-api" })}
-              title="打开官网申请/查看密钥"
-            >
-              →
-            </button>
-          </label>
-          <div className="api-keys">
-            <input
-              type="password"
-              className="form-input"
-              placeholder="DeepL Auth Key（Free版以 ..fx 结尾）"
-              value={localSettings?.providers?.deepl_api_key || ""}
-              onChange={(e) => setProviderKey("deepl_api_key", e.target.value)}
-            />
-          </div>
-        </div>
-
-        <div className="form-group">
-          <label className="form-label with-link">
-            腾讯云翻译 API
-            <button
-              className="provider-link"
-              onClick={() => invoke("open_external", { url: "https://cloud.tencent.com/product/tmt" })}
-              title="打开官网申请/查看密钥"
-            >
-              →
-            </button>
-          </label>
-          <div className="api-keys">
-            <input
-              type="text"
-              className="form-input"
-              placeholder="SecretId"
-              value={localSettings?.providers?.tencent_secret_id || ""}
-              onChange={(e) => setProviderKey("tencent_secret_id", e.target.value)}
-            />
-            <input
-              type="password"
-              className="form-input"
-              placeholder="SecretKey"
-              value={localSettings?.providers?.tencent_secret_key || ""}
-              onChange={(e) => setProviderKey("tencent_secret_key", e.target.value)}
-            />
-          </div>
-        </div>
-
-        <div className="form-group">
-          <label className="form-label with-link">
-            阿里云翻译 API
-            <button
-              className="provider-link"
-              onClick={() => invoke("open_external", { url: "https://mt.aliyun.com/" })}
-              title="打开官网申请/查看密钥"
-            >
-              →
-            </button>
-          </label>
-          <div className="api-keys">
-            <input
-              type="text"
-              className="form-input"
-              placeholder="AccessKey ID"
-              value={localSettings?.providers?.ali_access_key_id || ""}
-              onChange={(e) => setProviderKey("ali_access_key_id", e.target.value)}
-            />
-            <input
-              type="password"
-              className="form-input"
-              placeholder="AccessKey Secret"
-              value={localSettings?.providers?.ali_access_key_secret || ""}
-              onChange={(e) => setProviderKey("ali_access_key_secret", e.target.value)}
-            />
-          </div>
-        </div>
-
-        <div className="form-group">
-          <label className="form-label with-link">自定义AI API（OpenAI 兼容）</label>
-          <div className="api-keys">
-            <input
-              type="text"
-              className="form-input"
-              placeholder="Base URL（如 https://api.deepseek.com/v1）"
-              value={localSettings?.providers?.custom_openai_base_url || ""}
-              onChange={(e) => setProviderKey("custom_openai_base_url", e.target.value)}
-            />
-            <input
-              type="password"
-              className="form-input"
-              placeholder="API Key"
-              value={localSettings?.providers?.custom_openai_api_key || ""}
-              onChange={(e) => setProviderKey("custom_openai_api_key", e.target.value)}
-            />
-            <input
-              type="text"
-              className="form-input"
-              placeholder="模型名（如 deepseek-chat）"
-              value={localSettings?.providers?.custom_openai_model || ""}
-              onChange={(e) => setProviderKey("custom_openai_model", e.target.value)}
-            />
-          </div>
-        </div>
-
-      <div className="form-group">
-        <label className="form-label">离线翻译引擎</label>
-        <select
-          className="form-select"
-          value={localSettings?.offline_engine === "disabled" ? "disabled" : "marian"}
-          onChange={(e) => handleSettingChange("offline_engine", e.target.value)}
-        >
-          <option value="marian">离线翻译 OPUS-MT（本地模型，免费无网络）</option>
-          <option value="disabled">禁用离线翻译</option>
-        </select>
-        <div className="form-hint">
-          排在在线引擎之后自动兜底：所有在线API失败时改用离线翻译，也可在截图菜单手动选中。
-          首次使用某语言对时自动下载模型（每个约30-80MB，存于程序目录 models/mt/），此后完全离线。
-          中↔英为专门模型直达；日/韩/俄/法/德/西/葡经英语中转。
-        </div>
+        )}
       </div>
-
-      <div className="form-group">
-        <label className="form-label">术语优先级调整</label>
-        <select
-          className="form-select"
-          value={localSettings?.term_base_priority || "auto+manual"}
-          onChange={(e) => handleSettingChange("term_base_priority", e.target.value)}
-        >
-          <option value="auto+manual">自动调整 + 手动微调</option>
-          <option value="auto">仅自动调整</option>
-          <option value="manual">仅手动调整</option>
-        </select>
-      </div>
-    </div>
     );
   };
 
+  const renderOcrSettings = () => (
+    <div className="settings-section">
+      <h3 className="section-title">OCR 引擎</h3>
+      {OCR_ENGINES.map((o) => (
+        <div className="toggle-group" key={o.id}>
+          <label className="toggle-switch">
+            <input
+              type="checkbox"
+              checked={localSettings?.ocr_engine === o.id}
+              onChange={() => handleSettingChange("ocr_engine", o.id)}
+            />
+            <span className="toggle-slider"></span>
+          </label>
+          <span className="toggle-label">
+            {o.label}
+            <span className="provider-badge">{o.desc}</span>
+          </span>
+        </div>
+      ))}
+      <p className="form-hint">
+        单选：同时只有一个 OCR 引擎生效，用于截图翻译的文字识别（识别出的部首/符号错误可由术语管理的“常用符号纠错包”纠正）
+      </p>
+    </div>
+  );
+
   const renderScreenshotSettings = () => {
-    const comps: string[] = localSettings?.screenshot_components || [
-      "engine",
-      "copy",
-      "close",
-      "settings",
-    ];
     return (
       <div className="settings-section">
-        <h3 className="section-title">截图翻译</h3>
+        <h3 className="section-title">
+          截图翻译
+          <button className="title-action-btn" onClick={async () => {
+            try {
+              await invoke("trigger_screenshot_cmd");
+            } catch (e) {
+              alert("打开截图窗口失败");
+            }
+          }}>
+            📷 启动截图翻译
+          </button>
+        </h3>
 
         <div className="form-group">
-          <label className="form-label">OCR 引擎</label>
-          {OCR_ENGINES.map((o) => {
-            const enabled = o.status.indexOf("未接入") < 0;
-            return (
-              <div className="toggle-group" key={o.id}>
-                <label className="toggle-switch">
-                  <input
-                    type="checkbox"
-                    checked={localSettings?.ocr_engine === o.id}
-                    disabled={!enabled}
-                    onChange={() => handleSettingChange("ocr_engine", o.id)}
-                  />
-                  <span className="toggle-slider"></span>
-                </label>
-                <span className="toggle-label">
-                  {o.label}
-                  <span className="provider-badge">{o.status}</span>
-                </span>
-              </div>
-            );
-          })}
-          <p className="form-hint">单选：同时只有一个 OCR 引擎生效，用于截图翻译的文字识别</p>
-        </div>
-
-        <div className="form-group">
-          <label className="form-label">菜单组组件（增删 / 排序）</label>
-          {GROUP_COMPONENTS.map((def) => {
-            const enabled = comps.includes(def.id);
-            return (
-              <div key={def.id} className="component-row">
-                <label className="toggle-switch">
-                  <input
-                    type="checkbox"
-                    checked={enabled}
-                    onChange={(e) => toggleComponent(def.id, e.target.checked)}
-                  />
-                  <span className="toggle-slider"></span>
-                </label>
-                <span className="toggle-label">{def.label}</span>
-                <button
-                  className="mini-btn"
-                  disabled={!enabled}
-                  onClick={() => moveComponent(def.id, -1)}
-                  title="上移"
-                >
-                  ↑
-                </button>
-                <button
-                  className="mini-btn"
-                  disabled={!enabled}
-                  onClick={() => moveComponent(def.id, 1)}
-                  title="下移"
-                >
-                  ↓
-                </button>
-              </div>
-            );
-          })}
-          <div className="component-tip">
-            组件从左到右显示在截图选区下方的菜单组中，拖动菜单组可临时移动位置
-          </div>
+          <label className="form-label">菜单组组件</label>
+          <ComponentChips
+            order={screenshotComponents}
+            onOrderChange={(next) => handleSettingChange("screenshot_components", next)}
+          />
         </div>
 
         <div className="form-group">
@@ -695,104 +914,115 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
     );
   };
 
-  const renderHotkeySettings = () => (
+  const renderOfflineModel = () => (
     <div className="settings-section">
-      <h3 className="section-title">快捷键设置</h3>
-      
-      <div className="form-group">
-        <label className="form-label">全局快捷键</label>
-        <input
-          type="text"
-          className="form-input"
-          value={localSettings?.hotkeys?.translate || "Ctrl+Alt+T"}
-          onChange={(e) =>
-            handleSettingChange("hotkeys", {
-              ...localSettings?.hotkeys,
-              translate: e.target.value,
-            })
-          }
-        />
-      </div>
-      
-      <div className="form-group">
-        <label className="form-label">截图翻译快捷键</label>
-        <input
-          type="text"
-          className="form-input"
-          value={localSettings?.hotkeys?.screenshot || "Ctrl+Alt+S"}
-          onChange={(e) =>
-            handleSettingChange("hotkeys", {
-              ...localSettings?.hotkeys,
-              screenshot: e.target.value,
-            })
-          }
-        />
-      </div>
+      <h3 className="section-title">离线翻译引擎</h3>
 
       <div className="form-group">
-        <label className="form-label">划词翻译快捷键</label>
-        <input
-          type="text"
-          className="form-input"
-          value={localSettings?.hotkeys?.select || "Ctrl+Alt+X"}
-          onChange={(e) =>
-            handleSettingChange("hotkeys", {
-              ...localSettings?.hotkeys,
-              select: e.target.value,
-            })
-          }
-        />
-      </div>
-    </div>
-  );
-
-  const renderSelectSettings = () => (
-    <div className="settings-section">
-      <h3 className="section-title">划词翻译</h3>
-
-      <div className="form-group">
-        <div className="toggle-group">
-          <label className="toggle-switch">
-            <input
-              type="checkbox"
-              checked={localSettings?.select_translate_enabled || false}
-              onChange={(e) =>
-                handleSettingChange(
-                  "select_translate_enabled",
-                  e.target.checked
-                )
-              }
-            />
-            <span className="toggle-slider"></span>
-          </label>
-          <span className="toggle-label">
-            启用划词翻译（全局快捷键触发）
-          </span>
+        <label className="form-label">离线模型</label>
+        <select
+          className="form-select"
+          value={localSettings?.offline_model || "opus-mt"}
+          onChange={(e) => handleSettingChange("offline_model", e.target.value)}
+        >
+          <option value="opus-mt">OPUS-MT（轻量快速 · 按语言对约30-80MB · 当前使用）</option>
+          <option value="nllb-200" disabled>
+            NLLB-200 蒸馏版（200种语言单模型质量更高 · 约600MB · 下一版本接入）
+          </option>
+          <option value="disabled">禁用离线翻译</option>
+        </select>
+        <div className="form-hint">
+          排在在线引擎之后自动兜底，也可在截图菜单手动选中。
+          首次使用某语言对时自动下载模型并存于程序目录 models/mt/，此后完全离线。
+          中↔英为专门模型直达；日/韩/俄/法/德/西/葡经英语中转。
         </div>
       </div>
 
       <div className="form-group">
-        <label className="form-label">划词翻译快捷键</label>
-        <input
-          type="text"
-          className="form-input"
-          value={localSettings?.hotkeys?.select || "Ctrl+Alt+X"}
-          onChange={(e) =>
-            handleSettingChange("hotkeys", {
-              ...localSettings?.hotkeys,
-              select: e.target.value,
-            })
+        <label className="form-label">模型下载</label>
+        <button
+          className="button secondary"
+          onClick={async () => {
+            try {
+              await invoke("download_offline_model");
+              alert("离线模型已就绪");
+            } catch (e) {
+              alert(`模型下载失败：${e}`);
+            }
+          }}
+        >
+          手动下载当前方向模型
+        </button>
+        <div className="form-hint">
+          按上方“默认翻译方向”预下载所需模型（进度提示会显示在截图翻译面板），下载后可离线使用
+        </div>
+      </div>
+
+      <div className="form-group">
+        <label className="form-label">术语优先级调整</label>
+        <select
+          className="form-select"
+          value={localSettings?.term_base_priority || "auto+manual"}
+          onChange={(e) => handleSettingChange("term_base_priority", e.target.value)}
+        >
+          <option value="auto+manual">自动调整 + 手动微调</option>
+          <option value="auto">仅自动调整</option>
+          <option value="manual">仅手动微调</option>
+        </select>
+        <div className="form-hint">
+          <b>自动调整</b>：某译法被使用每累计 50 次，自动将其优先级 +1（越用越准）；
+          <b>手动微调</b>：在术语管理中用 ▲▼ 手动设定优先级，手动设定优先于自动调整。
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderHotkeySettings = () => (
+    <div className="settings-section">
+      <h3 className="section-title">快捷键</h3>
+      <p className="form-hint">
+        点击输入框后直接按下新的组合键即可录入（录入期间全局快捷键暂停，避免被抢先触发）
+      </p>
+
+      <div className="form-group">
+        <label className="form-label">截图翻译</label>
+        <HotkeyInput
+          value={localSettings?.hotkeys?.screenshot || "Ctrl+Alt+S"}
+          onChange={(v) =>
+            handleSettingChange("hotkeys", { ...localSettings?.hotkeys, screenshot: v })
           }
         />
       </div>
 
       <div className="form-group">
-        <label className="form-label">使用说明</label>
-        <p className="form-hint">
-          在任意应用中选中文字，按上方快捷键（默认 Ctrl+Alt+X），翻译结果将显示在主窗口的翻译页。
-          原理为模拟复制并读取剪贴板（随后自动还原），少数禁用复制功能的应用不支持。
-          原文/译文语言可在截图翻译菜单或基本设置的"默认翻译方向"调整。
-        </p>
+        <label className="form-label">打开翻译页面</label>
+        <HotkeyInput
+          value={localSettings?.hotkeys?.translate || "Ctrl+Alt+T"}
+          onChange={(v) =>
+            handleSettingChange("hotkeys", { ...localSettings?.hotkeys, translate: v })
+          }
+        />
+      </div>
+
+      <div className="form-group">
+        <label className="form-label">划词翻译</label>
+        <HotkeyInput
+          value={localSettings?.hotkeys?.select || "Ctrl+Alt+X"}
+          onChange={(v) =>
+            handleSettingChange("hotkeys", { ...localSettings?.hotkeys, select: v })
+          }
+        />
+      </div>
+
+      <div className="form-group">
+        <label className="form-label">反转原/译语言</label>
+        <HotkeyInput
+          value={localSettings?.hotkeys?.reverse || "Ctrl+Alt+B"}
+          onChange={(v) =>
+            handleSettingChange("hotkeys", { ...localSettings?.hotkeys, reverse: v })
+          }
+        />
+        <div className="form-hint">仅在截图翻译界面内生效</div>
       </div>
     </div>
   );
@@ -801,10 +1031,26 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
     <div className="settings-section">
       <h3 className="section-title">关于</h3>
       <div className="about-info">
-        <p><strong>智能翻译软件</strong></p>
-        <p>版本: 0.1.0</p>
-        <p>技术栈: Tauri + React + Rust</p>
-        <p>功能: 离线翻译、在线翻译、截图翻译、划词翻译</p>
+        <p>
+          <strong>智能翻译软件</strong>
+        </p>
+        <p>版本: 0.2.0</p>
+        <p>技术栈: Tauri 2 + React + Rust（ONNX Runtime 本地推理）</p>
+        <p>
+          开源地址:{" "}
+          <button
+            className="provider-link"
+            onClick={() =>
+              invoke("open_external", {
+                url: "https://github.com/lugaoyu2005/smart-translator",
+              })
+            }
+            title="在浏览器打开 GitHub 仓库"
+          >
+            →
+          </button>
+          github.com/lugaoyu2005/smart-translator
+        </p>
         <p>支持平台: Windows 11, Android (计划中)</p>
       </div>
     </div>
@@ -815,21 +1061,22 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
       case "basic":
         return renderBasicSettings();
       case "translation":
-        return renderTranslationSettings();
+        return (
+          <>
+            {renderTranslationSettings()}
+            {renderOcrSettings()}
+            {renderOfflineModel()}
+          </>
+        );
       case "screenshot":
         return renderScreenshotSettings();
       case "hotkeys":
         return renderHotkeySettings();
-      case "select":
-        // 划词翻译：增删改即时生效，无需外层"保存设置"按钮
-        return renderSelectSettings();
       case "about":
         return renderAbout();
       case "terms":
-        // 术语管理：增删改即时生效，无需外层"保存设置"按钮
         return <TermsPanel />;
       case "history":
-        // 翻译历史：即时生效，无需外层"保存设置"按钮
         return <HistoryPanel />;
       default:
         return (
@@ -844,13 +1091,19 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
   return (
     <div className="settings-panel">
       {renderContent()}
-      
+
       {activeMenu !== "about" && activeMenu !== "terms" && activeMenu !== "history" && (
         <div className="settings-actions">
           <button className="button primary" onClick={handleSave}>
             保存设置
           </button>
-          <button className="button secondary" onClick={() => setLocalSettings(settings)}>
+          <button
+            className="button secondary"
+            onClick={() => {
+              setLocalSettings(settings);
+              setCustomProviders(settings?.custom_providers || []);
+            }}
+          >
             恢复默认
           </button>
         </div>

@@ -220,7 +220,7 @@ async fn download_file(repo: &str, file: &str, dest: &PathBuf) -> Result<(), Str
 }
 
 /// 确保某语言对模型就绪（已存在则跳过；不存在则逐文件下载）
-async fn ensure_pair_models(from: &str, to: &str) -> Result<PathBuf, String> {
+pub async fn ensure_pair_models(from: &str, to: &str) -> Result<PathBuf, String> {
     let repo = pair_repo(from, to).ok_or_else(|| {
         format!(
             "离线翻译暂不支持 {}→{}（无对应本地模型）",

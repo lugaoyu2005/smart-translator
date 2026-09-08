@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import "./TermsPanel.css";
 
@@ -9,25 +9,64 @@ interface TermEntry {
   usage_count: number;
 }
 
+interface TermPackage {
+  id: string;
+  name: string;
+  mappings: [string, string][];
+  builtin: boolean;
+}
+
+interface TermScheme {
+  id: string;
+  name: string;
+  enabled_packages: string[];
+  enabled_entry_keys: string[];
+}
+
 const TermsPanel: React.FC = () => {
   const [terms, setTerms] = useState<TermEntry[]>([]);
+  const [packages, setPackages] = useState<TermPackage[]>([]);
+  const [schemes, setSchemes] = useState<TermScheme[]>([]);
+  const [activeScheme, setActiveScheme] = useState<string>("");
   const [search, setSearch] = useState("");
   const [newSource, setNewSource] = useState("");
   const [newTranslation, setNewTranslation] = useState("");
   const [message, setMessage] = useState("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const refresh = useCallback(async () => {
+  const refresh = async () => {
     try {
-      const list = await invoke<TermEntry[]>("list_terms");
-      setTerms(list);
+      const [t, p, s, a] = await Promise.all([
+        invoke<TermEntry[]>("list_terms"),
+        invoke<TermPackage[]>("list_packages"),
+        invoke<TermScheme[]>("list_schemes"),
+        invoke<string>("get_active_scheme"),
+      ]);
+      setTerms(t);
+      setPackages(p);
+      setSchemes(s);
+      setActiveScheme(a);
     } catch (e) {
-      setMessage(`加载术语失败: ${e}`);
+      console.error("加载术语数据失败:", e);
     }
-  }, []);
+  };
 
   useEffect(() => {
     refresh();
-  }, [refresh]);
+  }, []);
+
+  const active = schemes.find((s) => s.id === activeScheme);
+
+  // 当前方案可见的术语（方案未指定独占术语 = 全部共享）
+  const visibleTerms = terms.filter((t) => {
+    if (!active) return true;
+    if (active.enabled_entry_keys.length === 0) return true;
+    return active.enabled_entry_keys.includes(t.source);
+  });
+
+  const filtered = visibleTerms.filter((t) =>
+    t.source.toLowerCase().includes(search.toLowerCase())
+  );
 
   const handleAdd = async () => {
     if (!newSource.trim() || !newTranslation.trim()) {
@@ -38,78 +77,228 @@ const TermsPanel: React.FC = () => {
       await invoke("add_term", {
         source: newSource.trim(),
         translation: newTranslation.trim(),
+        schemeId: activeScheme || null,
       });
       setNewSource("");
       setNewTranslation("");
       setMessage("");
-      await refresh();
+      refresh();
     } catch (e) {
-      setMessage(`添加失败: ${e}`);
+      setMessage(String(e));
     }
   };
 
-  // 调整某译法优先级（数字越大越优先，0为下限）
-  const handlePriority = async (term: TermEntry, translation: string, delta: number) => {
-    const idx = term.translations.indexOf(translation);
+  const handlePriority = async (
+    source: string,
+    translation: string,
+    delta: number
+  ) => {
+    const entry = terms.find((t) => t.source === source);
+    if (!entry) return;
+    const idx = entry.translations.indexOf(translation);
     if (idx < 0) return;
-    const current = term.priority[idx] ?? 0;
-    const next = Math.max(0, current + delta);
-    if (next === current) return;
+    const current = entry.priority[idx] ?? 0;
     try {
       await invoke("set_term_priority", {
-        source: term.source,
+        source,
         translation,
-        priority: next,
+        priority: Math.max(0, current + delta),
       });
-      await refresh();
+      refresh();
     } catch (e) {
-      setMessage(`调整优先级失败: ${e}`);
+      setMessage(String(e));
     }
   };
 
-  const handleDeleteTranslation = async (term: TermEntry, translation: string) => {
+  const handleDeleteTranslation = async (source: string, translation: string) => {
+    await invoke("delete_term_translation", { source, translation }).catch(() => {});
+    refresh();
+  };
+
+  const handleDeleteTerm = async (source: string) => {
+    await invoke("delete_term", { source }).catch(() => {});
+    refresh();
+  };
+
+  // ===== 方案操作 =====
+  const activate = async (id: string) => {
+    await invoke("activate_scheme", { id }).catch(() => {});
+    refresh();
+  };
+  const addScheme = async () => {
+    const name = prompt("新方案名称：", `方案${schemes.length + 1}`);
+    if (!name) return;
+    await invoke("add_scheme", { name }).catch(() => {});
+    refresh();
+  };
+  const renameScheme = async (id: string, current: string) => {
+    const name = prompt("重命名方案：", current);
+    if (!name) return;
+    await invoke("rename_scheme", { id, name }).catch(() => {});
+    refresh();
+  };
+  const deleteScheme = async (id: string) => {
+    if (!confirm("确定删除该方案？")) return;
+    await invoke("delete_scheme", { id }).catch(() => {});
+    refresh();
+  };
+
+  // ===== 术语包操作 =====
+  const togglePackage = async (pkgId: string, on: boolean) => {
+    if (!active) return;
+    const next = on
+      ? [...new Set([...active.enabled_packages, pkgId])]
+      : active.enabled_packages.filter((p) => p !== pkgId);
+    setSchemes((prev) =>
+      prev.map((s) => (s.id === active.id ? { ...s, enabled_packages: next } : s))
+    );
+    await invoke("set_scheme_packages", { id: active.id, packageIds: next }).catch(
+      () => {}
+    );
+    refresh();
+  };
+  const deletePackage = async (id: string) => {
+    if (!confirm("确定删除该术语包？")) return;
+    await invoke("delete_package", { id }).catch(() => {});
+    refresh();
+  };
+  const newPackage = async () => {
+    const name = prompt("新术语包名称：", "我的术语包");
+    if (!name) return;
+    await invoke("save_package", { id: null, name, mappings: [["示例", "示例译文"]] })
+      .catch(() => {});
+    refresh();
+  };
+
+  // ===== 导入术语包文件（CSV/TSV/TXT 两列）=====
+  const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const content = await file.text();
     try {
-      await invoke("delete_term_translation", { source: term.source, translation });
-      await refresh();
-    } catch (e) {
-      setMessage(`删除译法失败: ${e}`);
+      const res = await invoke<string>("import_package_text", {
+        name: file.name.replace(/\.[^.]+$/, ""),
+        content,
+      });
+      const count = res.split(":")[1] || "?";
+      setMessage(`导入成功：${count} 条映射已存为新术语包`);
+      refresh();
+    } catch (err) {
+      setMessage(String(err));
     }
+    if (fileInputRef.current) fileInputRef.current.value = "";
   };
-
-  const handleDeleteTerm = async (term: TermEntry) => {
-    try {
-      await invoke("delete_term", { source: term.source });
-      await refresh();
-    } catch (e) {
-      setMessage(`删除术语失败: ${e}`);
-    }
-  };
-
-  const keyword = search.trim().toLowerCase();
-  const filtered = terms.filter(
-    (t) =>
-      t.source.toLowerCase().includes(keyword) ||
-      t.translations.some((tr) => tr.toLowerCase().includes(keyword))
-  );
 
   return (
-    <div className="settings-section">
+    <div className="settings-section terms-panel">
       <h3 className="section-title">术语管理</h3>
-      <p className="terms-desc">
-        翻译时自动将命中的源词替换为优先级最高的译法；译法每被使用50次自动提升优先级。
-        源词已存在时，添加即为该词追加译法。
+
+      {/* 使用方案 tabs */}
+      <div className="scheme-tabs">
+        {schemes.map((s) => (
+          <div
+            key={s.id}
+            className={`scheme-tab ${s.id === activeScheme ? "active" : ""}`}
+            onClick={() => activate(s.id)}
+            title="点击切换使用方案"
+          >
+            <span className="scheme-name">{s.name}</span>
+            <button
+              className="scheme-mini-btn"
+              title="重命名"
+              onClick={(e) => {
+                e.stopPropagation();
+                renameScheme(s.id, s.name);
+              }}
+            >
+              ✎
+            </button>
+            {schemes.length > 1 && (
+              <button
+                className="scheme-mini-btn"
+                title="删除"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  deleteScheme(s.id);
+                }}
+              >
+                ✕
+              </button>
+            )}
+          </div>
+        ))}
+        <button className="scheme-add" onClick={addScheme} title="新增方案">
+          +
+        </button>
+      </div>
+      <p className="form-hint">
+        不同方案可启用不同的术语包；翻译时仅使用当前激活方案的内容
       </p>
 
+      {/* 术语包 */}
+      <div className="form-group">
+        <label className="form-label">
+          术语包（当前方案启用项）
+          <button className="provider-link" onClick={newPackage} title="新建术语包">
+            +
+          </button>
+          <button
+            className="provider-link"
+            onClick={() => fileInputRef.current?.click()}
+            title="导入术语包文件（CSV/TSV/TXT，两列：原文[逗号/Tab/→]译文）"
+          >
+            导入
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".csv,.tsv,.txt"
+            style={{ display: "none" }}
+            onChange={handleImportFile}
+          />
+        </label>
+        {packages.map((p) => {
+          const enabled = active?.enabled_packages.includes(p.id) ?? false;
+          return (
+            <div className="package-row" key={p.id}>
+              <label className="toggle-switch">
+                <input
+                  type="checkbox"
+                  checked={enabled}
+                  onChange={(e) => togglePackage(p.id, e.target.checked)}
+                />
+                <span className="toggle-slider"></span>
+              </label>
+              <span className="package-name">
+                {p.name}
+                {p.builtin && <span className="provider-badge">内置 · 部首偏旁提前干预</span>}
+                <span className="package-count">{p.mappings.length} 条</span>
+              </span>
+              {!p.builtin && (
+                <button
+                  className="package-delete"
+                  onClick={() => deletePackage(p.id)}
+                  title="删除术语包"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* 术语增删 */}
       <div className="term-add-form">
         <input
-          className="form-input"
-          placeholder="源词（如 server）"
+          type="text"
+          placeholder="源词（原文）"
           value={newSource}
           onChange={(e) => setNewSource(e.target.value)}
         />
         <input
-          className="form-input"
-          placeholder="译法（如 服务器）"
+          type="text"
+          placeholder="译法"
           value={newTranslation}
           onChange={(e) => setNewTranslation(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && handleAdd()}
@@ -120,60 +309,56 @@ const TermsPanel: React.FC = () => {
       </div>
 
       <input
-        className="form-input term-search"
-        placeholder="搜索术语…"
+        type="text"
+        className="term-search"
+        placeholder="搜索源词..."
         value={search}
         onChange={(e) => setSearch(e.target.value)}
       />
 
-      {message && <p className="term-message">{message}</p>}
+      {message && <div className="term-message">{message}</div>}
 
       <div className="term-list">
-        {filtered.length === 0 ? (
-          <p className="term-empty">
-            {terms.length === 0 ? "暂无术语，添加后翻译时自动生效" : "无匹配术语"}
-          </p>
-        ) : (
-          filtered.map((t) => (
-            <div className="term-card" key={t.source}>
-              <div className="term-head">
-                <span className="term-source">{t.source}</span>
-                <span className="term-usage">使用 {t.usage_count} 次</span>
-                <button className="button danger small" onClick={() => handleDeleteTerm(t)}>
-                  删除
+        {filtered.map((entry) => (
+          <div className="term-card" key={entry.source}>
+            <div className="term-header">
+              <span className="term-source">{entry.source}</span>
+              <span className="term-usage">已使用 {entry.usage_count} 次</span>
+              <button
+                className="term-delete"
+                onClick={() => handleDeleteTerm(entry.source)}
+              >
+                删除
+              </button>
+            </div>
+            {entry.translations.map((translation, idx) => (
+              <div className="term-translation-row" key={translation}>
+                <span className="term-translation">{translation}</span>
+                <span className="term-priority">优先级 {entry.priority[idx] ?? 0}</span>
+                <button
+                  className="term-btn"
+                  onClick={() => handlePriority(entry.source, translation, 1)}
+                >
+                  ▲
+                </button>
+                <button
+                  className="term-btn"
+                  onClick={() => handlePriority(entry.source, translation, -1)}
+                >
+                  ▼
+                </button>
+                <button
+                  className="term-btn term-delete-btn"
+                  onClick={() => handleDeleteTranslation(entry.source, translation)}
+                >
+                  ✕
                 </button>
               </div>
-              <div className="term-translations">
-                {t.translations.map((tr, i) => (
-                  <div className="term-row" key={tr}>
-                    <span className="term-translation">{tr}</span>
-                    <span className="term-priority">优先级 {t.priority[i] ?? 0}</span>
-                    <button
-                      className="icon-btn"
-                      title="提高优先级"
-                      onClick={() => handlePriority(t, tr, 1)}
-                    >
-                      ▲
-                    </button>
-                    <button
-                      className="icon-btn"
-                      title="降低优先级"
-                      onClick={() => handlePriority(t, tr, -1)}
-                    >
-                      ▼
-                    </button>
-                    <button
-                      className="icon-btn danger"
-                      title="删除译法"
-                      onClick={() => handleDeleteTranslation(t, tr)}
-                    >
-                      ✕
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ))
+            ))}
+          </div>
+        ))}
+        {filtered.length === 0 && (
+          <div className="term-empty">暂无术语（添加后将仅归属当前激活方案）</div>
         )}
       </div>
     </div>

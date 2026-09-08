@@ -11,11 +11,11 @@ function App() {
   const [activeMenu, setActiveMenu] = useState("basic");
   const [settings, setSettings] = useState<any>(null);
   // 保存设置成功提示（GUI弹窗：仅标题，点击遮罩关闭，2秒后自动消失）
-  const [savedTip, setSavedTip] = useState(false);
+  const [savedTip, setSavedTip] = useState<{ ok: boolean; msg: string } | null>(null);
 
   useEffect(() => {
     if (!savedTip) return;
-    const t = setTimeout(() => setSavedTip(false), 2000);
+    const t = setTimeout(() => setSavedTip(null), 2000);
     return () => clearTimeout(t);
   }, [savedTip]);
   // 划词捕获的待翻译文本（seq 递增保证重复文本也能触发）
@@ -83,45 +83,28 @@ function App() {
     try {
       await invoke("save_app_settings", { settings: newSettings });
       setSettings(newSettings);
-      setSavedTip(true); // GUI 提示弹窗（点击遮罩关闭）
+      setSavedTip({ ok: true, msg: "设置已保存" });
     } catch (error) {
       console.error("Failed to save settings:", error);
-      alert(`设置已保存文件，但应用失败：\n${error}`);
-    }
-  };
-
-  // 启动截图翻译：与快捷键/托盘同一后端路径（激活窗口+取消穿透+发触发事件+注册ESC兜底）
-  const handleStartScreenshot = async () => {
-    try {
-      await invoke("trigger_screenshot_cmd");
-    } catch (e) {
-      console.error("打开截图窗口失败:", e);
-      alert("打开截图窗口失败");
+      setSavedTip({ ok: false, msg: `保存失败：${error}` }); // 与成功同款 GUI 弹窗
     }
   };
 
   // 菜单：翻译测试作为单独入口
   const menuItems = [
-    { id: "basic", label: "基本设置", icon: "⚙️" },
+    { id: "basic", label: "基础设置", icon: "⚙️" },
     { id: "translation", label: "翻译引擎", icon: "🌐" },
     { id: "translate", label: "翻译测试", icon: "🔤" },
     { id: "screenshot", label: "截图翻译", icon: "📷" },
-    { id: "select", label: "划词翻译", icon: "🖱️" },
     { id: "terms", label: "术语管理", icon: "📚" },
     { id: "history", label: "翻译历史", icon: "🕘" },
     { id: "hotkeys", label: "快捷键", icon: "⌨️" },
-    { id: "advanced", label: "高级设置", icon: "🔧" },
     { id: "about", label: "关于", icon: "ℹ️" },
   ];
 
   return (
     <div className="app-container">
-      <Sidebar
-        menuItems={menuItems}
-        activeMenu={activeMenu}
-        onMenuChange={setActiveMenu}
-        onStartScreenshot={handleStartScreenshot}
-      />
+      <Sidebar menuItems={menuItems} activeMenu={activeMenu} onMenuChange={setActiveMenu} />
 
       <main className="main-content">
         {activeMenu === "translate" ? (
@@ -140,9 +123,11 @@ function App() {
 
       {/* 保存成功提示：仅标题居中，点击遮罩任意处关闭 */}
       {savedTip && (
-        <div className="saved-mask" onClick={() => setSavedTip(false)}>
+        <div className="saved-mask" onClick={() => setSavedTip(null)}>
           <div className="saved-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="saved-title">设置已保存</div>
+            <div className={`saved-title ${savedTip.ok ? "" : "failed"}`}>
+              {savedTip.msg}
+            </div>
           </div>
         </div>
       )}

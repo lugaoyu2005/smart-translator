@@ -44,6 +44,8 @@ const TranslatePanel: React.FC<TranslatePanelProps> = ({ pendingText, onConsumed
   const [fromLang, setFromLang] = useState("auto");
   const [toLang, setToLang] = useState("zh");
   const [engines, setEngines] = useState<EngineInfo[]>([]);
+  // 手动指定引擎（翻译测试用）：null=默认优先级
+  const [selectedEngine, setSelectedEngine] = useState<string | null>(null);
   const [network, setNetwork] = useState<NetworkStatus | null>(null);
 
   useEffect(() => {
@@ -103,6 +105,7 @@ const TranslatePanel: React.FC<TranslatePanelProps> = ({ pendingText, onConsumed
         text: source,
         from: fromLang,
         to: toLang,
+        engine: selectedEngine,
       });
       setResult(res.translated_text);
       setEngineUsed(res.engine_used);
@@ -114,11 +117,17 @@ const TranslatePanel: React.FC<TranslatePanelProps> = ({ pendingText, onConsumed
   };
 
   const handleSwap = () => {
-    if (fromLang === "auto") return;
+    if (fromLang === "auto") return; // auto 无法交换（目标语言不允许自动检测）
     const tmp = fromLang;
     setFromLang(toLang);
     setToLang(tmp);
   };
+
+  // 交换语言后已有文本时自动重新翻译
+  useEffect(() => {
+    if (text.trim()) handleTranslate();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fromLang, toLang]);
 
   const handleTextExample = () => {
     // 测试文本预处理：MiniMap 和 Mini_Map
@@ -142,14 +151,26 @@ const TranslatePanel: React.FC<TranslatePanelProps> = ({ pendingText, onConsumed
             {engines.map((e) => (
               <span
                 key={e.name}
-                className={`engine-badge ${e.configured ? "ready" : "unconfigured"}`}
-                title={e.configured ? "已配置" : "未配置API密钥"}
+                className={`engine-badge ready ${
+                  selectedEngine === e.name ? "selected" : ""
+                }`}
+                title={`点击${selectedEngine === e.name ? "取消指定" : "指定用此引擎"}测试`}
+                onClick={() =>
+                  setSelectedEngine((prev) => (prev === e.name ? null : e.name))
+                }
+                style={{ cursor: "pointer" }}
               >
                 {e.name}
+                {selectedEngine === e.name && " ✓"}
               </span>
             ))}
             {engines.length === 0 && (
               <span className="engine-badge unconfigured">无可用引擎</span>
+            )}
+            {engines.length > 0 && (
+              <span className="engine-badge default-hint">
+                {selectedEngine ? "指定引擎测试中" : "默认：按优先级自动选择"}
+              </span>
             )}
           </span>
         </div>
@@ -163,7 +184,17 @@ const TranslatePanel: React.FC<TranslatePanelProps> = ({ pendingText, onConsumed
             </option>
           ))}
         </select>
-        <button className="swap-btn" onClick={handleSwap} title="交换语言">
+        <button
+          className="swap-btn"
+          onClick={handleSwap}
+          disabled={fromLang === "auto"}
+          title={
+            fromLang === "auto"
+              ? "原文为自动检测时无法交换，请先手动选择源语言"
+              : "交换语言（自动重新翻译）"
+          }
+          style={fromLang === "auto" ? { opacity: 0.4, cursor: "not-allowed" } : undefined}
+        >
           ⇄
         </button>
         <select value={toLang} onChange={(e) => setToLang(e.target.value)}>

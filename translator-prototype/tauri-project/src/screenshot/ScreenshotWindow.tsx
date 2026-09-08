@@ -52,7 +52,7 @@ const DEFAULT_SETTINGS: ShotSettings = {
 };
 
 type Phase = "idle" | "select" | "processing" | "result";
-type CopyMode = "original" | "translated";
+
 
 // 菜单语言对：国际通用语 + 亚洲高频语（百度/有道共同支持）
 const LANGUAGES = [
@@ -227,7 +227,7 @@ const ScreenshotWindow: React.FC = () => {
   const [engineIdx, setEngineIdx] = useState(0);
   const [engineMenuOpen, setEngineMenuOpen] = useState(false);
   const [settings, setSettings] = useState<ShotSettings>(DEFAULT_SETTINGS);
-  const [copyMode, setCopyMode] = useState<CopyMode>("original");
+
   // Ctrl+拖动 / Ctrl+双击累积的文字片段（多段，复制时按操作顺序合并）；
   // whole=双击整段拾取（可再次Ctrl+双击取消）；range=拾取时的选区快照，
   // 供 Custom Highlight API 多范围同时高亮（观感与原生选区一致）
@@ -290,6 +290,7 @@ const ScreenshotWindow: React.FC = () => {
         const dir = String(s?.default_translation_direction || "auto->zh").split("->");
         setSrcLang(dir[0] || "auto");
         setDstLang(dir[1] || "zh");
+        reverseKeyRef.current = String(s?.hotkeys?.reverse || "Ctrl+Alt+B");
         // 双向绑定：初始选中引擎来自设置的"当前翻译源"
         const configured = (es as EngineInfo[]).filter((e) => e.configured);
         setEngines(configured);
@@ -403,7 +404,6 @@ const ScreenshotWindow: React.FC = () => {
     setNoText(false);
     setError("");
     setMtStatus("");
-    setCopyMode("original");
     setPicked([]);
     setGroupDragging(false);
     setEngineMenuOpen(false);
@@ -850,9 +850,10 @@ const ScreenshotWindow: React.FC = () => {
     return r;
   };
 
-  // 应用内快捷键：Ctrl+Alt+B 反转原文/译文（ref 持有最新值，避免闭包过期）
+  // 应用内快捷键：反转原文/译文（组合键读设置 hotkeys.reverse，ref 持有最新值避免闭包过期）
   const langPairRef = useRef({ src: "auto", dst: "zh" });
   const applyLangRef = useRef<(s: string, d: string) => void>(() => {});
+  const reverseKeyRef = useRef("Ctrl+Alt+B");
   useEffect(() => {
     langPairRef.current = { src: srcLang, dst: dstLang };
   }, [srcLang, dstLang]);
@@ -861,7 +862,14 @@ const ScreenshotWindow: React.FC = () => {
   });
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
-      if (e.ctrlKey && e.altKey && (e.key === "b" || e.key === "B")) {
+      const parts = reverseKeyRef.current.split("+").map((x) => x.trim().toLowerCase());
+      const key = parts[parts.length - 1];
+      if (
+        (parts.includes("ctrl") && e.ctrlKey || !parts.includes("ctrl")) &&
+        (parts.includes("alt") && e.altKey || !parts.includes("alt")) &&
+        (parts.includes("shift") && e.shiftKey || !parts.includes("shift")) &&
+        e.key.toLowerCase() === key
+      ) {
         e.preventDefault();
         applyLangRef.current(langPairRef.current.dst, langPairRef.current.src);
       }
@@ -875,15 +883,20 @@ const ScreenshotWindow: React.FC = () => {
    *     ——优先于原生选区：Ctrl操作后原生选区只是最后一次的残留，不代表用户要复制的内容
    *  2) 当前原生选区文字（普通拖动 / 普通双击，覆盖式单选——产生时已清空累积）
    *  3) 全部段落（按当前原/译模式） */
-  const handleCopy = async () => {
-    let text =
-      picked.length > 0
-        ? picked.map((p) => p.text).join("\n")
-        : window.getSelection()?.toString().trim() ?? "";
-    if (!text) {
-      text = blocks
-        .map((b) => (copyMode === "original" ? b.original : b.translation))
-        .join("\n");
+  /** 复制到剪贴板并退出。mode=src 复制原文 / dst 复制译文。
+   *  原文优先级：1) Ctrl累积片段 2) 原生选区文字 3) 全部段落原文 */
+  const handleCopy = async (mode: "src" | "dst") => {
+    let text: string;
+    if (mode === "dst") {
+      text = blocks.map((b) => b.translation).join("\n");
+    } else {
+      text =
+        picked.length > 0
+          ? picked.map((p) => p.text).join("\n")
+          : window.getSelection()?.toString().trim() ?? "";
+      if (!text) {
+        text = blocks.map((b) => b.original).join("\n");
+      }
     }
     try {
       try {
@@ -1232,34 +1245,21 @@ const ScreenshotWindow: React.FC = () => {
               )}
             </div>
               );
-            if (comp === "copy")
+            if (comp === "copy_src" || comp === "copy_dst")
               return (
-            <React.Fragment key={comp}>
-              <button
-                className="group-item"
-                onMouseDown={(e) => {
-                  // 阻止点击按钮时浏览器清除原生文字选区
-                  e.stopPropagation();
-                  e.preventDefault();
-                }}
-                onClick={handleCopy}
-                title={`复制（拖选文字/选中段落/全部，当前${copyMode === "original" ? "原文" : "译文"}）`}
-              >
-                ⧉
-              </button>
-              <button
-                className="group-item toggle"
-                onMouseDown={(e) => e.stopPropagation()}
-                onClick={() =>
-                  setCopyMode((m) =>
-                    m === "original" ? "translated" : "original"
-                  )
-                }
-                title="切换复制内容：原文/译文"
-              >
-                {copyMode === "original" ? "原" : "译"}
-              </button>
-          </React.Fragment>
+            <button
+              key={comp}
+              className="group-item"
+              onMouseDown={(e) => {
+                // 阻止点击按钮时浏览器清除原生文字选区
+                e.stopPropagation();
+                e.preventDefault();
+              }}
+              onClick={() => handleCopy(comp === "copy_src" ? "src" : "dst")}
+              title={comp === "copy_src" ? "复制原文（拖选文字优先）" : "复制全部译文"}
+            >
+              {comp === "copy_src" ? "原文" : "译文"}
+            </button>
               );
             if (comp === "close")
               return (
