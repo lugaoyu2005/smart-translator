@@ -119,14 +119,14 @@ const HistoryPanel: React.FC = () => {
                   onClick={() => handleCopy(h.source)}
                   title="复制原文"
                 >
-                  复制原文
+                  原文
                 </button>
                 <button
                   className="mini-btn"
                   onClick={() => handleCopy(h.translation)}
                   title="复制译文"
                 >
-                  复制译文
+                  译文
                 </button>
                 <button
                   className="mini-btn"
