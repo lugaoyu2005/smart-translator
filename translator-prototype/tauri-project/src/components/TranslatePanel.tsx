@@ -161,7 +161,6 @@ const TranslatePanel: React.FC<TranslatePanelProps> = ({ pendingText, onConsumed
                 style={{ cursor: "pointer" }}
               >
                 {e.name}
-                {selectedEngine === e.name && " ✓"}
               </span>
             ))}
             {engines.length === 0 && (

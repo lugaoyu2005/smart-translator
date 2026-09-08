@@ -41,13 +41,15 @@ interface EngineInfo {
 }
 
 interface ShotSettings {
-  screenshot_components: string[];
+  screenshot_components: string[]; // 全序
+  screenshot_components_disabled: string[]; // 禁用集合
   overlay_mode: string; // dark=黑底白字 light=白底黑字 none=无背景
   overlay_expand: boolean; // 严格对齐模式
 }
 
 const DEFAULT_SETTINGS: ShotSettings = {
   screenshot_components: ["engine", "lang", "copy", "close", "settings"],
+  screenshot_components_disabled: [],
   overlay_mode: "dark",
   overlay_expand: false,
 };
@@ -296,6 +298,8 @@ const ScreenshotWindow: React.FC = () => {
         setSettings({
           screenshot_components:
             s?.screenshot_components ?? DEFAULT_SETTINGS.screenshot_components,
+          screenshot_components_disabled:
+            s?.screenshot_components_disabled ?? [],
           overlay_mode: s?.overlay_mode || DEFAULT_SETTINGS.overlay_mode,
           overlay_expand: !!s?.overlay_expand,
         });
@@ -323,6 +327,8 @@ const ScreenshotWindow: React.FC = () => {
         setSettings({
           screenshot_components:
             s?.screenshot_components ?? DEFAULT_SETTINGS.screenshot_components,
+          screenshot_components_disabled:
+            s?.screenshot_components_disabled ?? [],
           overlay_mode: s?.overlay_mode || DEFAULT_SETTINGS.overlay_mode,
           overlay_expand: !!s?.overlay_expand,
         });
@@ -1167,7 +1173,12 @@ const ScreenshotWindow: React.FC = () => {
           style={{ left: groupPos.x, top: groupPos.y }}
           onMouseDown={handleGroupMouseDown}
         >
-          {settings.screenshot_components.map((comp) => {
+          {settings.screenshot_components
+            .filter(
+              (comp) =>
+                !settings.screenshot_components_disabled.includes(comp)
+            )
+            .map((comp) => {
             if (comp === "lang")
               return (
             <div key={comp} className="lang-pair" onMouseDown={(e) => e.stopPropagation()}>

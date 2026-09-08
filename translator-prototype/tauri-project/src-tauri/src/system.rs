@@ -29,9 +29,12 @@ pub struct AppSettings {
     pub baidu_secret: String,
     pub youdao_app_key: String,
     pub youdao_app_secret: String,
-    // 截图翻译：菜单组组件（顺序即显示顺序，工具箱式可增删）
+    // 截图翻译：菜单组组件（**全序**——包含全部组件，顺序即显示顺序）
     #[serde(default = "default_screenshot_components")]
     pub screenshot_components: Vec<String>,
+    // 上述组件中被禁用的集合（不在其中的 = 启用）
+    #[serde(default = "default_screenshot_components_disabled")]
+    pub screenshot_components_disabled: Vec<String>,
     // 划词翻译：选中文本后按全局热键捕获并翻译
     #[serde(default = "default_select_translate_enabled")]
     pub select_translate_enabled: bool,
@@ -120,11 +123,14 @@ fn default_screenshot_components() -> Vec<String> {
     vec![
         "engine".to_string(),
         "lang".to_string(),
-        "copy_src".to_string(),
-        "copy_dst".to_string(),
+        "copy".to_string(),
         "close".to_string(),
         "settings".to_string(),
     ]
+}
+
+fn default_screenshot_components_disabled() -> Vec<String> {
+    vec![]
 }
 
 /// 框架阶段供应商凭据存储（翻译实现后续逐家补齐）
@@ -183,6 +189,7 @@ impl Default for AppSettings {
             youdao_app_key: String::new(),
             youdao_app_secret: String::new(),
             screenshot_components: default_screenshot_components(),
+            screenshot_components_disabled: default_screenshot_components_disabled(),
             overlay_mode: None,
             overlay_transparent_legacy: false,
             overlay_expand: false,
@@ -220,6 +227,41 @@ fn migrate(settings: &mut AppSettings) {
     if settings.offline_engine == "argos" {
         settings.offline_engine = "marian".to_string();
     }
+    // 菜单组组件：旧语义（数组=启用集）迁移为“全序+禁用集合”
+    {
+        let all = ["engine", "lang", "copy", "close", "settings"];
+        // 兼容更早版本的拆分命名
+        if settings
+            .screenshot_components
+            .iter()
+            .any(|c| c == "copy_src" || c == "copy_dst")
+        {
+            let pos = settings
+                .screenshot_components
+                .iter()
+                .position(|c| c == "copy_src" || c == "copy_dst")
+                .unwrap();
+            settings
+                .screenshot_components
+                .retain(|c| c != "copy_src" && c != "copy_dst");
+            settings
+                .screenshot_components
+                .insert(pos.min(settings.screenshot_components.len()), "copy".to_string());
+        }
+        for g in all {
+            if !settings.screenshot_components.iter().any(|c| c == g) {
+                settings.screenshot_components.push(g.to_string());
+                settings.screenshot_components_disabled.push(g.to_string());
+            }
+        }
+        settings
+            .screenshot_components
+            .retain(|c| all.contains(&c.as_str()));
+        settings
+            .screenshot_components_disabled
+            .retain(|c| all.contains(&c.as_str()));
+    }
+
     // 划词翻译热键（历史配置缺失时补默认值）
     if !settings.hotkeys.contains_key("select") {
         settings
@@ -231,21 +273,6 @@ fn migrate(settings: &mut AppSettings) {
         settings
             .hotkeys
             .insert("reverse".to_string(), "None".to_string());
-    }
-    // 菜单组 copy 组件拆分为复制原文/复制译文
-    if settings.screenshot_components.iter().any(|c| c == "copy") {
-        let pos = settings
-            .screenshot_components
-            .iter()
-            .position(|c| c == "copy")
-            .unwrap();
-        settings.screenshot_components.remove(pos);
-        settings
-            .screenshot_components
-            .insert(pos, "copy_dst".to_string());
-        settings
-            .screenshot_components
-            .insert(pos, "copy_src".to_string());
     }
     // 快捷键格式校验：设置页为自由文本输入，误输入（如"Ctrl+Alt+TCt"）会使注册失败，
     // 无法识别的值回落默认值
@@ -862,11 +889,13 @@ mod tests {
         // 菜单组件必须全部是已知ID
         for c in &s.screenshot_components {
             assert!(
-                ["engine", "lang", "copy_src", "copy_dst", "close", "settings"]
-                    .contains(&c.as_str()),
+                ["engine", "lang", "copy", "close", "settings"].contains(&c.as_str()),
                 "未知菜单组件: {c}"
             );
         }
+        // 全序语义：默认全部组件在场且无禁用
+        assert_eq!(s.screenshot_components.len(), 5);
+        assert!(s.screenshot_components_disabled.is_empty());
         assert_eq!(s.online_apis, vec!["baidu", "youdao"]);
         assert_eq!(s.offline_model, "opus-mt");
         assert!(s.builtin_symbols_enabled);
@@ -935,28 +964,42 @@ mod tests {
 
     #[test]
     fn regression_migrate_copy_component_split() {
-        // 旧版单一"copy"组件拆分为复制原文/复制译文，位置保持；
-        // 随后 lang 组件迁移会在 engine 之后补位
+        // 已回退：拆分命名（copy_src/copy_dst）应合并回单一"copy"，位置保持；
+        // 缺失组件按全集补齐到尾部并标记禁用
         let mut s = AppSettings::default();
-        s.screenshot_components = vec!["engine".into(), "copy".into(), "close".into()];
+        s.screenshot_components = vec!["engine".into(), "copy_src".into(), "close".into()];
         migrate(&mut s);
         assert_eq!(
             s.screenshot_components,
-            vec!["engine", "lang", "copy_src", "copy_dst", "close"]
+            vec!["engine", "copy", "close", "lang", "settings"]
         );
+        // 未启用（迁移前不存在的 lang/settings）应被标记禁用
+        assert!(s.screenshot_components_disabled.contains(&"lang".to_string()));
+        assert!(s
+            .screenshot_components_disabled
+            .contains(&"settings".to_string()));
+        assert!(!s
+            .screenshot_components_disabled
+            .contains(&"copy".to_string()));
     }
 
     #[test]
     fn regression_migrate_lang_component_inserted_after_engine() {
+        // 全序迁移：缺失组件补齐到尾部（不再插入到 engine 之后）
         let mut s = AppSettings::default();
         s.screenshot_components = vec!["engine".into(), "close".into()];
         migrate(&mut s);
-        assert_eq!(s.screenshot_components, vec!["engine", "lang", "close"]);
-        // 无engine组件时插入到最前
+        assert_eq!(
+            s.screenshot_components,
+            vec!["engine", "close", "lang", "copy", "settings"]
+        );
         let mut s2 = AppSettings::default();
         s2.screenshot_components = vec!["close".into()];
         migrate(&mut s2);
-        assert_eq!(s2.screenshot_components, vec!["lang", "close"]);
+        assert_eq!(
+            s2.screenshot_components,
+            vec!["close", "engine", "lang", "copy", "settings"]
+        );
     }
 
     #[test]

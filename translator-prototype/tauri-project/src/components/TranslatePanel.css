@@ -69,6 +69,14 @@
   color: #e65100;
 }
 
+/* 手动指定测试引擎：绿色描边（描边深于底色） */
+.engine-badge.selected {
+  background-color: #e8f5e9;
+  color: #1b5e20;
+  border: 1.5px solid #4caf50;
+  border-radius: 10px;
+}
+
 .lang-selector {
   display: flex;
   align-items: center;
