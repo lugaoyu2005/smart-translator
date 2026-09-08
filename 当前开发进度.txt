@@ -175,3 +175,9 @@ RapidOCR本地OCR	✅ 完成	PaddleOCR PP-OCRv6 模型+ONNX Runtime推理，完�
 - 加固：poll_esc 改 async 命令（不占UI主线程，减少高频轮询对消息泵的压力）
 - AppHangTransient 为 WebView2 应用常见的合成瞬时停顿，系统自恢复；如再现频繁需进一步排查渲染层
 - release exe 已重打包并重启
+
+## 2026-09-08 GitHub 公开发布 v0.1.0（第二十二轮）
+- 仓库转为公开（转公开前最终安全核查：settings.json 密钥/个人文件全历史零入库；移除内部计划文档跟踪）
+- 发布首个 Release v0.1.0：tag 指向 3469dd0，附 Smart-Translator_0.1.0_x64_green.exe（43.5MB）与 _setup.msi（23.6MB，MSI 已按最新代码重打），Release 说明含功能清单与使用说明
+- 顺带修复：设置页快捷键自由文本误输入（本地实测出现 Ctrl+Alt+TCt 导致翻译快捷键失效）——migrate 增加快捷键格式校验（须含修饰键且末段为字母数字或Fn），非法值回落默认
+- release exe 已重打包重启

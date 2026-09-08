@@ -188,6 +188,40 @@ fn migrate(settings: &mut AppSettings) {
             .hotkeys
             .insert("select".to_string(), "Ctrl+Alt+X".to_string());
     }
+    // 快捷键格式校验：设置页为自由文本输入，误输入（如"Ctrl+Alt+TCt"）会使注册失败，
+    // 无法识别的值回落默认值
+    fn is_valid_hotkey(s: &str) -> bool {
+        let s = s.trim();
+        if !s.contains('+') {
+            return false;
+        }
+        match s.rsplit('+').next() {
+            Some(key) => {
+                let key = key.trim();
+                (key.len() == 1
+                    && key.chars().next().map_or(false, |c| c.is_ascii_alphanumeric()))
+                    || (key.len() >= 2
+                        && key.starts_with('F')
+                        && key[1..].chars().all(|c| c.is_ascii_digit()))
+            }
+            None => false,
+        }
+    }
+    for (name, default) in [
+        ("translate", "Ctrl+Alt+T"),
+        ("screenshot", "Ctrl+Alt+S"),
+        ("select", "Ctrl+Alt+X"),
+    ] {
+        let bad = settings
+            .hotkeys
+            .get(name)
+            .map_or(true, |v| !is_valid_hotkey(v));
+        if bad {
+            settings
+                .hotkeys
+                .insert(name.to_string(), default.to_string());
+        }
+    }
     // 旧版"无背景模式"开关 → 新覆盖样式
     if settings.overlay_mode.is_none() && settings.overlay_transparent_legacy {
         settings.overlay_mode = Some("none".to_string());
