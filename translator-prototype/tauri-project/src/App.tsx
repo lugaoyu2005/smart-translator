@@ -134,13 +134,17 @@ function App() {
             pendingText={pendingSelection}
             onConsumed={() => setPendingSelection(null)}
           />
-        ) : (
+        ) : localSettings ? (
           <SettingsPanel
             activeMenu={activeMenu}
             settings={settings}
             localSettings={localSettings}
             onLocalChange={setLocalSettings}
           />
+        ) : (
+          <div className="settings-section">
+            <h3 className="section-title">加载中…</h3>
+          </div>
         )}
       </main>
 

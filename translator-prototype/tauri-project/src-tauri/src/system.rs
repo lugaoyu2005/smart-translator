@@ -748,8 +748,29 @@ pub async fn save_app_settings(
     }
 }
 
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// 诊断：用户真实 settings.json 必须能反序列化（失败=设置页全空根因）
+    #[test]
+    fn test_deserialize_user_settings_file() {
+        let path = std::path::Path::new("target/release/settings.json");
+        if !path.exists() {
+            return; // 环境无该文件时跳过
+        }
+        let content = std::fs::read_to_string(path).unwrap();
+        match serde_json::from_str::<AppSettings>(&content) {
+            Ok(s) => {
+                assert!(!s.online_apis.is_empty());
+                assert!(s.offline_engine == "marian");
+            }
+            Err(e) => panic!("用户 settings.json 反序列化失败: {e}"),
+        }
+    }
+
+
     use super::*;
 
     #[test]
