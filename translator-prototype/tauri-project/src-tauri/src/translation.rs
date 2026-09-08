@@ -290,3 +290,115 @@ pub async fn translate_lines(
         engine_used,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    // ==================================================================
+    // 集成/验收测试：build_manager 组装逻辑（设置→引擎列表→优先级）
+    // 前缀过滤：cargo test <前缀>
+    //   integration_  集成测试
+    //   acceptance_   验收测试
+    //   sanity_       健全性测试
+    // ==================================================================
+    use super::*;
+    use crate::system::AppSettings;
+
+    #[test]
+    fn integration_default_settings_build_offline_only() {
+        // 默认设置：百度/有道启用但无密钥（构建时被过滤）→ 仅剩离线引擎兜底
+        let settings = AppSettings::default();
+        let m = build_manager(&settings);
+        let names: Vec<String> = m.list_engines().iter().map(|e| e.name.clone()).collect();
+        assert_eq!(names, vec!["离线翻译".to_string()]);
+    }
+
+    #[test]
+    fn integration_disabled_offline_builds_empty() {
+        let mut settings = AppSettings::default();
+        settings.offline_engine = "disabled".to_string();
+        let m = build_manager(&settings);
+        assert!(m.list_engines().is_empty(), "全部禁用+无密钥时引擎列表应为空");
+    }
+
+    #[test]
+    fn integration_legacy_custom_provider_becomes_engine() {
+        // 旧版单供应商字段向后兼容 → "自定义AI"
+        let mut settings = AppSettings::default();
+        settings.offline_engine = "disabled".to_string();
+        settings.providers.custom_openai_base_url = "https://api.example.com/v1".to_string();
+        settings.providers.custom_openai_api_key = "sk-test".to_string();
+        settings.providers.custom_openai_model = "gpt-x".to_string();
+        let m = build_manager(&settings);
+        let names: Vec<String> = m.list_engines().iter().map(|e| e.name.clone()).collect();
+        assert_eq!(names, vec!["自定义AI".to_string()]);
+    }
+
+    #[test]
+    fn integration_named_custom_providers() {
+        // 多自定义供应商：每个生成独立引擎；空 base_url 跳过
+        let mut settings = AppSettings::default();
+        settings.offline_engine = "disabled".to_string();
+        settings.custom_providers = vec![
+            crate::system::CustomProvider {
+                id: "p1".into(),
+                name: "DeepSeek".into(),
+                base_url: "https://a.example.com/v1".into(),
+                api_key: "k".into(),
+                model: "m".into(),
+            },
+            crate::system::CustomProvider {
+                id: "p2".into(),
+                name: String::new(),
+                base_url: "https://b.example.com/v1".into(),
+                api_key: "k".into(),
+                model: "m".into(),
+            },
+            crate::system::CustomProvider {
+                id: "p3".into(),
+                name: "无地址".into(),
+                base_url: String::new(),
+                api_key: "k".into(),
+                model: "m".into(),
+            },
+        ];
+        let m = build_manager(&settings);
+        let names: Vec<String> = m.list_engines().iter().map(|e| e.name.clone()).collect();
+        assert_eq!(
+            names,
+            vec!["自定义AI-DeepSeek".to_string(), "自定义AI".to_string()],
+            "空名回落'自定义AI'，空base_url被跳过"
+        );
+    }
+
+    #[tokio::test]
+    async fn acceptance_language_list_complete() {
+        // 验收：语言列表含自动检测+9种语言，代码唯一、本地化名非空
+        let langs = get_supported_languages().await.unwrap();
+        assert_eq!(langs.len(), 10);
+        let mut codes: Vec<String> = langs.iter().map(|l| l.code.clone()).collect();
+        codes.sort();
+        let n = codes.len();
+        codes.dedup();
+        assert_eq!(codes.len(), n, "语言代码必须唯一");
+        assert!(langs.iter().all(|l| !l.native_name.is_empty() && !l.name.is_empty()));
+        assert_eq!(langs[0].code, "auto");
+    }
+
+    #[test]
+    fn sanity_preprocess_lines_fallback() {
+        // translate_lines 的预处理回退：MiniMap分词；空结果回退trim原文
+        let lines = vec!["MiniMap".to_string(), "   ".to_string()];
+        let processed: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                let p = preprocess_text(l);
+                if p.is_empty() {
+                    l.trim().to_string()
+                } else {
+                    p
+                }
+            })
+            .collect();
+        assert_eq!(processed, vec!["Mini Map", ""]);
+    }
+}

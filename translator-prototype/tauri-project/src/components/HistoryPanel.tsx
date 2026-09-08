@@ -13,6 +13,26 @@ interface HistoryEntry {
 }
 type u64 = number;
 
+/** 摘要显示：换行替换为空格，超长截断加省略号（纯函数，便于测试） */
+export function truncate(s: string, max: number): string {
+  const t = s.replace(/\n/g, " ");
+  return t.length > max ? t.slice(0, max) + "…" : t;
+}
+
+/** 按关键词过滤历史（原文/译文子串匹配，大小写不敏感；空关键词=全部） */
+export function filterHistory(
+  list: HistoryEntry[],
+  keyword: string
+): HistoryEntry[] {
+  const kw = keyword.trim().toLowerCase();
+  if (!kw) return list;
+  return list.filter(
+    (h) =>
+      h.source.toLowerCase().includes(kw) ||
+      h.translation.toLowerCase().includes(kw)
+  );
+}
+
 const HistoryPanel: React.FC = () => {
   const [list, setList] = useState<HistoryEntry[]>([]);
   const [search, setSearch] = useState("");
@@ -62,13 +82,7 @@ const HistoryPanel: React.FC = () => {
     }
   };
 
-  const keyword = search.trim().toLowerCase();
-  const filtered = list.filter(
-    (h) =>
-      !keyword ||
-      h.source.toLowerCase().includes(keyword) ||
-      h.translation.toLowerCase().includes(keyword)
-  );
+  const filtered = filterHistory(list, search);
 
   return (
     <div className="settings-section">
@@ -145,10 +159,5 @@ const HistoryPanel: React.FC = () => {
     </div>
   );
 };
-
-function truncate(s: string, max: number): string {
-  const t = s.replace(/\n/g, " ");
-  return t.length > max ? t.slice(0, max) + "…" : t;
-}
 
 export default HistoryPanel;

@@ -48,16 +48,23 @@ fn local_time_string() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
+/// 插入到队首（新的在前）并按上限裁剪（纯函数，便于测试）
+fn insert_and_truncate(mut list: Vec<HistoryEntry>, entry: HistoryEntry) -> Vec<HistoryEntry> {
+    list.insert(0, entry);
+    list.truncate(MAX_ENTRIES);
+    list
+}
+
 /// 追加一条历史（新的在前，超上限裁剪）；记录失败静默（不影响翻译主流程）
 pub fn record(from: &str, to: &str, source: &str, translation: &str, engine: &str) {
     let _guard = HISTORY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut list = load();
+    let list = load();
     let id = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
-    list.insert(
-        0,
+    let list = insert_and_truncate(
+        list,
         HistoryEntry {
             id,
             time: local_time_string(),
@@ -68,7 +75,6 @@ pub fn record(from: &str, to: &str, source: &str, translation: &str, engine: &st
             engine: engine.to_string(),
         },
     );
-    list.truncate(MAX_ENTRIES);
     let _ = save(&list);
 }
 
@@ -106,5 +112,44 @@ mod tests {
         assert_eq!(t.len(), 19);
         assert_eq!(t.as_bytes()[4], b'-');
         assert_eq!(t.as_bytes()[10], b' ');
+    }
+
+    fn entry(id: u64) -> HistoryEntry {
+        HistoryEntry {
+            id,
+            time: "2026-01-01 00:00:00".to_string(),
+            from: "en".to_string(),
+            to: "zh".to_string(),
+            source: format!("src{id}"),
+            translation: format!("译{id}"),
+            engine: "测试引擎".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_insert_newest_first() {
+        let list = insert_and_truncate(vec![entry(1)], entry(2));
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].id, 2, "新记录必须排在最前");
+        assert_eq!(list[1].id, 1);
+    }
+
+    #[test]
+    fn test_history_capped_at_500() {
+        // 回归：超过上限时裁剪最旧的，而不是无限增长
+        let list: Vec<HistoryEntry> = (0..505).rev().map(entry).collect();
+        let list = insert_and_truncate(list, entry(999));
+        assert_eq!(list.len(), MAX_ENTRIES);
+        assert_eq!(list[0].id, 999, "新记录在最前");
+        assert_eq!(list[1].id, 504, "最旧的被裁剪掉");
+    }
+
+    #[test]
+    fn test_history_entry_roundtrip() {
+        let e = entry(7);
+        let json = serde_json::to_string(&e).unwrap();
+        let back: HistoryEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, 7);
+        assert_eq!(back.source, "src7");
     }
 }

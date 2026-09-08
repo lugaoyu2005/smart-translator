@@ -7,7 +7,18 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test": "npm run test:sanity && npm run test:rust && npm run test:fe",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "test:fe": "vitest run",
+    "test:watch": "node scripts/watch-tests.mjs",
+    "test:smoke": "cargo test --manifest-path src-tauri/Cargo.toml -- smoke_ acceptance_ && vitest run --testNamePattern=Smoke",
+    "test:sanity": "node scripts/sanity.mjs",
+    "test:perf": "cargo test --manifest-path src-tauri/Cargo.toml perf_ && vitest run --testNamePattern=性能",
+    "test:security": "cargo test --manifest-path src-tauri/Cargo.toml security_ && vitest run --testNamePattern=安全",
+    "test:monkey": "cargo test --manifest-path src-tauri/Cargo.toml monkey_ && vitest run --testNamePattern=猴子",
+    "test:accept": "cargo test --manifest-path src-tauri/Cargo.toml acceptance_ && vitest run --testNamePattern=验收|回归",
+    "test:system": "node scripts/system-test.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
@@ -16,10 +27,16 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",
+    "@testing-library/dom": "^9.3.4",
+    "@testing-library/jest-dom": "^6.10.0",
+    "@testing-library/react": "^14.3.1",
+    "@testing-library/user-event": "^14.6.7",
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",
     "@vitejs/plugin-react": "^4.0.0",
+    "jsdom": "^22.1.0",
     "typescript": "^5.0.0",
-    "vite": "^4.4.0"
+    "vite": "^4.4.0",
+    "vitest": "^0.34.6"
   }
 }

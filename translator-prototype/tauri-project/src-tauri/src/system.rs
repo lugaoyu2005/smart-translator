@@ -789,4 +789,174 @@ mod tests {
         assert!(s.autostart);
         assert_eq!(s.default_translation_direction, "auto->zh");
     }
+
+    // ==================================================================
+    // 系统化测试套件（前缀过滤：cargo test <前缀>）：
+    //   test_            单元测试
+    //   regression_      回归测试（历史配置迁移防复发）
+    //   security_        安全测试（损坏配置安全回退）
+    //   sanity_          健全性测试（配置结构自洽）
+    // ==================================================================
+
+    // ===== 健全性：默认配置结构自洽 =====
+
+    #[test]
+    fn sanity_default_settings_components_valid() {
+        let s = AppSettings::default();
+        // 菜单组件必须全部是已知ID
+        for c in &s.screenshot_components {
+            assert!(
+                ["engine", "lang", "copy_src", "copy_dst", "close", "settings"]
+                    .contains(&c.as_str()),
+                "未知菜单组件: {c}"
+            );
+        }
+        assert_eq!(s.online_apis, vec!["baidu", "youdao"]);
+        assert_eq!(s.offline_model, "opus-mt");
+        assert!(s.builtin_symbols_enabled);
+    }
+
+    #[test]
+    fn sanity_hotkey_defaults_valid() {
+        let s = AppSettings::default();
+        for name in ["translate", "screenshot", "select", "reverse"] {
+            assert!(s.hotkeys.contains_key(name), "默认热键缺失: {name}");
+        }
+    }
+
+    // ===== 迁移测试（回归：历史遗留配置必须被就地修正） =====
+
+    #[test]
+    fn regression_migrate_ocr_tesseract_to_windows() {
+        let mut s = AppSettings::default();
+        s.ocr_engine = "tesseract".to_string();
+        migrate(&mut s);
+        assert_eq!(s.ocr_engine, "windows");
+    }
+
+    #[test]
+    fn regression_migrate_offline_argos_to_marian() {
+        let mut s = AppSettings::default();
+        s.offline_engine = "argos".to_string();
+        migrate(&mut s);
+        assert_eq!(s.offline_engine, "marian");
+    }
+
+    #[test]
+    fn regression_migrate_missing_hotkeys_added() {
+        let mut s = AppSettings::default();
+        s.hotkeys.remove("select");
+        s.hotkeys.remove("reverse");
+        migrate(&mut s);
+        assert!(s.hotkeys.contains_key("select"));
+        assert!(s.hotkeys.contains_key("reverse"));
+    }
+
+    #[test]
+    fn regression_migrate_invalid_hotkey_falls_back() {
+        // 回归bug：设置页自由文本误输入（如"Ctrl+Alt+TCt"）导致热键注册失败
+        for bad in ["Ctrl+Alt+TCt", "Ctrl", "Ctrl+Shift+", "Ctrl+中文", "F", "F1x"] {
+            let mut s = AppSettings::default();
+            s.hotkeys.insert("translate".to_string(), bad.to_string());
+            migrate(&mut s);
+            assert_eq!(
+                s.hotkeys["translate"], "Ctrl+Alt+T",
+                "非法热键 {bad:?} 应回落默认值"
+            );
+        }
+    }
+
+    #[test]
+    fn regression_migrate_valid_hotkeys_kept() {
+        // 注意：裸键（如 F9 无修饰键）按设计也视为非法（全局热键插件不接受）
+        for good in ["Ctrl+Alt+T", "none", "Ctrl+Shift+F9", "Ctrl+1", "Alt+F12"] {
+            let mut s = AppSettings::default();
+            s.hotkeys.insert("translate".to_string(), good.to_string());
+            migrate(&mut s);
+            assert_eq!(s.hotkeys["translate"], good, "合法热键 {good:?} 不得被改动");
+        }
+    }
+
+    #[test]
+    fn regression_migrate_copy_component_split() {
+        // 旧版单一"copy"组件拆分为复制原文/复制译文，位置保持；
+        // 随后 lang 组件迁移会在 engine 之后补位
+        let mut s = AppSettings::default();
+        s.screenshot_components = vec!["engine".into(), "copy".into(), "close".into()];
+        migrate(&mut s);
+        assert_eq!(
+            s.screenshot_components,
+            vec!["engine", "lang", "copy_src", "copy_dst", "close"]
+        );
+    }
+
+    #[test]
+    fn regression_migrate_lang_component_inserted_after_engine() {
+        let mut s = AppSettings::default();
+        s.screenshot_components = vec!["engine".into(), "close".into()];
+        migrate(&mut s);
+        assert_eq!(s.screenshot_components, vec!["engine", "lang", "close"]);
+        // 无engine组件时插入到最前
+        let mut s2 = AppSettings::default();
+        s2.screenshot_components = vec!["close".into()];
+        migrate(&mut s2);
+        assert_eq!(s2.screenshot_components, vec!["lang", "close"]);
+    }
+
+    #[test]
+    fn regression_migrate_overlay_legacy_transparent() {
+        // 旧版"无背景模式"开关 → 新 overlay_mode
+        let mut s = AppSettings::default();
+        s.overlay_mode = None;
+        s.overlay_transparent_legacy = true;
+        migrate(&mut s);
+        assert_eq!(s.overlay_mode.as_deref(), Some("none"));
+    }
+
+    #[test]
+    fn regression_migrate_current_engine_fallback() {
+        // 当前翻译源未启用 → 回落第一个启用的引擎
+        let mut s = AppSettings::default();
+        s.current_engine = "DeepL".to_string();
+        s.online_apis = vec!["baidu".to_string()];
+        migrate(&mut s);
+        assert_eq!(s.current_engine, "百度翻译");
+        // 离线翻译启用时是合法翻译源
+        let mut s2 = AppSettings::default();
+        s2.current_engine = "离线翻译".to_string();
+        migrate(&mut s2);
+        assert_eq!(s2.current_engine, "离线翻译");
+    }
+
+    // ===== 安全：损坏配置文件必须安全回退 =====
+
+    #[test]
+    fn security_corrupt_settings_json_is_rejected() {
+        // 非法JSON → load_settings 会走默认值分支（不panic不崩溃）
+        assert!(serde_json::from_str::<AppSettings>("{broken json").is_err());
+        // 缺少必填字段（autostart无default）→ 拒绝载入，同样走默认值
+        assert!(serde_json::from_str::<AppSettings>("{}").is_err());
+    }
+
+    #[test]
+    fn security_settings_unknown_fields_tolerated() {
+        // 前向兼容：新版本新增字段在旧版反序列化时被忽略而不是报错
+        let json = serde_json::to_string(&AppSettings::default()).unwrap();
+        // 在对象开头插入未知字段（json 自带的收尾大括号复用为整体收尾）
+        let with_unknown = format!(r#"{{"未来新字段": 1, {}"#, &json[1..]);
+        let s: AppSettings = serde_json::from_str(&with_unknown).unwrap();
+        assert!(s.autostart);
+    }
+
+    #[test]
+    fn security_settings_roundtrip_preserves_keys() {
+        // 密钥字段序列化往返不丢失（本地明文存储为既定设计，写入exe同目录settings.json）
+        let mut s = AppSettings::default();
+        s.baidu_app_id = "202401010001".to_string();
+        s.baidu_secret = "testsecret".to_string();
+        let json = serde_json::to_string(&s).unwrap();
+        let back: AppSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.baidu_app_id, "202401010001");
+        assert_eq!(back.baidu_secret, "testsecret");
+    }
 }

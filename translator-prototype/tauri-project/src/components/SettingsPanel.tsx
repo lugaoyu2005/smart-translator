@@ -174,6 +174,10 @@ const ComponentChips: React.FC<{
 }> = ({ order, onOrderChange }) => {
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const chipRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  // 区分“点击切换”与“拖拽排序”：按下即拖拽模式，但未发生位移的松开视为点击
+  const pressRef = useRef<{ id: string; x: number; y: number; moved: boolean } | null>(
+    null
+  );
 
   const allIds = GROUP_COMPONENTS.map((d) => d.id);
   // 显示顺序 = 配置顺序 + 未启用的组件（追加在后，同样可拖动）
@@ -182,15 +186,23 @@ const ComponentChips: React.FC<{
     ...allIds.filter((id) => !order.includes(id)),
   ];
 
-  // 按住即进入拖拽模式（无阈值延迟）
-  const startHold = (id: string) => {
+  // 按住即进入拖拽模式（无阈值延迟）；松开时若未移动则视为点击切换
+  const startHold = (id: string, x: number, y: number) => {
+    pressRef.current = { id, x, y, moved: false };
     setDraggingId(id);
   };
-
 
   useEffect(() => {
     if (!draggingId) return;
     const onMove = (e: MouseEvent) => {
+      if (pressRef.current) {
+        const dx = e.clientX - pressRef.current.x;
+        const dy = e.clientY - pressRef.current.y;
+        if (Math.abs(dx) > 4 || Math.abs(dy) > 4) {
+          pressRef.current.moved = true;
+        }
+      }
+      if (!pressRef.current?.moved) return; // 未超过位移阈值不触发排序
       let targetId: string | null = null;
       for (const id of visibleOrder) {
         const el = chipRefs.current[id];
@@ -207,14 +219,26 @@ const ComponentChips: React.FC<{
       next.splice(ti, 0, draggingId);
       onOrderChange(next);
     };
-    const onUp = () => setDraggingId(null);
+    const onUp = () => {
+      const press = pressRef.current;
+      if (press && !press.moved) {
+        // 未移动的松开 = 点击：切换该组件启用/禁用
+        onOrderChange(
+          order.includes(press.id)
+            ? order.filter((x) => x !== press.id)
+            : [...order, press.id]
+        );
+      }
+      pressRef.current = null;
+      setDraggingId(null);
+    };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
     return () => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
     };
-  }, [draggingId, visibleOrder, onOrderChange]);
+  }, [draggingId, visibleOrder, order, onOrderChange]);
 
   return (
     <div className="component-chips">
@@ -231,7 +255,7 @@ const ComponentChips: React.FC<{
             className={`component-chip ${enabled ? "enabled" : ""} ${
               draggingId === id ? "dragging" : ""
             }`}
-            onMouseDown={() => startHold(id)}
+            onMouseDown={(e) => startHold(id, e.clientX, e.clientY)}
             title="点击启用/禁用 · 按住拖动排序"
           >
             <ComponentIcon id={id} />

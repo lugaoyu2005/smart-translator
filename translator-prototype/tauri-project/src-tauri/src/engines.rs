@@ -221,6 +221,20 @@ impl YoudaoEngine {
         }
     }
 
+    /// 有道v3签名input规则：字符数≤20时 input=q；
+    /// >20时 input=前10字符 + 总字符数 + 后10字符（必须截断，否则202签名失败）
+    fn make_sign_input(text: &str) -> String {
+        let chars: Vec<char> = text.chars().collect();
+        let n = chars.len();
+        if n <= 20 {
+            text.to_string()
+        } else {
+            let first: String = chars[..10].iter().collect();
+            let last: String = chars[n - 10..].iter().collect();
+            format!("{first}{n}{last}")
+        }
+    }
+
     /// 有道签名：SHA256(appKey + input + salt + curtime + appSecret)
     fn make_sign(&self, input: &str, salt: &str, curtime: &str) -> String {
         use sha2::{Digest, Sha256};
@@ -267,19 +281,8 @@ impl TranslationEngine for YoudaoEngine {
         };
         let to_code = lang_code(&EngineType::Youdao, to);
 
-        // 有道v3签名input规则：字符数≤20时 input=q；
-        // >20时 input=前10字符 + 总字符数 + 后10字符（必须截断，否则202签名失败）
-        let input: String = {
-            let chars: Vec<char> = text.chars().collect();
-            let n = chars.len();
-            if n <= 20 {
-                text.to_string()
-            } else {
-                let first: String = chars[..10].iter().collect();
-                let last: String = chars[n - 10..].iter().collect();
-                format!("{first}{n}{last}")
-            }
-        };
+        // 有道v3签名input规则见 make_sign_input（>20字符必须截断，否则202签名失败）
+        let input = Self::make_sign_input(text);
         let sign = self.make_sign(&input, &salt, &curtime);
 
         let mut params = HashMap::new();
@@ -1626,6 +1629,625 @@ mod tests {
             match e.translate(q, "auto", "zh").await {
                 Ok(r) => println!("[OK] {q} => {r}"),
                 Err(err) => println!("[ERR] {q} => {err}"),
+            }
+        }
+    }
+
+    // ==================================================================
+    // 以下为系统化测试套件，按类型前缀分类（可用 cargo test <前缀> 过滤）：
+    //   smoke_       冒烟测试（核心链路快速验证）
+    //   无前缀 test_ 单元测试（白盒：直接访问模块私有函数）
+    //   integration_ 集成测试（灰盒：Mock引擎注入，测管理器协作）
+    //   acceptance_  验收测试（用户故事级断言）
+    //   regression_  回归测试（历史bug防复发）
+    //   perf_        性能测试（时间预算，预算宽松避免CI抖动）
+    //   security_    安全测试（签名/编码/注入防护）
+    //   monkey_      猴子测试（随机怪异输入，只求不崩+不变式）
+    // ==================================================================
+
+    // ===== Mock引擎（灰盒集成测试用） =====
+
+    struct MockEngine {
+        name: String,
+        ok: bool,
+        /// 成功时返回 reply + 原文（回显，可断言术语替换是否已生效）
+        reply: String,
+        /// 失败时返回的错误消息
+        err: String,
+        /// engine_type 报告为 Baidu（触发批量合并请求路径）
+        baidu_style: bool,
+        /// Some(s) 时无视输入固定返回 s（模拟引擎输出行数异常）
+        fixed: Option<String>,
+    }
+
+    impl MockEngine {
+        fn ok(name: &str) -> Self {
+            Self {
+                name: name.to_string(),
+                ok: true,
+                reply: "【译】".to_string(),
+                err: String::new(),
+                baidu_style: false,
+                fixed: None,
+            }
+        }
+        fn fail(name: &str, err: &str) -> Self {
+            Self {
+                name: name.to_string(),
+                ok: false,
+                reply: String::new(),
+                err: err.to_string(),
+                baidu_style: false,
+                fixed: None,
+            }
+        }
+        /// 回显引擎：返回 "【译】" + 收到的文本（含术语替换后的）
+        fn echo() -> Self {
+            Self::ok("回显引擎")
+        }
+        fn baidu_style(mut self) -> Self {
+            self.baidu_style = true;
+            self.reply = String::new(); // 合并路径要求返回行数与请求一致：原样回显
+            self
+        }
+        fn fixed(mut self, s: &str) -> Self {
+            self.fixed = Some(s.to_string());
+            self
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TranslationEngine for MockEngine {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn engine_type(&self) -> EngineType {
+            if self.baidu_style {
+                EngineType::Baidu
+            } else {
+                EngineType::OpenAICompat
+            }
+        }
+        fn is_configured(&self) -> bool {
+            true
+        }
+        async fn translate(&self, text: &str, _from: &str, _to: &str) -> Result<String, String> {
+            if let Some(s) = &self.fixed {
+                return Ok(s.clone());
+            }
+            if self.ok {
+                Ok(format!("{}{}", self.reply, text))
+            } else {
+                Err(self.err.clone())
+            }
+        }
+    }
+
+    fn make_mgr(engines: Vec<Box<dyn TranslationEngine>>) -> TranslationManager {
+        TranslationManager::new(engines, TermBase::default())
+    }
+
+    // ===== 冒烟测试 =====
+
+    #[tokio::test]
+    async fn smoke_translate_single_engine() {
+        let mut m = make_mgr(vec![Box::new(MockEngine::ok("引擎A"))]);
+        let r = m.translate("hello", "auto", "zh").await.unwrap();
+        assert_eq!(r.translated_text, "【译】hello");
+        assert_eq!(r.engine_used, "引擎A");
+        assert_eq!(r.from, "auto");
+        assert_eq!(r.to, "zh");
+    }
+
+    #[tokio::test]
+    async fn smoke_no_engine_gives_friendly_error() {
+        let mut m = make_mgr(vec![]);
+        let err = m.translate("hi", "auto", "zh").await.unwrap_err();
+        assert!(err.contains("没有可用的翻译引擎"), "实际: {err}");
+    }
+
+    // ===== 单元测试（白盒） =====
+
+    #[test]
+    fn test_reassemble_basic() {
+        let flat: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
+        assert_eq!(
+            reassemble(&flat, &[2, 1]),
+            vec!["a\nb".to_string(), "c".to_string()]
+        );
+        assert_eq!(reassemble(&[], &[]), Vec::<String>::new());
+        assert_eq!(reassemble(&["x".to_string()], &[]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_reassemble_clamps_out_of_range() {
+        // 防御：行数统计与实际行数不一致时不得越界 panic
+        let flat = vec!["x".to_string()];
+        let out = reassemble(&flat, &[3]);
+        assert_eq!(out, vec!["x".to_string()]);
+    }
+
+    #[test]
+    fn test_lang_code_mapping() {
+        use EngineType::*;
+        // 百度特殊码
+        assert_eq!(lang_code(&Baidu, "ja"), "jp");
+        assert_eq!(lang_code(&Baidu, "ko"), "kor");
+        assert_eq!(lang_code(&Baidu, "es"), "spa");
+        assert_eq!(lang_code(&Baidu, "zh"), "zh");
+        // 有道中文用 zh-CHS
+        assert_eq!(lang_code(&Youdao, "zh"), "zh-CHS");
+        assert_eq!(lang_code(&Youdao, "en"), "en");
+        // 小牛/腾讯/阿里直通
+        assert_eq!(lang_code(&Niutrans, "fr"), "fr");
+        assert_eq!(lang_code(&Tencent, "ru"), "ru");
+        assert_eq!(lang_code(&Ali, "de"), "de");
+        // DeepL 大写 + 葡萄牙语目标 PT-PT
+        assert_eq!(lang_code(&DeepL, "zh"), "ZH");
+        assert_eq!(lang_code(&DeepL, "pt"), "PT-PT");
+        assert_eq!(lang_code(&DeepL, "xx"), "XX");
+    }
+
+    #[test]
+    fn test_deepl_map_lang_source_vs_target() {
+        assert_eq!(DeepLEngine::map_lang("pt", true), "PT-PT");
+        assert_eq!(DeepLEngine::map_lang("pt", false), "PT");
+        assert_eq!(DeepLEngine::map_lang("ja", true), "JA");
+    }
+
+    #[test]
+    fn test_deepl_endpoint_by_key_suffix() {
+        assert_eq!(
+            DeepLEngine::new("key:fx").endpoint(),
+            "https://api-free.deepl.com/v2/translate"
+        );
+        assert_eq!(
+            DeepLEngine::new("key").endpoint(),
+            "https://api.deepl.com/v2/translate"
+        );
+    }
+
+    #[test]
+    fn test_openai_lang_prompt() {
+        assert_eq!(OpenAICompatEngine::lang_prompt("zh"), "Simplified Chinese");
+        assert_eq!(OpenAICompatEngine::lang_prompt("ja"), "Japanese");
+        assert_eq!(OpenAICompatEngine::lang_prompt("未知码"), "Chinese");
+    }
+
+    #[test]
+    fn test_baidu_sign_md5_known_vector() {
+        // md5("abc") 标准测试向量；app_id/salt/secret 为空时签名输入恰为 "abc"
+        let e = BaiduEngine::new("", "");
+        assert_eq!(e.make_sign("abc", ""), "900150983cd24fb0d6963f7d28e17f72");
+    }
+
+    #[test]
+    fn test_youdao_sign_input_short_text_unchanged() {
+        assert_eq!(YoudaoEngine::make_sign_input("hello"), "hello");
+        // 恰好20字符：不截断
+        let s20 = "a".repeat(20);
+        assert_eq!(YoudaoEngine::make_sign_input(&s20), s20);
+    }
+
+    #[test]
+    fn test_youdao_sign_input_truncation_rule() {
+        // 21字符：前10 + 字符数 + 后10
+        let s21 = "abcdefghijklmnopqrstu";
+        assert_eq!(
+            YoudaoEngine::make_sign_input(s21),
+            "abcdefghij21lmnopqrstu"
+        );
+    }
+
+    #[test]
+    fn test_youdao_sign_input_counts_chars_not_bytes() {
+        // 中文按字符数统计（25个汉字 > 20 → 截断规则生效）
+        let s = "一二三四五六七八九十一二三四五六七八九十一二三四五";
+        assert_eq!(s.chars().count(), 25);
+        let out = YoudaoEngine::make_sign_input(s);
+        assert_eq!(out.chars().count(), 10 + 2 + 10);
+        assert!(out.contains('2') && out.contains('5'));
+    }
+
+    #[test]
+    fn test_tencent_utc_date_known_values() {
+        use TencentEngine as T;
+        assert_eq!(T::utc_date(0), "1970-01-01");
+        assert_eq!(T::utc_date(951782400), "2000-02-29"); // 闰年
+        assert_eq!(T::utc_date(1709164800), "2024-02-29"); // 闰年
+        assert_eq!(T::utc_date(4102444800), "2100-01-01");
+        assert_eq!(T::utc_date(951868800), "2000-03-01"); // 闰月后一天
+    }
+
+    #[test]
+    fn test_term_apply_builtin_symbols_active_by_default() {
+        let mut tb = TermBase::default();
+        assert!(tb.builtin_symbols_active(), "默认方案一应启用内置符号包");
+        assert_eq!(tb.apply_to_text("A乛B"), "A→B");
+        // 全角下划线不在纠错表：保持原样（下划线处理属于 preprocess_text 阶段）
+        assert_eq!(tb.apply_to_text("＿"), "＿");
+    }
+
+    #[test]
+    fn test_term_apply_scheme_two_without_builtin() {
+        let mut tb = TermBase::default();
+        tb.active_scheme = "scheme_2".to_string();
+        assert!(!tb.builtin_symbols_active());
+        assert_eq!(tb.apply_to_text("乛"), "乛", "未启用内置包时不纠错");
+    }
+
+    #[test]
+    fn test_term_apply_longest_match_first() {
+        let mut tb = TermBase::default();
+        tb.set_priority("ab", "X", 1);
+        tb.set_priority("abc", "Y", 1);
+        assert_eq!(tb.apply_to_text("abc"), "Y", "必须优先匹配长词");
+    }
+
+    #[test]
+    fn test_term_apply_scheme_entry_filter() {
+        let mut tb = TermBase::default();
+        tb.set_priority("foo", "甲", 1);
+        tb.set_priority("bar", "乙", 1);
+        // 方案一只让 foo 生效
+        tb.schemes[0].enabled_entry_keys = vec!["foo".to_string()];
+        assert_eq!(tb.apply_to_text("foo bar"), "甲 bar");
+    }
+
+    #[test]
+    fn test_term_apply_skips_empty_mapping() {
+        let mut tb = TermBase::default();
+        tb.packages.insert(
+            "p1".to_string(),
+            TermPackage {
+                id: "p1".to_string(),
+                name: "测试包".to_string(),
+                mappings: vec![("".to_string(), "X".to_string())],
+                builtin: false,
+            },
+        );
+        tb.schemes[0].enabled_packages = vec!["p1".to_string()];
+        assert_eq!(tb.apply_to_text("abc"), "abc", "空源词映射必须被跳过");
+    }
+
+    #[test]
+    fn test_lookup_marks_dirty_at_50_uses() {
+        let mut tb = TermBase::default();
+        tb.set_priority("bug", "漏洞", 5);
+        tb.set_priority("bug", "缺陷", 3);
+        for _ in 0..50 {
+            tb.lookup("bug");
+        }
+        assert!(tb.dirty, "第50次使用应触发优先级自动调整并置脏");
+        assert_eq!(tb.entries["bug"].priority[0], 6, "最佳译法优先级应+1");
+    }
+
+    #[test]
+    fn test_add_translation_idempotent() {
+        let mut tb = TermBase::default();
+        assert!(tb.add_translation("w", "甲"));
+        assert!(!tb.add_translation("w", "甲"), "重复译法应静默跳过");
+        assert_eq!(tb.entries["w"].translations.len(), 1);
+    }
+
+    #[test]
+    fn test_remove_entry_returns_change() {
+        let mut tb = TermBase::default();
+        tb.add_translation("w", "甲");
+        assert!(tb.remove_entry("w"));
+        assert!(!tb.remove_entry("w"), "不存在的条目返回无变更");
+    }
+
+    #[test]
+    fn test_ensure_defaults_repairs_corrupted_active_scheme() {
+        let mut tb = TermBase::default();
+        tb.active_scheme = "不存在的方案".to_string();
+        tb.ensure_defaults();
+        assert!(
+            tb.schemes.iter().any(|s| s.id == tb.active_scheme),
+            "激活方案损坏后必须回落到有效方案"
+        );
+    }
+
+    #[test]
+    fn test_ensure_defaults_rebuilds_builtin_package() {
+        let mut tb = TermBase::default();
+        tb.packages.remove("builtin_symbols");
+        tb.ensure_defaults();
+        assert!(tb.packages.contains_key("builtin_symbols"));
+        assert!(tb.packages["builtin_symbols"].builtin);
+    }
+
+    // ===== 集成测试（灰盒：Mock引擎测管理器协作） =====
+
+    #[tokio::test]
+    async fn integration_fallback_to_second_engine() {
+        let mut m = make_mgr(vec![
+            Box::new(MockEngine::fail("引擎A", "网络错误")),
+            Box::new(MockEngine::ok("引擎B")),
+        ]);
+        let r = m.translate("hi", "auto", "zh").await.unwrap();
+        assert_eq!(r.engine_used, "引擎B", "首选引擎失败必须自动回退");
+        assert_eq!(r.translated_text, "【译】hi");
+    }
+
+    #[tokio::test]
+    async fn integration_all_fail_returns_last_error() {
+        let mut m = make_mgr(vec![
+            Box::new(MockEngine::fail("引擎A", "错误A")),
+            Box::new(MockEngine::fail("引擎B", "错误B")),
+        ]);
+        let err = m.translate("hi", "auto", "zh").await.unwrap_err();
+        assert_eq!(err, "错误B", "全部失败时返回最后一个引擎的错误");
+    }
+
+    #[tokio::test]
+    async fn integration_unknown_engine_name_rejected() {
+        let mut m = make_mgr(vec![Box::new(MockEngine::ok("引擎A"))]);
+        let err = m.translate_with("不存在", "hi", "auto", "zh").await.unwrap_err();
+        assert!(err.contains("未找到引擎"), "实际: {err}");
+    }
+
+    #[tokio::test]
+    async fn integration_unconfigured_engines_filtered() {
+        // 未配置密钥的引擎必须在构建时被过滤（白盒知识+公开行为：灰盒）
+        let m = TranslationManager::new(
+            vec![
+                Box::new(BaiduEngine::new("", "")),   // 未配置
+                Box::new(DeepLEngine::new("")),       // 未配置
+                Box::new(MockEngine::ok("引擎A")),
+            ],
+            TermBase::default(),
+        );
+        let names: Vec<String> = m.list_engines().iter().map(|e| e.name.clone()).collect();
+        assert_eq!(names, vec!["引擎A".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn integration_terms_applied_before_engine() {
+        let mut tb = TermBase::default();
+        tb.set_priority("server", "服务器", 5);
+        let mut m = TranslationManager::new(vec![Box::new(MockEngine::echo())], tb);
+        let r = m.translate("my server", "auto", "zh").await.unwrap();
+        assert_eq!(r.translated_text, "【译】my 服务器", "引擎收到的文本应已应用术语");
+    }
+
+    #[tokio::test]
+    async fn integration_batch_multiline_non_baidu() {
+        // 非百度引擎：逐行翻译后按行数重组
+        let mut m = make_mgr(vec![Box::new(MockEngine::echo())]);
+        let texts = vec!["a\nb".to_string(), "c".to_string()];
+        let (outs, engine) = m.translate_batch(&texts, "auto", "zh").await.unwrap();
+        assert_eq!(engine, "回显引擎");
+        assert_eq!(outs, vec!["【译】a\n【译】b".to_string(), "【译】c".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn integration_batch_baidu_merged_request() {
+        // 百度：合并为一次请求（回显返回与输入一致的行），结果按行重组
+        let mut m = make_mgr(vec![Box::new(MockEngine::echo().baidu_style())]);
+        let texts = vec!["a\nb".to_string(), "c".to_string()];
+        let (outs, _) = m.translate_batch(&texts, "auto", "zh").await.unwrap();
+        assert_eq!(outs, vec!["a\nb".to_string(), "c".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn integration_batch_baidu_mismatch_falls_back_to_per_line() {
+        // 回归：百度合并后返回行数不匹配 → 必须落回逐行翻译，结果仍与输入对齐
+        let mut m = make_mgr(vec![
+            Box::new(MockEngine::ok("百度式").baidu_style().fixed("固定")),
+        ]);
+        let texts = vec!["a\nb".to_string(), "c".to_string()];
+        let (outs, _) = m.translate_batch(&texts, "auto", "zh").await.unwrap();
+        // 合并路径返回1行≠3行 → 逐行重试各返回"固定" → 按输入行数重组
+        assert_eq!(
+            outs,
+            vec!["固定\n固定".to_string(), "固定".to_string()],
+            "行数不匹配时应逐行翻译并保持对齐"
+        );
+    }
+
+    #[tokio::test]
+    async fn integration_batch_with_unknown_engine() {
+        let mut m = make_mgr(vec![Box::new(MockEngine::ok("引擎A"))]);
+        let texts = vec!["a".to_string()];
+        let err = m.translate_batch_with("不存在", &texts, "auto", "zh").await.unwrap_err();
+        assert!(err.contains("未找到引擎"));
+    }
+
+    #[tokio::test]
+    async fn regression_take_term_dirty_roundtrip() {
+        // 回归：翻译50次后脏标记应置位一次并可清除（自动落盘依据）
+        let mut tb = TermBase::default();
+        tb.set_priority("x", "乙", 1);
+        let mut m = TranslationManager::new(vec![Box::new(MockEngine::echo())], tb);
+        for _ in 0..50 {
+            m.translate("x", "auto", "zh").await.unwrap();
+        }
+        assert!(m.take_term_dirty(), "50次使用后应有待落盘变更");
+        assert!(!m.take_term_dirty(), "取出后脏标记应清零");
+    }
+
+    #[tokio::test]
+    async fn regression_baidu_batch_preserves_line_alignment() {
+        // 回归：1QPS规避的合并请求不得打乱行对齐（截图翻译逐行覆盖依赖此约定）
+        let mut m = make_mgr(vec![Box::new(MockEngine::echo().baidu_style())]);
+        let texts: Vec<String> = vec!["一\n二\n三".to_string(), "四".to_string(), "五\n六".to_string()];
+        let (outs, _) = m.translate_batch(&texts, "auto", "zh").await.unwrap();
+        assert_eq!(outs.len(), 3);
+        assert_eq!(outs[0], "一\n二\n三");
+        assert_eq!(outs[2], "五\n六");
+    }
+
+    // ===== 验收测试 =====
+
+    #[tokio::test]
+    async fn acceptance_translate_with_named_engine() {
+        // 用户故事：翻译测试页手动选择引擎 → 只有该引擎被使用
+        let mut m = make_mgr(vec![
+            Box::new(MockEngine::ok("引擎A")),
+            Box::new(MockEngine::ok("引擎B")),
+        ]);
+        let r = m.translate_with("引擎B", "hi", "auto", "zh").await.unwrap();
+        assert_eq!(r.engine_used, "引擎B");
+    }
+
+    #[tokio::test]
+    async fn acceptance_batch_result_count_matches_input() {
+        // 用户故事（截图翻译）：OCR出的N个区域必须返回N段译文
+        let mut m = make_mgr(vec![Box::new(MockEngine::fail("A", "x")), Box::new(MockEngine::echo())]);
+        let texts: Vec<String> = (0..7).map(|i| format!("t{i}\nextra")).collect();
+        let (outs, _) = m.translate_batch(&texts, "auto", "zh").await.unwrap();
+        assert_eq!(outs.len(), 7);
+        assert!(outs.iter().all(|s| !s.is_empty()));
+    }
+
+    // ===== 性能测试 =====
+
+    #[test]
+    fn perf_preprocess_100kb() {
+        let text = "abcDef Mini_Map ".repeat(6000); // ≈96KB
+        let start = std::time::Instant::now();
+        let out = preprocess_text(&text);
+        let elapsed = start.elapsed();
+        assert!(!out.is_empty());
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "96KB文本预处理耗时 {elapsed:?}（debug构建预算5s）"
+        );
+    }
+
+    #[test]
+    fn perf_apply_500_terms_on_50kb() {
+        let mut tb = TermBase::default();
+        for i in 0..500 {
+            tb.set_priority(&format!("term{i:04}"), &format!("译{i:04}"), 1);
+        }
+        let mut text = String::new();
+        for i in 0..2500 {
+            text.push_str(&format!("word term{:04} more ", i % 500));
+        }
+        let start = std::time::Instant::now();
+        let out = tb.apply_to_text(&text);
+        let elapsed = start.elapsed();
+        assert!(out.contains("译0001"));
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "500术语×50KB文本替换耗时 {elapsed:?}（debug构建预算10s）"
+        );
+    }
+
+    #[test]
+    fn perf_reassemble_10k_lines() {
+        let flat: Vec<String> = (0..10_000).map(|i| i.to_string()).collect();
+        let counts: Vec<usize> = vec![2; 5_000];
+        let start = std::time::Instant::now();
+        let out = reassemble(&flat, &counts);
+        let elapsed = start.elapsed();
+        assert_eq!(out.len(), 5_000);
+        assert!(elapsed < std::time::Duration::from_secs(2), "万行重组耗时 {elapsed:?}");
+    }
+
+    // ===== 安全测试 =====
+
+    #[test]
+    fn security_ali_percent_encode_rfc3986() {
+        // 签名注入防护：仅 unreserved 字符（A-Z a-z 0-9 - _ . ~）可不转义
+        assert_eq!(AliEngine::percent_encode("abcXYZ012-_.~"), "abcXYZ012-_.~");
+        assert_eq!(AliEngine::percent_encode("a b&c=d/e?"), "a%20b%26c%3Dd%2Fe%3F");
+        assert_eq!(AliEngine::percent_encode("/"), "%2F");
+        assert_eq!(AliEngine::percent_encode("中"), "%E4%B8%AD");
+        assert_eq!(AliEngine::percent_encode("+"), "%2B");
+    }
+
+    #[test]
+    fn security_baidu_sign_hex_format() {
+        let e = BaiduEngine::new("id", "secret");
+        let sign = e.make_sign("q", "salt");
+        assert_eq!(sign.len(), 32);
+        assert!(sign.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+
+    // ===== 猴子测试（随机怪异输入，只求不崩 + 输出不变式） =====
+
+    #[test]
+    fn monkey_preprocess_random_text() {
+        // 字符池：控制字符、零宽、RTL、BOM、emoji、CJK、组合附加符、各类空白
+        let pool: Vec<char> = "\u{0}\u{7f}\u{200b}\u{202e}\u{feff}abcXYZ_ 　\t\n😀中日한루é\u{301}Ⅻⅷ"
+            .chars()
+            .collect();
+        let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut rng = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..300 {
+            let len = (rng() % 2000) as usize;
+            let text: String = (0..len)
+                .map(|_| pool[((rng() as usize) % pool.len())])
+                .collect();
+            let out = preprocess_text(&text);
+            // 输出不变式
+            assert!(!out.contains('_'), "下划线必须全部转空格");
+            assert!(!out.contains("  "), "不允许连续空格");
+            assert_eq!(out, out.trim(), "输出必须已去除首尾空白");
+        }
+    }
+
+    #[test]
+    fn monkey_reassemble_random_counts() {
+        let mut seed: u64 = 42;
+        let mut rng = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..500 {
+            let n_counts = (rng() % 20) as usize;
+            let counts: Vec<usize> = (0..n_counts).map(|_| (rng() % 7) as usize).collect();
+            let n_flat = (rng() % 20) as usize;
+            let flat: Vec<String> = (0..n_flat).map(|i| i.to_string()).collect();
+            let out = reassemble(&flat, &counts);
+            assert_eq!(out.len(), counts.len(), "越界行数不得panic且结果数一致");
+        }
+    }
+
+    #[test]
+    fn monkey_term_base_random_operations() {
+        let words = ["w1", "w2", "服务器", "", "😀", "长词长词长词长词"];
+        let trans = ["甲", "乙", "丙", "", "translation"];
+        let mut seed: u64 = 7;
+        let mut rng = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut tb = TermBase::default();
+        for _ in 0..2000 {
+            let w = words[(rng() as usize) % words.len()];
+            let t = trans[(rng() as usize) % trans.len()];
+            match rng() % 4 {
+                0 => {
+                    tb.set_priority(w, t, (rng() % 10) as u32);
+                }
+                1 => {
+                    tb.add_translation(w, t);
+                }
+                2 => {
+                    tb.remove_translation(w, t);
+                }
+                _ => {
+                    tb.remove_entry(w);
+                }
+            }
+            // 任何操作序列后库必须自洽
+            for (k, e) in &tb.entries {
+                assert_eq!(e.translations.len(), e.priority.len(), "词条 {k} 译法/优先级必须等长");
+                assert!(!e.translations.is_empty(), "空词条必须被清理");
             }
         }
     }

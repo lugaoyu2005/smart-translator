@@ -209,3 +209,8 @@ RapidOCR本地OCR	✅ 完成	PaddleOCR PP-OCRv6 模型+ONNX Runtime推理，完�
 ## 2026-09-09 反馈修复9项收尾（第二十五轮）
 - NLLB-200 深度调试：修复双源语言前缀（tokenizer模板自动插eng_Latn，改为替换首token）；逐步诊断发现模型前3步正确输出中文、第4步起退化为英文循环——NLLB merged导出的KV cache细节与Marian存在差异，需对照transformers.js深挖；本轮回退为置灰“实验性完善中”，代码保留待修
 - 全量 cargo test 19 通过；release exe 重打包（含新图标/快捷键None默认/冲突清单/侧边栏保存栏/复制回退/JSON导入/NLLB代码保留）
+
+## 2026-09-09 交互细节修复（第二十六轮）
+- 菜单组 chips：单击无法启用/禁用修复——按下即拖拽模式覆盖了点击语义；改为位移>4px 判定为拖拽排序、未移动的松开视为点击切换
+- 图标“未完全更新”根因：Windows 图标缓存残留——exe 内嵌图标已验证为新图（哈希一致）；ie4uinit 刷新缓存+桌面快捷方式重建（显式 IconLocation）
+- 设置页“加载中…”永久卡住的根因修复（loadSettings 丢失 setLocalSettings）用户确认各页面数据正常

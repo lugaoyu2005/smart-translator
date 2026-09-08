@@ -181,16 +181,13 @@ pub async fn delete_package(state: tauri::State<'_, AppState>, id: String) -> Re
     save_term_base(manager.term_base())
 }
 
-// Tauri命令：导入术语包（前端读文件文本传入；CSV/TSV/TXT 两列：原文[逗号/Tab/→]译文）
-#[tauri::command]
-pub async fn import_package_text(
-    state: tauri::State<'_, AppState>,
-    name: String,
-    content: String,
-) -> Result<String, String> {
+/// 解析导入文本为映射列表（纯函数，便于测试）。
+/// JSON：[{"source":"..","translation":".."}] 或 {"原文":"译文"}；
+/// 逐行：原文[逗号/Tab/→/中文逗号]译文，#开头为注释，空行跳过。
+/// JSON 语法错误返回 Err；解析不到映射返回空 Vec（命令层报错）。
+fn parse_import_content(content: &str) -> Result<Vec<(String, String)>, String> {
     let mut mappings: Vec<(String, String)> = Vec::new();
     let trimmed = content.trim_start();
-    // JSON 支持：[{"source":"..","translation":".."}] 或 {"原文":"译文", ...}
     if trimmed.starts_with('{') || trimmed.starts_with('[') {
         match serde_json::from_str::<serde_json::Value>(trimmed) {
             Ok(serde_json::Value::Array(arr)) => {
@@ -234,6 +231,17 @@ pub async fn import_package_text(
         }
     }
     }
+    Ok(mappings)
+}
+
+// Tauri命令：导入术语包（前端读文件文本传入；CSV/TSV/TXT 两列：原文[逗号/Tab/→]译文）
+#[tauri::command]
+pub async fn import_package_text(
+    state: tauri::State<'_, AppState>,
+    name: String,
+    content: String,
+) -> Result<String, String> {
+    let mappings = parse_import_content(&content)?;
     if mappings.is_empty() {
         return Err("未解析到有效映射（需两列：原文[逗号/Tab/→]译文）".to_string());
     }
@@ -396,5 +404,77 @@ mod tests {
         tb.add_translation("mini", "小");
         assert!(tb.remove_translation("mini", "小"));
         assert!(!tb.entries.contains_key("mini"));
+    }
+
+    // ===== 导入解析（功能/安全） =====
+
+    #[test]
+    fn test_import_parse_line_formats() {
+        // 逗号 / Tab / 箭头 / 中文逗号 四种分隔符
+        assert_eq!(
+            parse_import_content("hello,你好\nworld\t世界\n原→译\n左，右").unwrap(),
+            vec![
+                ("hello".to_string(), "你好".to_string()),
+                ("world".to_string(), "世界".to_string()),
+                ("原".to_string(), "译".to_string()),
+                ("左".to_string(), "右".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_import_parse_skips_comments_and_blanks() {
+        assert_eq!(
+            parse_import_content("# 注释行\n\n  \na,b\n# 另一条注释").unwrap(),
+            vec![("a".to_string(), "b".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_import_parse_trims_spaces() {
+        assert_eq!(
+            parse_import_content("  key , value  ").unwrap(),
+            vec![("key".to_string(), "value".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_import_parse_json_array_and_object() {
+        let arr = r#"[{"source":"src","translation":"译"},{"source":" ","translation":"x"}]"#;
+        assert_eq!(
+            parse_import_content(arr).unwrap(),
+            vec![("src".to_string(), "译".to_string())]
+        );
+        let obj = r#"{"原文":"译文","空":""}"#;
+        assert_eq!(
+            parse_import_content(obj).unwrap(),
+            vec![("原文".to_string(), "译文".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_import_parse_no_mapping_returns_empty() {
+        // 无分隔符的行 / 空内容 → 空（命令层报“未解析到有效映射”）
+        assert_eq!(parse_import_content("just one column").unwrap(), vec![]);
+        assert_eq!(parse_import_content("").unwrap(), vec![]);
+    }
+
+    #[test]
+    fn test_import_parse_invalid_json_is_error() {
+        // 安全：恶意/损坏 JSON 必须返回错误而不是 panic
+        let err = parse_import_content("{\"broken\": ").unwrap_err();
+        assert!(err.contains("JSON 解析失败"));
+        assert!(parse_import_content("[{not json}]").is_err());
+    }
+
+    // ===== 可用性：术语命令层校验规则对应的领域约束（供命令复用的trim逻辑） =====
+
+    #[test]
+    fn test_term_base_all_zero_priority_returns_first() {
+        let mut tb = TermBase::default();
+        tb.add_translation("w", "甲");
+        tb.add_translation("w", "乙");
+        // 全部优先级为0时按插入顺序取第一个
+        assert_eq!(tb.entries["w"].best_translation(), Some("甲"));
     }
 }
