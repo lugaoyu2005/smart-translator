@@ -11,3 +11,4 @@ terms.json
 # 其它
 *.exe
 build_err.txt
+.zcode/
