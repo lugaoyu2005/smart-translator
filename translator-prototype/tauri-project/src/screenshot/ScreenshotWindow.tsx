@@ -4,6 +4,7 @@ import React, {
   useRef,
   useLayoutEffect,
   useCallback,
+  useMemo,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -207,7 +208,10 @@ function fitFontSize(
 // ============ 组件 ============
 
 const ScreenshotWindow: React.FC = () => {
-  const win = getCurrentWebviewWindow();
+  // useMemo 稳定窗口对象：getCurrentWebviewWindow() 每次调用返回新实例，
+  // 若直接放渲染体/依赖数组，任何 setState 都会让依赖 [win] 的 effect 无限重跑
+  // （曾引发截图窗口反复 show/hide 的全系统焦点闪烁风暴）
+  const win = useMemo(() => getCurrentWebviewWindow(), []);
 
   // 启动待命态：窗口常驻但完全透明（触发截图后才进入 select 显示暗幕）
   const [phase, setPhase] = useState<Phase>("idle");
@@ -307,7 +311,9 @@ const ScreenshotWindow: React.FC = () => {
         setEngineIdx(pi >= 0 ? pi : 0);
       } catch {}
     })();
-  }, [win]);
+    // 依赖 []：启动初始化只跑一次（win 已 useMemo 稳定；此前依赖 [win] +
+    // effect 内 setState 曾构成无限循环，驱动窗口 show/hide 风暴）
+  }, []);
 
   // 设置保存后实时生效
   useEffect(() => {
@@ -451,8 +457,17 @@ const ScreenshotWindow: React.FC = () => {
     } catch {}
   }, [win]);
 
-  // ESC 轮询兜底：窗口偶发拿不到键盘焦点（Windows 前台锁定）时 keydown 收不到，
-  // 直接读物理键状态退出；idle 态不轮询，不影响系统其他场合的 ESC
+  // ESC 兜底双保险：
+  // 1) 后端监视线程检测 ESC 物理键（与焦点/NOACTIVATE 无关）后推送 exit-screenshot
+  // 2) 前端 150ms 轮询 poll_esc
+  // idle 态两者都不工作，不影响系统其他场合的 ESC
+  useEffect(() => {
+    const un = listen("exit-screenshot", () => exit());
+    return () => {
+      un.then((f) => f());
+    };
+  }, [exit]);
+
   useEffect(() => {
     if (phase === "idle") return;
     const t = setInterval(async () => {

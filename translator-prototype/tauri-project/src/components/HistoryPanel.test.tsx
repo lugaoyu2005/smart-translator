@@ -134,7 +134,7 @@ describe("HistoryPanel（翻译历史页）", () => {
     Object.assign(navigator, { clipboard: { writeText } });
     render(<HistoryPanel />);
     const card = (await screen.findByText("hello world")).closest<HTMLElement>(".history-card")!;
-    fireEvent.click(within(card).getByText("复制原文"));
+    fireEvent.click(within(card).getByTitle("复制原文"));
     expect(writeText).toHaveBeenCalledWith("hello world");
   });
 });

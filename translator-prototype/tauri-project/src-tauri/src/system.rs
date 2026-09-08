@@ -443,8 +443,37 @@ pub fn trigger_screenshot(app: &AppHandle) {
                 );
             }
         }
+        spawn_esc_watcher(app.clone());
         let _ = app.emit_to("screenshot", "trigger-screenshot", ());
     }
+}
+
+/// ESC 监视线程：截图会话期间 30ms 采样 ESC 物理键状态（GetAsyncKeyState 读全局键盘，
+/// 与窗口焦点/NOACTIVATE 无关，无漏检）。检测到即隐藏窗口并通知前端复位；120s 无操作自动退出
+static ESC_WATCHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn spawn_esc_watcher(handle: tauri::AppHandle) {
+    use std::sync::atomic::Ordering;
+    if ESC_WATCHING.swap(true, Ordering::Relaxed) {
+        return; // 已有监视线程
+    }
+    std::thread::spawn(move || {
+        let start = std::time::Instant::now();
+        unsafe {
+            use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE};
+            while start.elapsed() < std::time::Duration::from_secs(120) {
+                if GetAsyncKeyState(VK_ESCAPE.0 as i32) as u16 & 0x8000 != 0 {
+                    if let Some(w) = handle.get_webview_window("screenshot") {
+                        let _ = w.hide();
+                    }
+                    let _ = handle.emit_to("screenshot", "exit-screenshot", ());
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(30));
+            }
+        }
+        ESC_WATCHING.store(false, Ordering::Relaxed);
+    });
 }
 
 /// Tauri命令：轮询 ESC 物理键状态（GetAsyncKeyState 读全局键盘状态，
@@ -500,8 +529,14 @@ pub fn set_hotkeys_suspended(app: tauri::AppHandle, suspended: bool) -> Result<(
 
 /// Tauri命令：截图窗口预热——移出屏幕外显示一次，完成 WebView2 全屏透明合成初始化
 /// 后隐藏并恢复原位。屏幕外显示不触发桌面重绘（修复“打开应用时文件管理器闪烁”）
+static PREHEAT_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 #[tauri::command]
 pub fn preheat_screenshot(app: tauri::AppHandle) -> Result<(), String> {
+    // 去重：预热只需一次（前端重复触发/组件重挂载不再产生窗口风暴）
+    if PREHEAT_DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return Ok(());
+    }
     if let Some(win) = app.get_webview_window("screenshot") {
         let origin = win.outer_position().map_err(|e| e.to_string())?;
         let _ = win.set_ignore_cursor_events(true);

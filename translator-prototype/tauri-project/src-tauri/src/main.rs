@@ -91,11 +91,18 @@ fn main() {
                 #[cfg(target_os = "windows")]
                 unsafe {
                     use windows::Win32::UI::WindowsAndMessaging::{
-                        GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_TOOLWINDOW,
+                        GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE,
+                        WS_EX_TOOLWINDOW,
                     };
                     if let Ok(hwnd) = win.hwnd() {
                         let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-                        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_TOOLWINDOW.0 as isize);
+                        // NOACTIVATE: 显示/点击永不抢占系统前台（根治焦点闪烁风暴）；
+                        // 触发截图时由 SetForegroundWindow 程序化激活
+                        SetWindowLongPtrW(
+                            hwnd,
+                            GWL_EXSTYLE,
+                            style | (WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) as isize,
+                        );
                     }
                 }
             }
