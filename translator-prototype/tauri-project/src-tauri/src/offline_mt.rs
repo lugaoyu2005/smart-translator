@@ -778,9 +778,12 @@ fn beam_decode(
         .encode(text, false)
         .map_err(|e| format!("分词失败: {e}"))?;
     let mut ids: Vec<i64> = enc.get_ids().iter().map(|&i| i as i64).collect();
-    // NLLB：源语言码作为序列首 token
+    // NLLB：tokenizer 模板已自动插入 eng_Latn 前缀与 </s> 后缀；
+    // 源语言非英语时把首 token 替换为正确的源语言码
     if let Some(prefix) = src_prefix {
-        ids.insert(0, prefix as i64);
+        if !ids.is_empty() {
+            ids[0] = prefix as i64;
+        }
     }
     ids.truncate(MAX_SRC_TOKENS);
     let attn: Vec<i64> = vec![1; ids.len()];

@@ -908,7 +908,7 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         >
           <option value="opus-mt">OPUS-MT（轻量快速 · 按语言对约30-80MB · 当前使用）</option>
           <option value="nllb-200" disabled>
-            NLLB-200 蒸馏版（200种语言单模型质量更高 · 约600MB · 下一版本接入）
+            NLLB-200 蒸馏版（200种语言单模型 · 约600MB · 实验性完善中，暂建议 OPUS-MT）
           </option>
           <option value="disabled">禁用离线翻译</option>
         </select>
