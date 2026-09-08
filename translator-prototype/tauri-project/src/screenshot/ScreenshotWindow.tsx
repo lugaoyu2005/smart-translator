@@ -273,6 +273,12 @@ const ScreenshotWindow: React.FC = () => {
           await win.setPosition(
             new PhysicalPosition(monitor.position.x, monitor.position.y)
           );
+          // 首帧合成后预热：后端将窗口移出屏幕外显示一次（初始化合成管线，桌面无闪烁）
+          requestAnimationFrame(() =>
+            requestAnimationFrame(() => {
+              invoke("preheat_screenshot").catch(() => {});
+            })
+          );
         }
       } catch (e) {
         console.error("初始化截图窗口失败:", e);

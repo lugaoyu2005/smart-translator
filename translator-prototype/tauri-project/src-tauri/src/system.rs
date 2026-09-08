@@ -498,6 +498,27 @@ pub fn set_hotkeys_suspended(app: tauri::AppHandle, suspended: bool) -> Result<(
     Ok(())
 }
 
+/// Tauri命令：截图窗口预热——移出屏幕外显示一次，完成 WebView2 全屏透明合成初始化
+/// 后隐藏并恢复原位。屏幕外显示不触发桌面重绘（修复“打开应用时文件管理器闪烁”）
+#[tauri::command]
+pub fn preheat_screenshot(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("screenshot") {
+        let origin = win.outer_position().map_err(|e| e.to_string())?;
+        let _ = win.set_ignore_cursor_events(true);
+        let _ = win.set_position(tauri::PhysicalPosition::new(-32000, -32000));
+        let _ = win.show();
+        let handle = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            if let Some(w) = handle.get_webview_window("screenshot") {
+                let _ = w.hide();
+                let _ = w.set_position(tauri::PhysicalPosition::new(origin.x, origin.y));
+            }
+        });
+    }
+    Ok(())
+}
+
 /// Tauri命令：主窗口“开始截图”按钮与快捷键/托盘走同一触发路径
 #[tauri::command]
 pub fn trigger_screenshot_cmd(app: tauri::AppHandle) -> Result<(), String> {
