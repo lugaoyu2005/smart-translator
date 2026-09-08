@@ -169,3 +169,9 @@ RapidOCR本地OCR	✅ 完成	PaddleOCR PP-OCRv6 模型+ONNX Runtime推理，完�
 - 修复二：弃用热键兜底，改为 GetAsyncKeyState 轮询（poll_esc 命令，150ms，读全局物理键状态与焦点无关）；idle 态不轮询
 - 自动化测试（SendKeys+Win32窗口/前台检查）全链路通过：触发显示+焦点到手 / ESC退出隐藏+焦点释放 / 重复触发回归 / 清理
 - cargo test 19 通过；release exe 已重打包并重启
+
+## 2026-09-08 Windows事件日志排查（第二十一轮）
+- WER记录定位：7:25 Application Hang 1002（卡死超5秒被系统关闭，旧常驻穿透版——解释了当时“进程不存在”）+ 10:44 AppHangTransient（短暂无响应自恢复，自动化测试触发瞬间）
+- 加固：poll_esc 改 async 命令（不占UI主线程，减少高频轮询对消息泵的压力）
+- AppHangTransient 为 WebView2 应用常见的合成瞬时停顿，系统自恢复；如再现频繁需进一步排查渲染层
+- release exe 已重打包并重启

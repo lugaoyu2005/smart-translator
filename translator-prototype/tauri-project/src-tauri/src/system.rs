@@ -352,8 +352,9 @@ pub fn trigger_screenshot(app: &AppHandle) {
 }
 
 /// Tauri命令：轮询 ESC 物理键状态（GetAsyncKeyState 读全局键盘状态，
-/// 与窗口焦点/前台无关——前端在截图会话期间定时调用，作为 keydown 失效时的退出兜底）
-#[tauri::command]
+/// 与窗口焦点/前台无关——前端在截图会话期间定时调用，作为 keydown 失效时的退出兜底）。
+/// async：在异步运行时执行，不占 UI 主线程（避免高频轮询加重消息泵停顿）
+#[tauri::command(async)]
 pub fn poll_esc() -> Result<bool, String> {
     #[cfg(target_os = "windows")]
     unsafe {
