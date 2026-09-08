@@ -76,8 +76,10 @@ function App() {
     try {
       const settings = await invoke("get_app_settings");
       setSettings(settings);
+      setLocalSettings(settings); // 同步设置页草稿（缺失会导致页面永远“加载中…”）
     } catch (error) {
       console.error("Failed to load settings:", error);
+      setSavedTip({ ok: false, msg: `设置加载失败：${error}` });
     }
   };
 
