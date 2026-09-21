@@ -131,3 +131,194 @@
   padding: 4px 10px;
   font-size: 12px;
 }
+
+/* ==================================================================
+   以下为 TSX 实际使用的类名（历史上与上方旧类名脱节导致裸排版）。
+   统一带 .terms-panel 前缀提高优先级，稳定覆盖公共样式表的同名规则
+   ================================================================== */
+
+/* 术语包行：开关 + 名称 + 操作按钮，卡片化 */
+.terms-panel .package-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fff;
+  margin-top: 8px;
+}
+
+.terms-panel .package-row:first-of-type {
+  margin-top: 10px;
+}
+
+.terms-panel .package-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 14px;
+  color: #374151;
+}
+
+.terms-panel .package-delete {
+  flex: none;
+  padding: 3px 10px;
+  font-size: 12px;
+  border: 1px solid #fca5a5;
+  border-radius: 6px;
+  background: #fff;
+  color: #dc2626;
+  cursor: pointer;
+}
+
+.terms-panel .package-delete:hover {
+  background: #fef2f2;
+}
+
+/* 导入按钮：与“+”按钮同高同风格 */
+.terms-panel .link-text-btn {
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 12px;
+  margin-left: 8px;
+  border: 1.5px solid #1976d2;
+  border-radius: 8px;
+  background: transparent;
+  color: #1976d2;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.terms-panel .link-text-btn:hover {
+  background: #e3f2fd;
+}
+
+/* 添加术语表单：输入框弹性填充、按钮同高对齐 */
+.terms-panel .term-add-form {
+  margin-top: 14px;
+}
+
+.terms-panel .term-add-form input[type="text"] {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.terms-panel .term-add-form input[type="text"]:focus {
+  outline: none;
+  border-color: #1976d2;
+}
+
+.terms-panel .term-add-form .button.primary {
+  flex: none;
+  padding: 8px 24px;
+  font-size: 13px;
+}
+
+/* 词条卡片头部：术语名 + 元信息 + 删除（flex 对齐，删除靠右） */
+.terms-panel .term-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.terms-panel .term-delete {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: #dc2626;
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.terms-panel .term-delete:hover {
+  background: #fef2f2;
+}
+
+/* 译法行：灰底胶囊行，优先级与 ▲▼× 操作按钮成组右对齐 */
+.terms-panel .term-translation-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #f9fafb;
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin-top: 6px;
+}
+
+.terms-panel .term-btn {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: #6b7280;
+  font-size: 12px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  line-height: 1.4;
+}
+
+.terms-panel .term-btn:hover {
+  background: #e5e7eb;
+  color: #111827;
+}
+
+.terms-panel .term-btn.term-delete-btn:hover {
+  background: #fee2e2;
+  color: #dc2626;
+}
+
+/* 包映射编辑器：虚线容器 + 行式输入 */
+.terms-panel .package-editor {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px dashed #d1d5db;
+  border-radius: 8px;
+  background: #fafafa;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.terms-panel .package-editor-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.terms-panel .package-editor-row input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.terms-panel .package-editor-row .scheme-mini-btn {
+  flex: none;
+  font-size: 13px;
+  padding: 4px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+}
+
+.terms-panel .package-editor-row .scheme-mini-btn:hover {
+  background: #eef2f7;
+}
+
+.terms-panel .package-editor .button.primary {
+  align-self: flex-start;
+  padding: 7px 20px;
+  font-size: 13px;
+}

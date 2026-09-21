@@ -1,8 +1,12 @@
-//! 离线翻译引擎：OPUS-MT 本地模型（ONNX Runtime 推理，完全离线免费）
-//! - 模型：Helsinki-NLP OPUS-MT（Xenova ONNX 镜像，int8 量化，每个语言对约30-80MB）
+//! 离线翻译引擎：OPUS-MT / NLLB-200 本地模型（ONNX Runtime 推理，完全离线免费）
+//! - OPUS-MT：Helsinki-NLP 双语对模型（Xenova ONNX 镜像，int8 量化，每个语言对约30-80MB）
+//!   解码：beam search（束宽4）+ merged 解码器 KV cache；decoder_start=<pad>，终止=</s>
+//! - NLLB-200：单模型覆盖200语言（Xenova 蒸馏版约600MB），decoder_start=</s> +
+//!   强制首 token=目标语言码、源前缀语言码；解码走非 merged 解码器逐步全量前向
+//!   （merged 版 KV cache 与 Marian 导出细节存在差异会退化输出，故不使用）
 //! - 分发：按需自动下载（hf-mirror.com 优先，huggingface.co 兜底），存 exe 同目录 models/mt/
-//! - 路由：中↔英专门模型直达；其余语言对经英语中转（两次解码）
-//! - 解码：贪心、无 KV cache（句子短，O(n²) 可接受）；decoder_start=<pad>，终止=</s>
+//! - 路由：OPUS-MT 中↔英专门模型直达，其余语言对经英语中转；NLLB 任意语言对直达
+//! - 长文本：超 500 token 自动按句切分打包，逐块翻译后拼接（不丢内容）
 
 use crate::engines::TranslationEngine;
 use ort::session::builder::GraphOptimizationLevel;
@@ -120,6 +124,11 @@ pub fn route(from: &str, to: &str) -> Vec<(&'static str, &'static str)> {
 const NLLB_REPO: &str = "Xenova/nllb-200-distilled-600M";
 const NLLB_MAX_NEW_TOKENS: usize = 128; // 600M CPU 解码较慢，控制上限
 
+/// 长文本分块：单块 token 上限（源前缀/后缀语言 token 占约2个，留余量）
+const CHUNK_TOKENS: usize = 400;
+/// 无标点超长句硬切的字符窗口（token/字符比最坏约0.8，600字符 < 500 token 上限）
+const HARD_SLICE_CHARS: usize = 600;
+
 /// NLLB-200 语言代码映射（内部码 → BCP-47 风格 NLLB 码）
 fn nllb_lang(code: &str) -> &'static str {
     match code {
@@ -136,7 +145,8 @@ fn nllb_lang(code: &str) -> &'static str {
     }
 }
 
-/// 确保 NLLB-200 模型就绪（tokenizer + encoder/decoder merged 量化版，约600MB）
+/// 确保 NLLB-200 模型就绪（tokenizer + encoder/非merged解码器 量化版，约600MB）。
+/// 不用 merged 解码器：其 KV cache 导出与 Marian 存在差异，实测会退化输出
 pub async fn ensure_nllb_model() -> Result<PathBuf, String> {
     let dir = models_root().join(NLLB_REPO.replace('/', "_"));
     let files = [
@@ -146,8 +156,8 @@ pub async fn ensure_nllb_model() -> Result<PathBuf, String> {
             dir.join("encoder_model_quantized.onnx"),
         ),
         (
-            "onnx/decoder_model_merged_quantized.onnx",
-            dir.join("decoder_model_merged_quantized.onnx"),
+            "onnx/decoder_model_quantized.onnx",
+            dir.join("decoder_model_quantized.onnx"),
         ),
     ];
     let mut need_download = false;
@@ -310,6 +320,8 @@ pub async fn ensure_pair_models(from: &str, to: &str) -> Result<PathBuf, String>
 // ============ 模型加载与推理 ============
 
 /// 单语言对：分词器 + 编码/解码会话（懒加载，进程级缓存）
+/// 解码器 IO 字段对两种家族复用：OPUS-MT(merged) 带 KV cache 相关字段；
+/// NLLB(非merged) 仅用 ids/mask/hidden/logits，cache_flag_in/past_io 为空
 struct MtPair {
     tokenizer: Tokenizer,
     encoder: Session,
@@ -384,33 +396,48 @@ fn load_pair(dir: &PathBuf, kind: ModelKind) -> Result<Arc<Mutex<MtPair>>, Strin
             .map_err(|e| format!("ORT模型加载失败（{}）: {e}", path.display()))
     };
     let encoder = build(&dir.join("encoder_model_quantized.onnx"))?;
-    let decoder = build(&dir.join("decoder_model_merged_quantized.onnx"))?;
+    // OPUS-MT 用 merged 解码器（KV cache）；NLLB 用非 merged（逐步全量前向）
+    let decoder_file = match kind {
+        ModelKind::OpusMt => "decoder_model_merged_quantized.onnx",
+        ModelKind::Nllb200 => "decoder_model_quantized.onnx",
+    };
+    let decoder = build(&dir.join(decoder_file))?;
 
     let enc_inputs: Vec<String> = encoder.inputs().iter().map(|i| i.name().to_string()).collect();
     let enc_outputs: Vec<String> = encoder.outputs().iter().map(|o| o.name().to_string()).collect();
     let dec_inputs: Vec<String> = decoder.inputs().iter().map(|i| i.name().to_string()).collect();
     let dec_outputs: Vec<String> = decoder.outputs().iter().map(|o| o.name().to_string()).collect();
 
-    // KV cache 必需输入：use_cache_branch 开关 + past_key_values.N.*（与 present.N.* 成对）
-    let cache_flag_in = find_input(&dec_inputs, "use_cache_branch")?;
-    let mut past_in: Vec<String> = dec_inputs
-        .iter()
-        .filter(|n| n.starts_with("past_key_values"))
-        .cloned()
-        .collect();
-    past_in.sort();
-    let mut past_io: Vec<(String, String)> = Vec::with_capacity(past_in.len());
-    for n in past_in {
-        let suffix = &n["past_key_values.".len()..];
-        let out = format!("present.{suffix}");
-        if !dec_outputs.contains(&out) {
-            return Err(format!("解码器缺少 past 对应输出 {out}（模型格式异常）"));
+    // KV cache 必需输入：use_cache_branch 开关 + past_key_values.N.*（与 present.N.* 成对）。
+    // 仅 OPUS-MT(merged) 需要；NLLB(非merged) 无 past 输入，直接全量前向
+    let (cache_flag_in, past_io) = match kind {
+        ModelKind::Nllb200 => (String::new(), Vec::new()),
+        ModelKind::OpusMt => {
+            let cache_flag_in = find_input(&dec_inputs, "use_cache_branch")?;
+            let mut past_in: Vec<String> = dec_inputs
+                .iter()
+                .filter(|n| n.starts_with("past_key_values"))
+                .cloned()
+                .collect();
+            past_in.sort();
+            let mut past_io: Vec<(String, String)> = Vec::with_capacity(past_in.len());
+            for n in past_in {
+                let suffix = &n["past_key_values.".len()..];
+                let out = format!("present.{suffix}");
+                if !dec_outputs.contains(&out) {
+                    return Err(format!("解码器缺少 past 对应输出 {out}（模型格式异常）"));
+                }
+                past_io.push((n, out));
+            }
+            if past_io.is_empty() {
+                return Err(
+                    "解码器没有 past_key_values 输入（非 merged 格式，无法启用 KV cache）"
+                        .to_string(),
+                );
+            }
+            (cache_flag_in, past_io)
         }
-        past_io.push((n, out));
-    }
-    if past_io.is_empty() {
-        return Err("解码器没有 past_key_values 输入（非 merged 格式，无法启用 KV cache）".to_string());
-    }
+    };
     // logits 输出 = 非 present 输出的第一个
     let dec_out_name = dec_outputs
         .iter()
@@ -430,7 +457,18 @@ fn load_pair(dir: &PathBuf, kind: ModelKind) -> Result<Arc<Mutex<MtPair>>, Strin
             .ok_or("编码器没有输出（模型文件异常）")?,
         // Xenova 导出的解码器自回归输入名为 input_ids（非 decoder_input_ids）
         dec_in_ids: find_input(&dec_inputs, "input_ids")?,
-        dec_in_mask: find_input(&dec_inputs, "mask")?,
+        // 非 merged 解码器可能同时有 attention_mask 与 encoder_attention_mask，
+        // cross-attention 必须喂后者：优先匹配带 encoder 的 mask
+        dec_in_mask: if kind == ModelKind::Nllb200 {
+            dec_inputs
+                .iter()
+                .find(|n| n.contains("encoder") && n.contains("mask"))
+                .or_else(|| dec_inputs.iter().find(|n| n.contains("mask")))
+                .cloned()
+                .ok_or("解码器缺少 attention mask 输入（模型文件异常）")?
+        } else {
+            find_input(&dec_inputs, "mask")?
+        },
         dec_in_hidden: find_input(&dec_inputs, "hidden_states")?,
         dec_out: dec_out_name,
         cache_flag_in,
@@ -687,6 +725,55 @@ fn read_logits_and_past(
     ))
 }
 
+/// 解码器前向（非 merged，无 KV cache）：每步喂各束完整已生成序列，
+/// 返回各束最后一步 logits [V]。beam 内各束每步等长（各+1 token），无需 padding
+fn run_decoder_full(
+    pair: &mut MtPair,
+    dec_ids: &[Vec<i64>],
+    enc_hidden: &[f32],
+    enc_len: usize,
+    enc_dim: usize,
+    attn: &[i64],
+) -> Result<Vec<Vec<f32>>, String> {
+    let b = dec_ids.len();
+    let t = dec_ids[0].len();
+    let flat: Vec<i64> = dec_ids.concat();
+    let mut hidden = Vec::with_capacity(b * enc_len * enc_dim);
+    let mut attn_b = Vec::with_capacity(b * enc_len);
+    for _ in 0..b {
+        hidden.extend_from_slice(enc_hidden);
+        attn_b.extend_from_slice(attn);
+    }
+    let dec_in =
+        ort::value::Tensor::from_array((vec![b, t], flat)).map_err(|e| e.to_string())?;
+    let dec_hidden = ort::value::Tensor::from_array((vec![b, enc_len, enc_dim], hidden))
+        .map_err(|e| e.to_string())?;
+    let dec_attn = ort::value::Tensor::from_array((vec![b, enc_len], attn_b))
+        .map_err(|e| e.to_string())?;
+
+    let dec_out = pair.dec_out.clone();
+    let outputs = pair
+        .decoder
+        .run(ort::inputs![
+            pair.dec_in_ids.as_str() => dec_in,
+            pair.dec_in_mask.as_str() => dec_attn,
+            pair.dec_in_hidden.as_str() => dec_hidden,
+        ])
+        .map_err(|e| format!("解码器推理失败: {e}"))?;
+    let (shape, data) = outputs[dec_out.as_str()]
+        .try_extract_tensor::<f32>()
+        .map_err(|e| format!("解码器输出提取失败: {e}"))?;
+    let v = *shape.last().ok_or("logits维度异常")? as usize;
+    // [B, t, V]：各束最后一步
+    let steps = shape.iter().map(|&d| d as usize).product::<usize>() / v / b.max(1);
+    let mut logits = Vec::with_capacity(b);
+    for bi in 0..b {
+        let start = (bi * steps + (steps - 1)) * v;
+        logits.push(data[start..start + v].to_vec());
+    }
+    Ok(logits)
+}
+
 /// 繁→简转换：OPUS-MT en→zh 语料偏繁体，目标语言为中文时统一转简体。
 /// 用 Windows 系统自带 LCMapString（全字表、零维护）；非 Windows 平台原样返回
 #[cfg(target_os = "windows")]
@@ -778,14 +865,19 @@ fn beam_decode(
         .encode(text, false)
         .map_err(|e| format!("分词失败: {e}"))?;
     let mut ids: Vec<i64> = enc.get_ids().iter().map(|&i| i as i64).collect();
-    // NLLB：tokenizer 模板已自动插入 eng_Latn 前缀与 </s> 后缀；
-    // 源语言非英语时把首 token 替换为正确的源语言码
+    // NLLB：encode(add_special_tokens=false) 不应用模板，需显式构造
+    // [源语言码, 正文..., </s>]（此前误假设模板自动插入语言码，导致源首词被
+    // 替换成语言码且序列缺终止符，编码器输入残缺而输出退化）
     if let Some(prefix) = src_prefix {
-        if !ids.is_empty() {
-            ids[0] = prefix as i64;
-        }
+        ids.truncate(MAX_SRC_TOKENS.saturating_sub(2));
+        let mut with_lang = Vec::with_capacity(ids.len() + 2);
+        with_lang.push(prefix as i64);
+        with_lang.extend(ids);
+        with_lang.push(pair.eos_id as i64);
+        ids = with_lang;
+    } else {
+        ids.truncate(MAX_SRC_TOKENS);
     }
-    ids.truncate(MAX_SRC_TOKENS);
     let attn: Vec<i64> = vec![1; ids.len()];
 
     let (hidden, enc_len, enc_dim) = run_encoder(pair, &ids, &attn)?;
@@ -804,25 +896,35 @@ fn beam_decode(
         if beams.is_empty() {
             break;
         }
-        // 首步走全量分支（仅起始token），并取回有效的 cross-attention KV；
+        // NLLB：非 merged 解码器逐步全量前向（无缓存，绕开其 merged 导出的 KV cache 问题）；
+        // OPUS-MT：首步走全量分支（仅起始token）取回有效 cross-attention KV，
         // 之后只喂各束最新token + 上步缓存（encoder 输出为空，忽略）
-        let is_first = dec_past.is_none();
-        let (logits_batch, new_dec) = if is_first {
+        let logits_batch = if pair.kind == ModelKind::Nllb200 {
             let dec_ids: Vec<Vec<i64>> = beams.iter().map(|b| b.tokens.clone()).collect();
-            let (l, nd, ne) = run_decoder_first(pair, &dec_ids, &hidden, enc_len, enc_dim, &attn)?;
-            enc_past = Some(ne);
-            (l, nd)
+            run_decoder_full(pair, &dec_ids, &hidden, enc_len, enc_dim, &attn)?
         } else {
-            let dp = dec_past
-                .take()
-                .ok_or_else(|| "解码缓存状态异常".to_string())?;
-            let ep = enc_past
-                .as_ref()
-                .ok_or_else(|| "解码缓存状态异常".to_string())?;
-            let last: Vec<i64> = beams.iter().map(|b| *b.tokens.last().unwrap()).collect();
-            let (l, nd, _ne_empty) =
-                run_decoder_cached(pair, &last, dp, ep, &hidden, enc_len, enc_dim, &attn)?;
-            (l, nd)
+            let is_first = dec_past.is_none();
+            let logits = if is_first {
+                let dec_ids: Vec<Vec<i64>> = beams.iter().map(|b| b.tokens.clone()).collect();
+                let (l, nd, ne) =
+                    run_decoder_first(pair, &dec_ids, &hidden, enc_len, enc_dim, &attn)?;
+                enc_past = Some(ne);
+                dec_past = Some(nd);
+                l
+            } else {
+                let dp = dec_past
+                    .take()
+                    .ok_or_else(|| "解码缓存状态异常".to_string())?;
+                let ep = enc_past
+                    .as_ref()
+                    .ok_or_else(|| "解码缓存状态异常".to_string())?;
+                let last: Vec<i64> = beams.iter().map(|b| *b.tokens.last().unwrap()).collect();
+                let (l, nd, _ne_empty) =
+                    run_decoder_cached(pair, &last, dp, ep, &hidden, enc_len, enc_dim, &attn)?;
+                dec_past = Some(nd);
+                l
+            };
+            logits
         };
 
         // 每束 log_softmax 后取局部 top-K，再合并全局排序
@@ -872,9 +974,12 @@ fn beam_decode(
                 next_beams.push(Hypo { tokens, logprob: c.score });
             }
         }
-        // 缓存按"谁被保留"重排；encoder 组仅按父束复制（内容恒定），供下一步使用
-        dec_past = Some(new_dec.reordered(&parents));
-        enc_past = Some(enc_past.take().ok_or("解码缓存状态异常")?.reordered(&parents));
+        // 缓存按"谁被保留"重排；encoder 组仅按父束复制（内容恒定），供下一步使用。
+        // NLLB 全量前向无缓存，跳过
+        if pair.kind == ModelKind::OpusMt {
+            dec_past = Some(dec_past.take().ok_or("解码缓存状态异常")?.reordered(&parents));
+            enc_past = Some(enc_past.take().ok_or("解码缓存状态异常")?.reordered(&parents));
+        }
         beams = next_beams;
         if completed.len() >= NUM_BEAMS {
             break;
@@ -897,6 +1002,87 @@ fn beam_decode(
     pair.tokenizer
         .decode(&out_ids, true)
         .map_err(|e| format!("反分词失败: {e}"))
+}
+
+fn count_tokens(pair: &MtPair, text: &str) -> usize {
+    pair.tokenizer
+        .encode(text, false)
+        .map(|e| e.get_ids().len())
+        .unwrap_or(usize::MAX)
+}
+
+/// 取 s 的前 take_chars 个字符，返回字节索引（保证 char boundary）
+fn char_slice_idx(s: &str, take_chars: usize) -> usize {
+    s.char_indices()
+        .nth(take_chars)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len())
+}
+
+/// 长文本按句切分打包：整段 ≤ MAX_SRC_TOKENS 时原样返回单块；
+/// 超出则按句子边界切句（标点保留在句尾），按 token 数打包为 ≤ CHUNK_TOKENS 的块；
+/// 无标点超长单句按字符窗口硬切兜底（每片 ≤ MAX_SRC_TOKENS）
+fn split_text_chunks(pair: &MtPair, text: &str) -> Vec<String> {
+    if count_tokens(pair, text) <= MAX_SRC_TOKENS {
+        return vec![text.to_string()];
+    }
+    // 切句：遇终止标点/换行即断
+    let mut sentences: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for ch in text.chars() {
+        cur.push(ch);
+        if matches!(ch, '\n' | '。' | '！' | '？' | '!' | '?' | '；' | ';' | '…') {
+            sentences.push(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.trim().is_empty() {
+        sentences.push(cur);
+    }
+
+    let mut chunks: Vec<String> = Vec::new();
+    let mut buf = String::new();
+    let mut buf_n = 0usize;
+    for s in sentences {
+        let sn = count_tokens(pair, &s);
+        if sn > CHUNK_TOKENS {
+            // 单句超限：先落盘当前块，再按字符窗口硬切成 ≤MAX_SRC_TOKENS 的片
+            if !buf.is_empty() {
+                chunks.push(std::mem::take(&mut buf));
+                buf_n = 0;
+            }
+            let mut rest = s.as_str();
+            while count_tokens(pair, rest) > MAX_SRC_TOKENS {
+                let total_chars = rest.chars().count();
+                let mut take = total_chars.min(HARD_SLICE_CHARS);
+                // 中文约每字1 token，窗口可能仍超限：逐级减半直到合法（take≥1 保证推进）
+                while take > 1 && count_tokens(pair, &rest[..char_slice_idx(rest, take)]) > MAX_SRC_TOKENS
+                {
+                    take /= 2;
+                }
+                let cut = char_slice_idx(rest, take);
+                chunks.push(rest[..cut].to_string());
+                rest = &rest[cut..];
+            }
+            if !rest.is_empty() {
+                buf = rest.to_string();
+                buf_n = count_tokens(pair, rest);
+            }
+        } else if buf_n + sn > CHUNK_TOKENS && !buf.is_empty() {
+            chunks.push(std::mem::take(&mut buf));
+            buf = s;
+            buf_n = sn;
+        } else {
+            buf.push_str(&s);
+            buf_n += sn;
+        }
+    }
+    if !buf.trim().is_empty() {
+        chunks.push(buf);
+    }
+    if chunks.is_empty() {
+        chunks.push(text.to_string());
+    }
+    chunks
 }
 
 /// 按语言跳依次翻译（模型必须已就绪；纯CPU推理在阻塞线程执行）
@@ -943,13 +1129,208 @@ fn translate_blocking(
             ModelKind::OpusMt => (vec![p.pad_id as i64], None, MAX_NEW_TOKENS),
         };
 
-        cur = beam_decode(&mut p, &cur, &start_tokens, src_prefix, max_new)?;
+        // 长文本按句分块，逐块翻译后拼接（目标为英语时块间补空格）
+        let chunks = split_text_chunks(&p, &cur);
+        let joiner = if *t == "en" { " " } else { "" };
+        let mut outs: Vec<String> = Vec::with_capacity(chunks.len());
+        for ch in &chunks {
+            outs.push(beam_decode(&mut p, ch, &start_tokens, src_prefix, max_new)?);
+        }
+        cur = outs.join(joiner);
     }
     // OPUS-MT en→zh 语料偏繁体：目标为中文时统一转简体（Windows 系统级转换）
     if hops.last().map(|(_, t)| *t) == Some("zh") {
         cur = to_simplified(&cur);
     }
     Ok(cur)
+}
+
+// ============ 模型管理 ============
+
+/// 已安装模型信息（设置页模型管理列表）
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OfflineModelInfo {
+    /// HuggingFace 仓库名（删除接口参数），如 "Xenova/opus-mt-ja-en"
+    pub repo: String,
+    /// 展示名：语言方向或 NLLB
+    pub label: String,
+    /// "opus-mt" | "nllb-200"
+    pub model: String,
+    /// 目录占用字节数
+    pub size_bytes: u64,
+    /// 三件套（tokenizer+encoder+decoder）是否齐全（下载中断会有残缺目录）
+    pub complete: bool,
+}
+
+fn decoder_file_name(kind: ModelKind) -> &'static str {
+    match kind {
+        ModelKind::OpusMt => "decoder_model_merged_quantized.onnx",
+        ModelKind::Nllb200 => "decoder_model_quantized.onnx",
+    }
+}
+
+fn dir_size(path: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                total += dir_size(&p);
+            } else if let Ok(m) = std::fs::metadata(&p) {
+                total += m.len();
+            }
+        }
+    }
+    total
+}
+
+/// 扫描模型根目录，列出已安装的模型（NLLB + OPUS-MT 语言对）
+pub fn list_installed_models() -> Vec<OfflineModelInfo> {
+    let mut out = Vec::new();
+    let entries = match std::fs::read_dir(models_root()) {
+        Ok(e) => e,
+        Err(_) => return out,
+    };
+    for e in entries.flatten() {
+        let path = e.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let dir_name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let (repo, model) = if dir_name == NLLB_REPO.replace('/', "_") {
+            (NLLB_REPO.to_string(), "nllb-200")
+        } else if let Some(pair) = dir_name.strip_prefix("Xenova_opus-mt-") {
+            (format!("Xenova/opus-mt-{pair}"), "opus-mt")
+        } else {
+            continue; // 非模型目录（下载临时残留等）
+        };
+        let kind = if model == "nllb-200" {
+            ModelKind::Nllb200
+        } else {
+            ModelKind::OpusMt
+        };
+        let files = [
+            path.join("tokenizer.json"),
+            path.join("encoder_model_quantized.onnx"),
+            path.join(decoder_file_name(kind)),
+        ];
+        let complete = files.iter().all(|f| {
+            f.exists() && std::fs::metadata(f).map(|m| m.len() > 0).unwrap_or(false)
+        });
+        let label = if model == "nllb-200" {
+            "NLLB-200（200种语言单模型）".to_string()
+        } else {
+            let pair = repo.rsplit('-').take(2).collect::<Vec<_>>();
+            let (t, f) = (pair[0], pair[1]); // rsplit 逆序：[en, ja] → ja→en
+            format!("{} → {}", lang_name(f), lang_name(t))
+        };
+        out.push(OfflineModelInfo {
+            repo,
+            label,
+            model: model.to_string(),
+            size_bytes: dir_size(&path),
+            complete,
+        });
+    }
+    out.sort_by(|a, b| a.repo.cmp(&b.repo));
+    out
+}
+
+/// 进程内模型缓存移除（释放 ONNX 会话的文件句柄；在途 Arc 引用由最后持有者释放）
+fn evict_cached_pair(key: &str) {
+    if let Ok(mut guard) = PAIRS.lock() {
+        if let Some(map) = guard.as_mut() {
+            map.remove(key);
+        }
+    }
+}
+
+/// 删除已安装模型（目录整体删除，含下载中断残留）。Windows 上若翻译进行中
+/// 会话仍持句柄，删除会失败——先驱逐缓存再删，失败时提示稍后重试
+pub fn delete_installed_model(repo: &str) -> Result<(), String> {
+    evict_cached_pair(repo);
+    let dir = models_root().join(repo.replace('/', "_"));
+    if !dir.exists() {
+        return Ok(());
+    }
+    std::fs::remove_dir_all(&dir)
+        .map_err(|e| format!("删除失败（模型可能正被翻译任务占用，请稍后重试）: {e}"))
+}
+
+/// 当前方向所需模型是否已下载齐全（预热只加载已就绪模型，绝不触发下载——
+/// 首次使用仍走翻译时的按需下载提示流程）
+fn models_ready_for(model: &str, hops: &[(&str, &str)]) -> bool {
+    let check = |dir: PathBuf, kind: ModelKind| {
+        [
+            dir.join("tokenizer.json"),
+            dir.join("encoder_model_quantized.onnx"),
+            dir.join(decoder_file_name(kind)),
+        ]
+        .iter()
+        .all(|f| f.exists() && std::fs::metadata(f).map(|m| m.len() > 0).unwrap_or(false))
+    };
+    if model == "nllb-200" {
+        return check(models_root().join(NLLB_REPO.replace('/', "_")), ModelKind::Nllb200);
+    }
+    hops.iter().all(|(f, t)| {
+        pair_repo(f, t)
+            .map(|repo| check(models_root().join(repo.replace('/', "_")), ModelKind::OpusMt))
+            .unwrap_or(false)
+    })
+}
+
+/// 启动预热：把当前默认方向已下载的模型会话提前加载进进程缓存
+/// （OPUS-MT 会话加载 1-3 秒，懒加载时首次框选翻译明显卡顿）。
+/// 由 main.rs 启动后台线程延迟调用；失败静默，不影响正常使用
+pub async fn warmup() {
+    let settings = crate::system::load_settings();
+    if settings.offline_engine == "disabled" {
+        return;
+    }
+    let model = settings.offline_model.clone();
+    let direction = settings.default_translation_direction.clone();
+    let (from, to) = direction
+        .split_once("->")
+        .map(|(f, t)| (f.to_string(), t.to_string()))
+        .unwrap_or_else(|| ("en".to_string(), "zh".to_string()));
+    let from = if from == "auto" { "en".to_string() } else { from };
+
+    let hops: Vec<(&'static str, &'static str)> = if model == "nllb-200" {
+        vec![(boxed_pair(&from), boxed_pair(&to))]
+    } else {
+        route(&from, &to)
+    };
+    if hops.is_empty() || !models_ready_for(&model, &hops) {
+        return; // 未下载/方向不支持：保持懒加载语义
+    }
+
+    let started = std::time::Instant::now();
+    let result: Result<usize, String> = (|| {
+        if model == "nllb-200" {
+            let dir = models_root().join(NLLB_REPO.replace('/', "_"));
+            get_pair_cached(NLLB_REPO, &dir, ModelKind::Nllb200)?;
+            return Ok(1);
+        }
+        let mut n = 0;
+        for (f, t) in &hops {
+            let repo = pair_repo(f, t).ok_or("无对应本地模型")?;
+            let dir = models_root().join(repo.replace('/', "_"));
+            get_pair_cached(repo, &dir, ModelKind::OpusMt)?;
+            n += 1;
+        }
+        Ok(n)
+    })();
+    match result {
+        Ok(n) => eprintln!(
+            "[warmup] 离线模型预热完成（{n}个会话，{:?}）",
+            started.elapsed()
+        ),
+        Err(e) => eprintln!("[warmup] 离线模型预热跳过: {e}"),
+    }
 }
 
 // ============ 引擎实现 ============
@@ -1072,6 +1453,18 @@ mod tests {
         assert!(route("xx", "yy").is_empty());
     }
 
+    #[test]
+    fn test_char_slice_idx() {
+        let s = "你好世界hello";
+        // 返回值必须落在 char boundary 上
+        assert_eq!(&s[..char_slice_idx(s, 1)], "你");
+        assert_eq!(&s[..char_slice_idx(s, 4)], "你好世界");
+        assert_eq!(&s[..char_slice_idx(s, 6)], "你好世界he");
+        // 超过字符数/空串：取整段
+        assert_eq!(char_slice_idx(s, 100), s.len());
+        assert_eq!(char_slice_idx("", 5), 0);
+    }
+
     /// 端到端：真实下载 en→zh 模型（约100MB，首次运行耗时几分钟）并翻译
     #[tokio::test]
     #[ignore]
@@ -1099,21 +1492,6 @@ mod tests {
         assert!(out.to_lowercase().contains("weather") || out.to_lowercase().contains("park"));
     }
 
-    /// 端到端：NLLB-200 直达翻译（下载约600MB，首次运行耗时较长）
-    #[tokio::test]
-    #[ignore]
-    async fn test_offline_mt_nllb() {
-        std::env::set_var("SMART_TRANSLATOR_MODELS_DIR", "target/mt-models");
-        let engine = OfflineMtEngine::with_model("nllb-200");
-        let t0 = std::time::Instant::now();
-        let out = engine
-            .translate("Hello world, this is a test.", "en", "zh")
-            .await
-            .unwrap();
-        println!("[offline-mt] nllb en→zh first {:?}: {out}", t0.elapsed());
-        assert!(out.chars().any(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c)));
-    }
-
     /// 端到端：ja→zh 经英语中转（验证 pivot 与 ja-en 模型下载）
     #[tokio::test]
     #[ignore]
@@ -1123,5 +1501,100 @@ mod tests {
         let out = engine.translate("私は猫が好きです。", "ja", "zh").await.unwrap();
         println!("[offline-mt] ja→zh (pivot): {out}");
         assert!(out.chars().any(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c)));
+    }
+
+    /// 端到端：长文本按句分块翻译（>500 token 自动切块拼接，不截断丢内容）
+    #[tokio::test]
+    #[ignore]
+    async fn test_offline_mt_long_text() {
+        std::env::set_var("SMART_TRANSLATOR_MODELS_DIR", "target/mt-models");
+        let engine = OfflineMtEngine::new();
+        // 80 句 ≈ 550+ token，超过 MAX_SRC_TOKENS(500)，应分块翻译
+        let text = "The weather is nice today. ".repeat(80);
+        let out = engine.translate(&text, "en", "zh").await.unwrap();
+        println!("[offline-mt] long text output len(chars)={}", out.chars().count());
+        // 若仍按旧逻辑截断为单块，输出长度会远小于此
+        assert!(out.chars().count() > 300);
+    }
+
+    /// 诊断：NLLB 非 merged 解码器 introspect + 单 beam 贪心逐步预测
+    #[tokio::test]
+    #[ignore]
+    async fn test_nllb_debug_greedy() {
+        std::env::set_var("SMART_TRANSLATOR_MODELS_DIR", "target/mt-models");
+        ensure_nllb_model().await.unwrap();
+        let dir = models_root().join(NLLB_REPO.replace('/', "_"));
+        let pair = get_pair_cached(NLLB_REPO, &dir, ModelKind::Nllb200).unwrap();
+        let mut p = pair.lock().unwrap();
+        let names: Vec<String> = p.decoder.inputs().iter().map(|i| i.name().to_string()).collect();
+        println!("decoder inputs: {names:?}");
+        let out_names: Vec<String> = p.decoder.outputs().iter().map(|o| o.name().to_string()).collect();
+        println!("decoder outputs: {out_names:?}");
+        println!("pad_id={} eos_id={}", p.pad_id, p.eos_id);
+
+        let tgt = p.tokenizer.token_to_id("zho_Hans").unwrap();
+        let src = p.tokenizer.token_to_id("eng_Latn").unwrap();
+        let text = "The weather is nice today.";
+        let enc = p.tokenizer.encode(text, false).unwrap();
+        let raw: Vec<i64> = enc.get_ids().iter().map(|&i| i as i64).collect();
+        println!("raw encode 首4 = {:?} (无模板,首token是正文)", &raw[..4.min(raw.len())]);
+        // 与 beam_decode 一致：显式构造 [源语言码, 正文..., </s>]
+        let mut ids = vec![src as i64];
+        ids.extend(raw);
+        ids.push(p.eos_id as i64);
+        let attn = vec![1i64; ids.len()];
+        let (hidden, l, d) = run_encoder(&mut p, &ids, &attn).unwrap();
+        let mut dec = vec![p.eos_id as i64, tgt as i64];
+        for step in 0..12 {
+            let logits = run_decoder_full(&mut p, &[dec.clone()], &hidden, l, d, &attn).unwrap();
+            let lv = &logits[0];
+            let mut idx: Vec<u32> = (0..lv.len() as u32).collect();
+            idx.sort_unstable_by(|a, b| {
+                lv[*b as usize].partial_cmp(&lv[*a as usize]).unwrap()
+            });
+            let tops: Vec<String> = idx
+                .iter()
+                .take(3)
+                .map(|&t| {
+                    format!(
+                        "{}({})",
+                        p.tokenizer.id_to_token(t).unwrap_or_default(),
+                        lv[t as usize]
+                    )
+                })
+                .collect();
+            println!("step {step}: top3 = {tops:?}");
+            dec.push(idx[0] as i64);
+            if idx[0] == p.eos_id {
+                break;
+            }
+        }
+        let out_ids: Vec<u32> = dec[2..].iter().map(|&t| t as u32).collect();
+        println!("greedy: {:?}", p.tokenizer.decode(&out_ids, true));
+    }
+
+    /// 端到端：NLLB-200 非 merged 解码器（验证退化修复后的真实翻译质量）
+    #[tokio::test]
+    #[ignore]
+    async fn test_offline_mt_nllb_sentence() {
+        std::env::set_var("SMART_TRANSLATOR_MODELS_DIR", "target/mt-models");
+        let engine = OfflineMtEngine::with_model("nllb-200");
+        let out = engine
+            .translate("The weather is nice today.", "en", "zh")
+            .await
+            .unwrap();
+        println!("[offline-mt] nllb en→zh: {out}");
+        // 修复前该句第4步起退化为英文循环；修复后应输出纯中文短句
+        let han = out.chars().filter(|c| ('\u{4E00}'..='\u{9FFF}').contains(c)).count();
+        assert!(han >= 3, "NLLB 输出退化（无足够中文字符）: {out}");
+        assert!(!out.contains("The weather"), "NLLB 输出回退英文原文: {out}");
+        // 反向：zh→en（验证源语言码 zho_Hans 前缀的显式构造）
+        let out2 = engine.translate("今天天气很好。", "zh", "en").await.unwrap();
+        println!("[offline-mt] nllb zh→en: {out2}");
+        let lower = out2.to_lowercase();
+        assert!(
+            lower.contains("weather") || lower.contains("nice") || lower.contains("good"),
+            "NLLB zh→en 输出异常: {out2}"
+        );
     }
 }

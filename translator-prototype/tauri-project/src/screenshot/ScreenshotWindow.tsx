@@ -45,11 +45,13 @@ interface ShotSettings {
   screenshot_components_disabled: string[]; // 禁用集合
   overlay_mode: string; // dark=黑底白字 light=白底黑字 none=无背景
   overlay_expand: boolean; // 严格对齐模式
+  screenshot_freeze_frame: boolean; // 冻结画面：触发瞬间固定屏幕快照
 }
 
 const DEFAULT_SETTINGS: ShotSettings = {
   screenshot_components: ["engine", "lang", "copy", "close", "settings"],
   screenshot_components_disabled: [],
+  screenshot_freeze_frame: true,
   overlay_mode: "dark",
   overlay_expand: false,
 };
@@ -235,6 +237,8 @@ const ScreenshotWindow: React.FC = () => {
   const [engineIdx, setEngineIdx] = useState(0);
   const [engineMenuOpen, setEngineMenuOpen] = useState(false);
   const [settings, setSettings] = useState<ShotSettings>(DEFAULT_SETTINGS);
+  // 冻结画面：触发瞬间后端预截的全屏快照 dataURL（实时模式/截屏失败为 null 不渲染）
+  const [snapshotUrl, setSnapshotUrl] = useState<string | null>(null);
 
   // Ctrl+拖动 / Ctrl+双击累积的文字片段（多段，复制时按操作顺序合并）；
   // whole=双击整段拾取（可再次Ctrl+双击取消）；range=拾取时的选区快照，
@@ -247,8 +251,6 @@ const ScreenshotWindow: React.FC = () => {
   const [srcLang, setSrcLang] = useState("auto");
   const [dstLang, setDstLang] = useState("zh");
   const [langMenu, setLangMenu] = useState<null | "src" | "dst">(null);
-  // 弹层尺寸 = 触发按钮宽×3、高×3（openMenuBox 实测后写入）
-  const [menuBox, setMenuBox] = useState({ w: 240, h: 96 });
   // 本次按下的拖拽是否带Ctrl（mousedown时快照，避免先松Ctrl再松鼠标导致误清空）
   const dragWasCtrl = useRef(false);
   // 截图流水线代号：退出/重新触发时自增，使进行中的异步流程作废（防止ESC后窗口弹回）
@@ -279,12 +281,6 @@ const ScreenshotWindow: React.FC = () => {
           await win.setPosition(
             new PhysicalPosition(monitor.position.x, monitor.position.y)
           );
-          // 首帧合成后预热：后端将窗口移出屏幕外显示一次（初始化合成管线，桌面无闪烁）
-          requestAnimationFrame(() =>
-            requestAnimationFrame(() => {
-              invoke("preheat_screenshot").catch(() => {});
-            })
-          );
         }
       } catch (e) {
         console.error("初始化截图窗口失败:", e);
@@ -302,6 +298,7 @@ const ScreenshotWindow: React.FC = () => {
             s?.screenshot_components_disabled ?? [],
           overlay_mode: s?.overlay_mode || DEFAULT_SETTINGS.overlay_mode,
           overlay_expand: !!s?.overlay_expand,
+          screenshot_freeze_frame: s?.screenshot_freeze_frame ?? true,
         });
         const dir = String(s?.default_translation_direction || "auto->zh").split("->");
         setSrcLang(dir[0] || "auto");
@@ -331,6 +328,7 @@ const ScreenshotWindow: React.FC = () => {
             s?.screenshot_components_disabled ?? [],
           overlay_mode: s?.overlay_mode || DEFAULT_SETTINGS.overlay_mode,
           overlay_expand: !!s?.overlay_expand,
+          screenshot_freeze_frame: s?.screenshot_freeze_frame ?? true,
         });
         const dir = String(s?.default_translation_direction || "auto->zh").split("->");
         setSrcLang(dir[0] || "auto");
@@ -414,6 +412,27 @@ const ScreenshotWindow: React.FC = () => {
     return () => clearInterval(t);
   }, [phase]);
 
+  /** 移出屏幕待命：替代 hide——全屏置顶窗口的显隐会强制桌面整体重绘（桌面图标闪烁），
+   *  移动窗口由 DWM 平滑处理、不波及桌面。穿透恢复失败也有"屏幕外不可点击"兜底 */
+  const moveOffScreen = useCallback(async () => {
+    try {
+      await win.setIgnoreCursorEvents(true);
+    } catch {}
+    try {
+      await win.setPosition(new PhysicalPosition(-32000, -32000));
+    } catch {}
+  }, [win]);
+
+  /** 回归屏幕并取焦点（框选/截图/结果阶段窗口必须可见可交互） */
+  const moveOnScreen = useCallback(async () => {
+    try {
+      await win.setPosition(
+        new PhysicalPosition(monitorPos.current.x, monitorPos.current.y)
+      );
+      await win.setFocus();
+    } catch {}
+  }, [win]);
+
   /** 重置到框选模式（退出/重新触发共用） */
   const resetState = useCallback(() => {
     runIdRef.current += 1; // 作废进行中的截图流水线
@@ -431,7 +450,14 @@ const ScreenshotWindow: React.FC = () => {
     setLangMenu(null);
     groupDragged.current = false;
     setSelection({ x: 0, y: 0, width: 0, height: 0 });
-  }, []);
+    // 冻结画面：取触发瞬间后端预截的全屏快照（实时模式/截屏失败返回 null 不渲染）。
+    // 后端返回 Result<Option<String>> → IPC 序列化为裸字符串或 null（非对象）
+    void invoke<string | null>("take_snapshot")
+      .then((img) => setSnapshotUrl(img ?? null))
+      .catch(() => setSnapshotUrl(null));
+    // 触发时窗口可能停在屏幕外待命位：回归屏幕（Rust 侧已 show + 置前台）
+    void moveOnScreen();
+  }, [moveOnScreen]);
 
   // 托盘菜单/全局快捷键触发截图：Rust侧已显示窗口，这里重置到框选模式
   useEffect(() => {
@@ -449,19 +475,15 @@ const ScreenshotWindow: React.FC = () => {
     };
   }, []);
 
-  /** 退出截图翻译：隐藏窗口待命（隐藏态不可能拦截任何输入——穿透恢复失败也有兜底） */
+  /** 退出截图翻译：移出屏幕待命（屏幕外不可点击不可见——穿透恢复失败也有兜底） */
   const exit = useCallback(async () => {
     runIdRef.current += 1;
     setPhase("idle");
     setDragging(false);
     setSelection({ x: 0, y: 0, width: 0, height: 0 });
-    try {
-      await win.setIgnoreCursorEvents(true);
-    } catch {}
-    try {
-      await win.hide();
-    } catch {}
-  }, [win]);
+    setSnapshotUrl(null);
+    await moveOffScreen();
+  }, [moveOffScreen]);
 
   // ESC 兜底双保险：
   // 1) 后端监视线程检测 ESC 物理键（与焦点/NOACTIVATE 无关）后推送 exit-screenshot
@@ -588,26 +610,39 @@ const ScreenshotWindow: React.FC = () => {
     const physH = Math.round(sel.height * sf);
 
     try {
-      // 隐藏窗口，避免截到自身
-      await win.hide();
-      await new Promise((r) => setTimeout(r, 250));
-      if (stale()) return;
+      // 冻结画面：窗口全程不动，直接从触发瞬间的快照裁剪选区（动态内容所见即所得）；
+      // 实时画面：移出屏幕后现场截选区（旧行为，等移动生效需 150ms）
+      if (settings.screenshot_freeze_frame) {
+        await invoke("crop_snapshot_region", {
+          x: physX,
+          y: physY,
+          width: physW,
+          height: physH,
+        });
+        if (stale()) return;
+        // 冻结画面撤掉（去翻译一闪而过），此后显示真实屏幕 + 处理面板
+        setSnapshotUrl(null);
+      } else {
+        // 移出屏幕（而非 hide），避免截到自身且不触发桌面重绘
+        await moveOffScreen();
+        await new Promise((r) => setTimeout(r, 150));
+        if (stale()) return;
 
-      // 第一步：纯截图（百毫秒级，后端暂存像素）
-      await invoke("capture_region_store", {
-        x: physX,
-        y: physY,
-        width: physW,
-        height: physH,
-      });
-      if (stale()) return;
+        // 纯截图（后端暂存像素；冻结快照不可用时后端也兜底现场截）
+        await invoke("crop_snapshot_region", {
+          x: physX,
+          y: physY,
+          width: physW,
+          height: physH,
+        });
+        if (stale()) return;
 
-      // 立即恢复UI：选区边框+加载面板在OCR/翻译期间全程可见
-      // （OCR与翻译才是耗时大头，此前窗口全程隐藏导致纯空白等待）
-      await win.show();
-      await win.setFocus();
+        // 立即回归屏幕：选区边框+加载面板在OCR/翻译期间全程可见
+        // （OCR与翻译才是耗时大头，此前窗口全程隐藏导致纯空白等待）
+        await moveOnScreen();
+      }
 
-      // 第二步：OCR（较慢，但面板已可见）
+      // OCR（较慢，但面板已可见）
       const ocr = await invoke<{
         lines: OcrLineInfo[];
         language: string;
@@ -627,8 +662,7 @@ const ScreenshotWindow: React.FC = () => {
         setNoText(true);
         setBlocks([]);
         setPhase("result");
-        await win.show();
-        await win.setFocus();
+        await moveOnScreen();
         return;
       }
 
@@ -676,8 +710,7 @@ const ScreenshotWindow: React.FC = () => {
       setOverlayVisible(true);
       groupDragged.current = false;
       setPhase("result");
-      await win.show();
-      await win.setFocus();
+      await moveOnScreen();
     } catch (e: any) {
       if (stale()) return; // 已退出：不再弹窗显示过期报错
       // 报错信息显示在框选区域内（红字居中），菜单栏保持可用（可切换引擎重试）
@@ -686,8 +719,7 @@ const ScreenshotWindow: React.FC = () => {
       setNoText(false);
       setPhase("result");
       try {
-        await win.show();
-        await win.setFocus();
+        await moveOnScreen();
       } catch {}
     }
   };
@@ -786,19 +818,9 @@ const ScreenshotWindow: React.FC = () => {
     await retranslate(engines[idx]?.name ?? null, srcLang, dstLang);
   };
 
-  /** 弹层尺寸 = 触发元素宽×3、高×3（统一观感），并做视口钳制 */
-  const openMenuBox = (el: HTMLElement) => {
-    const r = el.getBoundingClientRect();
-    setMenuBox({
-      w: Math.min(Math.max(r.width * 3, 120), window.innerWidth - 40),
-      h: Math.min(r.height * 3, window.innerHeight - 80),
-    });
-  };
-
   /** 点击引擎按钮：展开引擎菜单 */
-  const toggleEngineMenu = (el: HTMLElement) => {
+  const toggleEngineMenu = () => {
     setLangMenu(null);
-    openMenuBox(el);
     if (engineMenuOpen) {
       setEngineMenuOpen(false);
       return;
@@ -817,9 +839,8 @@ const ScreenshotWindow: React.FC = () => {
   };
 
   /** 点击原/译语言按钮：展开对应语言菜单 */
-  const toggleLangMenu = (which: "src" | "dst", el: HTMLElement) => {
+  const toggleLangMenu = (which: "src" | "dst") => {
     setEngineMenuOpen(false);
-    openMenuBox(el);
     setLangMenu((v) => (v === which ? null : which));
   };
 
@@ -892,14 +913,32 @@ const ScreenshotWindow: React.FC = () => {
   });
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
-      const parts = reverseKeyRef.current.split("+").map((x) => x.trim().toLowerCase());
-      const key = parts[parts.length - 1];
-      if (
-        (parts.includes("ctrl") && e.ctrlKey || !parts.includes("ctrl")) &&
-        (parts.includes("alt") && e.altKey || !parts.includes("alt")) &&
-        (parts.includes("shift") && e.shiftKey || !parts.includes("shift")) &&
-        e.key.toLowerCase() === key
-      ) {
+      const raw = reverseKeyRef.current;
+      if (!raw || raw.toLowerCase() === "none") return;
+      const parts = raw.split("+").map((x) => x.trim());
+      const key = parts[parts.length - 1].toLowerCase();
+      const mods = parts.slice(0, -1).map((x) => x.toLowerCase());
+      // 修饰键匹配：LCtrl/RCtrl 等精确到物理侧别（e.code），不带前缀双侧皆可；
+      // 未要求的修饰键必须未按下（与录入语义一致）
+      const modMatch =
+        (mods.includes("lctrl") ? e.code === "ControlLeft"
+          : mods.includes("rctrl") ? e.code === "ControlRight"
+          : mods.includes("ctrl") ? e.ctrlKey
+          : !e.ctrlKey) &&
+        (mods.includes("lalt") ? e.code === "AltLeft"
+          : mods.includes("ralt") ? e.code === "AltRight"
+          : mods.includes("alt") ? e.altKey
+          : !e.altKey) &&
+        (mods.includes("lshift") ? e.code === "ShiftLeft"
+          : mods.includes("rshift") ? e.code === "ShiftRight"
+          : mods.includes("shift") ? e.shiftKey
+          : !e.shiftKey) &&
+        (mods.includes("lwin") ? e.code === "MetaLeft"
+          : mods.includes("rwin") ? e.code === "MetaRight"
+          : mods.includes("win") || mods.includes("meta") || mods.includes("super")
+            ? e.metaKey
+          : !e.metaKey);
+      if (modMatch && e.key.toLowerCase() === key) {
         e.preventDefault();
         applyLangRef.current(langPairRef.current.dst, langPairRef.current.src);
       }
@@ -961,13 +1000,25 @@ const ScreenshotWindow: React.FC = () => {
   return (
     <div
       className={`screenshot-root ${
-        phase === "result" && ctrlHeld ? "ctrl-mode" : ""
-      }`}
+        phase === "select" ? "cross-mode" : ""
+      } ${phase === "result" && ctrlHeld ? "ctrl-mode" : ""}`}
       onMouseDown={handleRootMouseDown}
       onMouseMove={handleRootMouseMove}
       onMouseUp={handleRootMouseUp}
       onContextMenu={handleContextMenu}
     >
+      {/* 冻结画面：触发瞬间的全屏快照铺底（框选的是静态图，动态内容所见即所得）；
+        加载失败时回退实时画面 */}
+      {phase === "select" && snapshotUrl && (
+        <img
+          className="freeze-snapshot"
+          src={snapshotUrl}
+          alt=""
+          draggable={false}
+          onError={() => setSnapshotUrl(null)}
+        />
+      )}
+
       {/* 选择/处理阶段：暗幕 + 提示（idle 待命态不渲染任何内容） */}
       {(phase === "select" || phase === "processing") && (
         <div className="dim-mask">
@@ -1182,92 +1233,92 @@ const ScreenshotWindow: React.FC = () => {
             if (comp === "lang")
               return (
             <div key={comp} className="lang-pair" onMouseDown={(e) => e.stopPropagation()}>
-              <button
-                className="group-item engine"
-                onClick={(e) => toggleLangMenu("src", e.currentTarget)}
-                title="选择原文语言（Ctrl+Alt+B 反转原/译）"
-              >
-                {langName(srcLang)}
-              </button>
+              <span className="chip-anchor">
+                <button
+                  className={`group-item engine ${
+                    langMenu === "src" ? "chip-expanded" : ""
+                  }`}
+                  onClick={() => toggleLangMenu("src")}
+                  title="选择原文语言（Ctrl+Alt+B 反转原/译）"
+                >
+                  {langName(srcLang)}
+                </button>
+                {langMenu === "src" && (
+                  <div
+                    className="chip-pop"
+                      onMouseDown={(e) => e.stopPropagation()}
+                  >
+                    {LANGUAGES.map((l) => (
+                      <button
+                        key={`s-${l.code}`}
+                        className={`chip-pop-item ${srcLang === l.code ? "active" : ""}`}
+                        onClick={() => handleLangSelect("src", l.code)}
+                      >
+                        {l.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </span>
               <span className="lang-arrow">→</span>
-              <button
-                className="group-item engine"
-                onClick={(e) => toggleLangMenu("dst", e.currentTarget)}
-                title="选择译文语言（Ctrl+Alt+B 反转原/译）"
-              >
-                {langName(dstLang)}
-              </button>
-              {langMenu === "src" && (
-                <div
-                  className="engine-menu"
-                  style={{ width: menuBox.w, height: menuBox.h }}
+              <span className="chip-anchor">
+                <button
+                  className={`group-item engine ${
+                    langMenu === "dst" ? "chip-expanded" : ""
+                  }`}
+                  onClick={() => toggleLangMenu("dst")}
+                  title="选择译文语言（Ctrl+Alt+B 反转原/译）"
                 >
-                  <div className="lang-section">原文</div>
-                  {LANGUAGES.map((l) => (
-                    <button
-                      key={`s-${l.code}`}
-                      className={`engine-menu-item ${srcLang === l.code ? "active" : ""}`}
-                      onClick={() => handleLangSelect("src", l.code)}
-                    >
-                      <span className="engine-name">{l.name}</span>
-                      {srcLang === l.code && <span className="engine-check">✓</span>}
-                    </button>
-                  ))}
-                </div>
-              )}
-              {langMenu === "dst" && (
-                <div
-                  className="engine-menu"
-                  style={{ width: menuBox.w, height: menuBox.h }}
-                >
-                  <div className="lang-section">译文</div>
-                  {LANGUAGES.filter((l) => l.code !== "auto").map((l) => (
-                    <button
-                      key={`d-${l.code}`}
-                      className={`engine-menu-item ${dstLang === l.code ? "active" : ""}`}
-                      onClick={() => handleLangSelect("dst", l.code)}
-                    >
-                      <span className="engine-name">{l.name}</span>
-                      {dstLang === l.code && <span className="engine-check">✓</span>}
-                    </button>
-                  ))}
-                </div>
-              )}
+                  {langName(dstLang)}
+                </button>
+                {langMenu === "dst" && (
+                  <div
+                    className="chip-pop"
+                      onMouseDown={(e) => e.stopPropagation()}
+                  >
+                    {LANGUAGES.filter((l) => l.code !== "auto").map((l) => (
+                      <button
+                        key={`d-${l.code}`}
+                        className={`chip-pop-item ${dstLang === l.code ? "active" : ""}`}
+                        onClick={() => handleLangSelect("dst", l.code)}
+                      >
+                        {l.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </span>
             </div>
               );
             if (comp === "engine")
               return (
             <div key={comp} className="engine-wrap">
               <button
-                className="group-item engine"
+                className={`group-item engine ${
+                  engineMenuOpen ? "chip-expanded" : ""
+                }`}
                 onMouseDown={(e) => e.stopPropagation()}
-                onClick={(e) => toggleEngineMenu(e.currentTarget)}
+                onClick={() => toggleEngineMenu()}
                 title="选择翻译引擎并刷新翻译"
               >
                 {retranslating ? "…" : engines[engineIdx]?.name || "选择引擎"}
               </button>
               {engineMenuOpen && (
                 <div
-                  className="engine-menu"
-                  style={{ width: menuBox.w, height: menuBox.h }}
+                  className="chip-pop"
                   onMouseDown={(e) => e.stopPropagation()}
                 >
                   {engines.length === 0 && (
-                    <div className="engine-menu-empty">
-                      无可用引擎（请到设置填写API密钥）
-                    </div>
+                    <div className="chip-pop-empty">无可用引擎（请到设置填写API密钥）</div>
                   )}
                   {engines.map((e, i) => (
                     <button
                       key={e.name}
-                      className={`engine-menu-item ${
-                        i === engineIdx ? "active" : ""
-                      }`}
-                      onMouseDown={(e) => e.stopPropagation()}
+                      className={`chip-pop-item ${i === engineIdx ? "active" : ""}`}
+                      onMouseDown={(ev) => ev.stopPropagation()}
                       onClick={() => selectEngine(i)}
                     >
-                      <span className="engine-name">{e.name}</span>
-                      {i === engineIdx && <span className="engine-check">✓</span>}
+                      {e.name}
                     </button>
                   ))}
                 </div>

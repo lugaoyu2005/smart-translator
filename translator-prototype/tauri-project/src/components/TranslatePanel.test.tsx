@@ -3,9 +3,20 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import TranslatePanel from "./TranslatePanel";
 
 // 黑盒/集成测试：把 @tauri-apps 后端整体 mock 掉，组件当黑盒测
-const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
+const { invokeMock, eventListeners } = vi.hoisted(() => ({
+  invokeMock: vi.fn(),
+  eventListeners: {} as Record<string, (e: { payload?: unknown }) => void>,
+}));
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
+}));
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn((event: string, handler: (e: { payload?: unknown }) => void) => {
+    eventListeners[event] = handler;
+    return Promise.resolve(() => {
+      delete eventListeners[event];
+    });
+  }),
 }));
 
 const LANGS = [
@@ -171,6 +182,17 @@ describe("TranslatePanel（翻译测试页）", () => {
     });
     render(<TranslatePanel />);
     expect(await screen.findByText("无可用引擎")).toBeInTheDocument();
+  });
+
+  it("可用性: offline-mt-status 事件 → 显示离线模型进度行", async () => {
+    render(<TranslatePanel />);
+    expect(await screen.findByText("离线翻译")).toBeInTheDocument();
+    eventListeners["offline-mt-status"]?.({
+      payload: "正在下载模型 42%（34MB/80MB）",
+    });
+    expect(
+      await screen.findByText("正在下载模型 42%（34MB/80MB）")
+    ).toBeInTheDocument();
   });
 });
 

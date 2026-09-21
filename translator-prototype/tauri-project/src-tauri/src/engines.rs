@@ -1,7 +1,8 @@
 //! 翻译引擎框架：统一管理离线/在线多引擎
 //! - 引擎抽象：trait TranslationEngine
-//! - 具体引擎：百度翻译、有道智云、Marian离线（后续接入）
-//! - 管理器：根据网络状态与可用性自动选择引擎
+//! - 具体引擎：百度翻译、有道智云、小牛、DeepL、腾讯云、阿里云、自定义OpenAI兼容AI、
+//!   离线翻译（OPUS-MT / NLLB-200 本地模型，实现在 offline_mt.rs）
+//! - 管理器：按启用顺序尝试，离线引擎排末尾兜底
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

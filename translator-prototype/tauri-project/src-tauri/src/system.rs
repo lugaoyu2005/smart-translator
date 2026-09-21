@@ -48,6 +48,10 @@ pub struct AppSettings {
     // 文本严格对齐模式：译文空间 = 原文区域 +10%（避让重叠），字号自动填充
     #[serde(default)]
     pub overlay_expand: bool,
+    // 冻结画面：触发截图翻译瞬间固定屏幕快照（动态内容所见即所得，框选的是静态图）；
+    // 关闭 = 实时画面（框选松手后才实际截屏，旧行为）
+    #[serde(default = "default_true")]
+    pub screenshot_freeze_frame: bool,
     // 当前翻译源（默认引擎名，与截图翻译菜单双向绑定）
     #[serde(default = "default_current_engine")]
     pub current_engine: String,
@@ -193,6 +197,7 @@ impl Default for AppSettings {
             overlay_mode: None,
             overlay_transparent_legacy: false,
             overlay_expand: false,
+            screenshot_freeze_frame: true,
             select_translate_enabled: true,
             current_engine: default_current_engine(),
             window_size_mode: default_window_size_mode(),
@@ -296,43 +301,8 @@ fn migrate(settings: &mut AppSettings) {
             settings.hotkeys.insert(key.to_string(), "None".to_string());
         }
     }
-    // 快捷键格式校验：设置页为自由文本输入，误输入（如"Ctrl+Alt+TCt"）会使注册失败，
-    // 无法识别的值回落默认值
-    fn is_valid_hotkey(s: &str) -> bool {
-        let s = s.trim();
-        if s.eq_ignore_ascii_case("none") {
-            return true;
-        }
-        if !s.contains('+') {
-            return false;
-        }
-        match s.rsplit('+').next() {
-            Some(key) => {
-                let key = key.trim();
-                (key.len() == 1
-                    && key.chars().next().map_or(false, |c| c.is_ascii_alphanumeric()))
-                    || (key.len() >= 2
-                        && key.starts_with('F')
-                        && key[1..].chars().all(|c| c.is_ascii_digit()))
-            }
-            None => false,
-        }
-    }
-    for (name, default) in [
-        ("translate", "Ctrl+Alt+T"),
-        ("screenshot", "Ctrl+Alt+S"),
-        ("select", "Ctrl+Alt+X"),
-    ] {
-        let bad = settings
-            .hotkeys
-            .get(name)
-            .map_or(true, |v| !is_valid_hotkey(v));
-        if bad {
-            settings
-                .hotkeys
-                .insert(name.to_string(), default.to_string());
-        }
-    }
+    // 快捷键格式校验与非法回落（含设置页自由文本误输入、单按键、未知修饰键）
+    sanitize_hotkeys(settings);
     // 旧版"无背景模式"开关 → 新覆盖样式
     if settings.overlay_mode.is_none() && settings.overlay_transparent_legacy {
         settings.overlay_mode = Some("none".to_string());
@@ -458,14 +428,30 @@ pub fn show_main_window(app: &AppHandle) {
     }
 }
 
-/// 触发截图翻译：显示截图窗口并通知前端重置到框选模式
+/// 触发截图翻译：显示截图窗口并通知前端重置到框选模式。
+/// 窗口全程不 hide/show——全屏置顶窗口的显隐会强制桌面整体重绘（桌面图标闪烁），
+/// 待命态用"移出屏幕"替代隐藏（见前端 exit），本函数只负责回归屏幕+取前台
 pub fn trigger_screenshot(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("screenshot") {
-        // 常驻窗口合成已预热，但"已可见"状态下 show() 是空操作、不会带来系统激活，
-        // 仅取消穿透会因拿不到焦点表现为按键/点击无响应——走一次 hide→show 重新激活
-        //（WebView 内容仍在，显隐开销极小）
-        let _ = win.hide();
+        // 冻结画面模式：show overlay 之前先全屏截屏（窗口还在屏幕外待命，画面干净），
+        // 框选在该静态快照上进行——动态内容（视频/动画）所见即所得。
+        // 关闭开关则跳过（零开销），框选松手后走旧路径截屏
+        if load_settings().screenshot_freeze_frame {
+            #[cfg(target_os = "windows")]
+            unsafe {
+                use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
+                let (w, h) = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+                if w > 0 && h > 0 {
+                    match crate::screenshot::capture_snapshot_region(0, 0, w, h) {
+                        Ok(()) => {}
+                        Err(e) => eprintln!("[截图] 冻结快照截取失败（将降级实时截屏）: {e}"),
+                    }
+                }
+            }
+        }
         let _ = win.set_ignore_cursor_events(false);
+        // 首次触发时窗口仍是 tauri.conf 的 visible:false，需要 show；
+        // 之后窗口保持可见（待命=停在屏幕外），show 为幂等空操作
         let _ = win.show();
         let _ = win.set_focus();
         // Windows 前台锁定：后台进程的 SetForegroundWindow 会被系统拒绝——
@@ -512,9 +498,8 @@ fn spawn_esc_watcher(handle: tauri::AppHandle) {
             use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE};
             while start.elapsed() < std::time::Duration::from_secs(120) {
                 if GetAsyncKeyState(VK_ESCAPE.0 as i32) as u16 & 0x8000 != 0 {
-                    if let Some(w) = handle.get_webview_window("screenshot") {
-                        let _ = w.hide();
-                    }
+                    // 不直接 hide 窗口（全屏窗口显隐会引发桌面重绘），
+                    // 由前端 exit() 统一用"移出屏幕"替代待命隐藏
                     let _ = handle.emit_to("screenshot", "exit-screenshot", ());
                     break;
                 }
@@ -539,19 +524,30 @@ pub fn poll_esc() -> Result<bool, String> {
     Ok(false)
 }
 
-/// Tauri命令：手动预下载离线翻译模型（当前默认方向相关语言对，进度经 offline-mt-status 事件推送）
+/// Tauri命令：手动预下载离线翻译模型，进度经 offline-mt-status 事件推送。
+/// engine 缺省取当前设置的离线模型；from/to 缺省取默认翻译方向（auto 按英语处理）
 #[tauri::command]
-pub async fn download_offline_model() -> Result<(), String> {
-    let direction = load_settings().default_translation_direction;
-    let (from, to) = direction
-        .split_once("->")
-        .map(|(f, t)| (f.to_string(), t.to_string()))
-        .unwrap_or_else(|| ("auto".to_string(), "zh".to_string()));
-    let from = if from == "auto" { "en".to_string() } else { from };
-    if load_settings().offline_model == "nllb-200" {
+pub async fn download_offline_model(
+    engine: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
+) -> Result<(), String> {
+    let engine = engine.unwrap_or_else(|| load_settings().offline_model);
+    if engine == "nllb-200" {
         // NLLB-200：单模型覆盖全部语言对
         return crate::offline_mt::ensure_nllb_model().await.map(|_| ());
     }
+    let (from, to) = match (from, to) {
+        (Some(f), Some(t)) => (f, t),
+        _ => {
+            let direction = load_settings().default_translation_direction;
+            direction
+                .split_once("->")
+                .map(|(f, t)| (f.to_string(), t.to_string()))
+                .unwrap_or_else(|| ("en".to_string(), "zh".to_string()))
+        }
+    };
+    let from = if from == "auto" { "en".to_string() } else { from };
     let hops = crate::offline_mt::route(&from, &to);
     if hops.is_empty() {
         return Err(format!("当前方向 {from}→{to} 暂无离线模型"));
@@ -560,6 +556,18 @@ pub async fn download_offline_model() -> Result<(), String> {
         crate::offline_mt::ensure_pair_models(f, t).await?;
     }
     Ok(())
+}
+
+/// Tauri命令：列出已安装的离线翻译模型（设置页模型管理）
+#[tauri::command]
+pub fn list_offline_models() -> Result<Vec<crate::offline_mt::OfflineModelInfo>, String> {
+    Ok(crate::offline_mt::list_installed_models())
+}
+
+/// Tauri命令：删除已安装的离线翻译模型（repo 为 HuggingFace 仓库名）
+#[tauri::command]
+pub fn delete_offline_model(repo: String) -> Result<(), String> {
+    crate::offline_mt::delete_installed_model(&repo)
 }
 
 /// Tauri命令：快捷键录入模式——临时注销全部全局热键（录入期间按组合键不会被系统热键抢先）；
@@ -572,33 +580,6 @@ pub fn set_hotkeys_suspended(app: tauri::AppHandle, suspended: bool) -> Result<(
     } else {
         let settings = load_settings();
         register_hotkeys(&app, &settings)?;
-    }
-    Ok(())
-}
-
-/// Tauri命令：截图窗口预热——移出屏幕外显示一次，完成 WebView2 全屏透明合成初始化
-/// 后隐藏并恢复原位。屏幕外显示不触发桌面重绘（修复“打开应用时文件管理器闪烁”）
-static PREHEAT_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-#[tauri::command]
-pub fn preheat_screenshot(app: tauri::AppHandle) -> Result<(), String> {
-    // 去重：预热只需一次（前端重复触发/组件重挂载不再产生窗口风暴）
-    if PREHEAT_DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        return Ok(());
-    }
-    if let Some(win) = app.get_webview_window("screenshot") {
-        let origin = win.outer_position().map_err(|e| e.to_string())?;
-        let _ = win.set_ignore_cursor_events(true);
-        let _ = win.set_position(tauri::PhysicalPosition::new(-32000, -32000));
-        let _ = win.show();
-        let handle = app.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(600));
-            if let Some(w) = handle.get_webview_window("screenshot") {
-                let _ = w.hide();
-                let _ = w.set_position(tauri::PhysicalPosition::new(origin.x, origin.y));
-            }
-        });
     }
     Ok(())
 }
@@ -682,7 +663,151 @@ pub fn apply_autostart(app: &AppHandle, enabled: bool) -> Result<(), String> {
 
 // ===== 全局快捷键 =====
 
-/// 解析快捷键字符串（如 "Ctrl+Alt+S"）
+/// 修饰键类别（侧别过滤用）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ModKind {
+    Ctrl,
+    Alt,
+    Shift,
+    Win,
+}
+
+/// 物理侧别
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HotkeySide {
+    Left,
+    Right,
+}
+
+/// 解析修饰键 token → (类别, 侧别要求)。
+/// 支持 LCtrl/RCtrl/LAlt/RAlt/LShift/RShift/LWin/RWin 区分左右；
+/// 不带侧别前缀（Ctrl/Alt/Shift/Win 等）= 双侧。返回 None 表示非修饰键 token
+fn parse_mod_token(tok: &str) -> Option<(ModKind, Option<HotkeySide>)> {
+    let t = tok.trim().to_ascii_lowercase();
+    let (kind, side) = match t.as_str() {
+        "ctrl" | "control" => (ModKind::Ctrl, None),
+        "lctrl" | "lcontrol" => (ModKind::Ctrl, Some(HotkeySide::Left)),
+        "rctrl" | "rcontrol" => (ModKind::Ctrl, Some(HotkeySide::Right)),
+        "alt" | "option" => (ModKind::Alt, None),
+        "lalt" => (ModKind::Alt, Some(HotkeySide::Left)),
+        "ralt" => (ModKind::Alt, Some(HotkeySide::Right)),
+        "shift" => (ModKind::Shift, None),
+        "lshift" => (ModKind::Shift, Some(HotkeySide::Left)),
+        "rshift" => (ModKind::Shift, Some(HotkeySide::Right)),
+        "win" | "super" | "meta" | "cmd" | "command" => (ModKind::Win, None),
+        "lwin" => (ModKind::Win, Some(HotkeySide::Left)),
+        "rwin" => (ModKind::Win, Some(HotkeySide::Right)),
+        _ => return None,
+    };
+    Some((kind, side))
+}
+
+fn mod_kind_token(kind: ModKind) -> &'static str {
+    match kind {
+        ModKind::Ctrl => "Ctrl",
+        ModKind::Alt => "Alt",
+        ModKind::Shift => "Shift",
+        ModKind::Win => "Super",
+    }
+}
+
+/// 快捷键格式校验：
+/// - "None"（忽略大小写）合法
+/// - 必须是 修饰键+主键 组合（禁止单按键——会抢占正常打字/F键功能）
+/// - 修饰键段必须是已知 token（含左右侧别），同一类别不得重复
+/// - 主键为 1 个 ASCII 字母数字，或 F+数字（Fn 键）
+fn is_valid_hotkey(s: &str) -> bool {
+    let s = s.trim();
+    if s.eq_ignore_ascii_case("none") {
+        return true;
+    }
+    let parts: Vec<&str> = s.split('+').map(|p| p.trim()).collect();
+    if parts.len() < 2 {
+        return false;
+    }
+    let (key, mods) = parts.split_last().unwrap();
+    let key_ok = (key.len() == 1
+        && key.chars().next().map_or(false, |c| c.is_ascii_alphanumeric()))
+        || (key.len() >= 2 && key.starts_with('F') && key[1..].chars().all(|c| c.is_ascii_digit()));
+    if !key_ok {
+        return false;
+    }
+    let mut seen = std::collections::HashSet::new();
+    for m in mods {
+        match parse_mod_token(m) {
+            Some((kind, _)) => {
+                if !seen.insert(kind) {
+                    return false;
+                }
+            }
+            None => return false,
+        }
+    }
+    true
+}
+
+/// 热键非法时按名回落（translate/screenshot/select 回取出厂默认，reverse 回 None）
+fn sanitize_hotkeys(settings: &mut AppSettings) {
+    for (name, default) in [
+        ("translate", "Ctrl+Alt+T"),
+        ("screenshot", "Ctrl+Alt+S"),
+        ("select", "Ctrl+Alt+X"),
+        ("reverse", "None"),
+    ] {
+        let bad = settings
+            .hotkeys
+            .get(name)
+            .map_or(true, |v| !is_valid_hotkey(v));
+        if bad {
+            settings.hotkeys.insert(name.to_string(), default.to_string());
+        }
+    }
+}
+
+/// 把带侧别的修饰键 token 归一化为 global-hotkey 可解析的形式（LCtrl→Ctrl 等），
+/// 同时返回侧别要求列表（注册不区分左右，触发时按此验证物理侧别）
+fn normalize_hotkey(s: &str) -> (String, Vec<(ModKind, HotkeySide)>) {
+    let mut parts: Vec<String> = Vec::new();
+    let mut sides = Vec::new();
+    for part in s.split('+') {
+        match parse_mod_token(part) {
+            Some((kind, Some(side))) => {
+                sides.push((kind, side));
+                parts.push(mod_kind_token(kind).to_string());
+            }
+            Some((kind, None)) => parts.push(mod_kind_token(kind).to_string()),
+            None => parts.push(part.trim().to_string()),
+        }
+    }
+    (parts.join("+"), sides)
+}
+
+/// 读取修饰键的物理侧别按键状态（Pressed 事件时键仍被按住，读数可靠）
+#[cfg(target_os = "windows")]
+fn mod_key_held(kind: ModKind, side: HotkeySide) -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RCONTROL, VK_RMENU,
+        VK_RSHIFT, VK_RWIN,
+    };
+    let vk = match (kind, side) {
+        (ModKind::Ctrl, HotkeySide::Left) => VK_LCONTROL,
+        (ModKind::Ctrl, HotkeySide::Right) => VK_RCONTROL,
+        (ModKind::Alt, HotkeySide::Left) => VK_LMENU,
+        (ModKind::Alt, HotkeySide::Right) => VK_RMENU,
+        (ModKind::Shift, HotkeySide::Left) => VK_LSHIFT,
+        (ModKind::Shift, HotkeySide::Right) => VK_RSHIFT,
+        (ModKind::Win, HotkeySide::Left) => VK_LWIN,
+        (ModKind::Win, HotkeySide::Right) => VK_RWIN,
+    };
+    unsafe { GetAsyncKeyState(vk.0 as i32) as u16 & 0x8000 != 0 }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn mod_key_held(_kind: ModKind, _side: HotkeySide) -> bool {
+    true
+}
+
+/// 解析快捷键字符串（如 "Ctrl+Alt+S"；侧别 token 已由 normalize_hotkey 归一化）
 fn parse_shortcut(s: &str) -> Result<Shortcut, String> {
     s.trim()
         .parse::<Shortcut>()
@@ -716,14 +841,16 @@ pub fn register_hotkeys(app: &AppHandle, settings: &AppSettings) -> Result<(), S
         if combo.is_empty() || combo.eq_ignore_ascii_case("none") {
             continue;
         }
-        let sc = match parse_shortcut(combo) {
+        // 侧别 token 归一化（LCtrl→Ctrl 供插件解析），并提取左右侧物理按键要求
+        let (combo_norm, side_reqs) = normalize_hotkey(combo);
+        let sc = match parse_shortcut(&combo_norm) {
             Ok(s) => s,
             Err(_) => {
                 conflicts.push(format!("{combo}（{name}·格式无法识别）"));
                 continue;
             }
         };
-        if registered.iter().any(|(_, r)| *r == *combo) {
+        if registered.iter().any(|(_, r)| *r == combo_norm) {
             conflicts.push(format!("{combo}（{name}·与其他快捷键重复）"));
             continue;
         }
@@ -731,6 +858,11 @@ pub fn register_hotkeys(app: &AppHandle, settings: &AppSettings) -> Result<(), S
         let combo_owned = combo.clone();
         let result = gs.on_shortcut(sc, move |app, _shortcut, event| {
             if event.state() != ShortcutState::Pressed {
+                return;
+            }
+            // Win32 RegisterHotKey 不区分修饰键左右：设置仅左侧/右侧时，
+            // 按下瞬间用 GetAsyncKeyState 验证物理侧别，不符则不触发
+            if !side_reqs.iter().all(|(k, s)| mod_key_held(*k, *s)) {
                 return;
             }
             match name_owned.as_str() {
@@ -756,7 +888,7 @@ pub fn register_hotkeys(app: &AppHandle, settings: &AppSettings) -> Result<(), S
             conflicts.push(format!("{combo}（{name}·注册失败: 可能已被系统或其他软件占用）"));
             let _ = e;
         } else {
-            registered.push((name, combo.clone()));
+            registered.push((name, combo_norm));
         }
     }
 
@@ -826,8 +958,10 @@ pub async fn get_app_settings() -> Result<AppSettings, String> {
 #[tauri::command]
 pub async fn save_app_settings(
     app: tauri::AppHandle,
-    settings: AppSettings,
+    mut settings: AppSettings,
 ) -> Result<(), String> {
+    // 快捷键格式兜底校验（前端已拦截，此处防其他来源的非法值落盘）
+    sanitize_hotkeys(&mut settings);
     // 同步内置符号纠错开关（OCR 纠错链路读取）
     crate::engines::BUILTIN_SYMBOLS_ON.store(
         settings.builtin_symbols_enabled,
@@ -974,6 +1108,49 @@ mod tests {
     }
 
     #[test]
+    fn hotkey_side_tokens_valid() {
+        // 侧别 token 合法；不带侧别的旧格式保持兼容
+        for good in [
+            "Ctrl+Alt+X",
+            "None",
+            "none",
+            "LCtrl+Alt+X",
+            "RCtrl+RAlt+F5",
+            "LWin+Shift+D",
+        ] {
+            assert!(super::is_valid_hotkey(good), "{good:?} 应合法");
+        }
+        // 单按键（无修饰键）拒绝；未知修饰键/重复类别拒绝
+        for bad in ["A", "F9", "Foo+X", "Ctrl+LCtrl+A", "Ctrl+中文+F1"] {
+            assert!(!super::is_valid_hotkey(bad), "{bad:?} 应非法");
+        }
+    }
+
+    #[test]
+    fn normalize_hotkey_extracts_sides() {
+        let (norm, sides) = super::normalize_hotkey("LCtrl+Alt+X");
+        assert_eq!(norm, "Ctrl+Alt+X");
+        assert_eq!(sides, vec![(super::ModKind::Ctrl, super::HotkeySide::Left)]);
+        let (norm2, sides2) = super::normalize_hotkey("Ctrl+Alt+S");
+        assert_eq!(norm2, "Ctrl+Alt+S");
+        assert!(sides2.is_empty());
+        let (norm3, sides3) = super::normalize_hotkey("LWin+RShift+K");
+        assert_eq!(norm3, "Super+Shift+K");
+        assert_eq!(sides3.len(), 2);
+    }
+
+    #[test]
+    fn sanitize_rejects_single_key_hotkey() {
+        // 保存路径兜底：单按键非法 → translate 回落默认、reverse 回落 None
+        let mut s = AppSettings::default();
+        s.hotkeys.insert("translate".to_string(), "F9".to_string());
+        s.hotkeys.insert("reverse".to_string(), "B".to_string());
+        super::sanitize_hotkeys(&mut s);
+        assert_eq!(s.hotkeys.get("translate").unwrap(), "Ctrl+Alt+T");
+        assert_eq!(s.hotkeys.get("reverse").unwrap(), "None");
+    }
+
+    #[test]
     fn regression_migrate_valid_hotkeys_kept() {
         // 注意：裸键（如 F9 无修饰键）按设计也视为非法（全局热键插件不接受）
         // 旧出厂默认值（Ctrl+Alt+T 等）升级时重置为 None；用户自定义值保留
@@ -1085,5 +1262,48 @@ mod tests {
         let back: AppSettings = serde_json::from_str(&json).unwrap();
         assert_eq!(back.baidu_app_id, "202401010001");
         assert_eq!(back.baidu_secret, "testsecret");
+    }
+
+    // ===== 离线模型管理（列表/删除）=====
+    // 注意：两个场景合并在单个测试内——它们共享 SMART_TRANSLATOR_MODELS_DIR 环境变量，
+    // 拆开会在并行测试中互相覆盖目录指向
+
+    #[test]
+    fn offline_model_list_and_delete() {
+        let base = std::env::temp_dir().join(format!("st-mt-test-{}", std::process::id()));
+        std::env::set_var("SMART_TRANSLATOR_MODELS_DIR", &base);
+
+        // 场景一：三件套齐全的 ja-en 模型 → 完整列出，可删除
+        let dir = base.join("Xenova_opus-mt-ja-en");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("tokenizer.json"), b"{}").unwrap();
+        std::fs::write(dir.join("encoder_model_quantized.onnx"), b"x").unwrap();
+        std::fs::write(dir.join("decoder_model_merged_quantized.onnx"), b"x").unwrap();
+
+        let list = crate::offline_mt::list_installed_models();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].repo, "Xenova/opus-mt-ja-en");
+        assert_eq!(list[0].model, "opus-mt");
+        assert!(list[0].complete);
+        assert!(list[0].label.contains("日语"));
+        assert!(list[0].size_bytes > 0);
+
+        crate::offline_mt::delete_installed_model("Xenova/opus-mt-ja-en").unwrap();
+        assert!(!dir.exists());
+        assert!(crate::offline_mt::list_installed_models().is_empty());
+        // 删除不存在的模型：幂等成功
+        crate::offline_mt::delete_installed_model("Xenova/opus-mt-xx-yy").unwrap();
+
+        // 场景二：缺 decoder 的残缺目录 → 列出但 complete=false（下载中断场景）
+        let dir2 = base.join("Xenova_opus-mt-en-ru");
+        std::fs::create_dir_all(&dir2).unwrap();
+        std::fs::write(dir2.join("tokenizer.json"), b"{}").unwrap();
+
+        let list2 = crate::offline_mt::list_installed_models();
+        assert_eq!(list2.len(), 1);
+        assert!(!list2[0].complete);
+
+        std::env::remove_var("SMART_TRANSLATOR_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

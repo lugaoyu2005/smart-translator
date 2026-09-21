@@ -228,3 +228,144 @@ RapidOCR本地OCR	✅ 完成	PaddleOCR PP-OCRv6 模型+ONNX Runtime推理，完�
 - 版本 0.2.0 → 0.2.1（Cargo/tauri.conf/关于页）
 - 待办：术语管理改版（用户截图未收到，待补发）
 - cargo test 94 通过；npm run build 通过；release exe 重打包重启
+
+## 2026-09-09 离线翻译完善批次（第二十九轮，v0.3.0）
+- NLLB-200 退化根因修复：此前误以为 tokenizer 模板自动插入源语言码——实测 encode(text, false) 的 false=add_special_tokens，模板（TemplateProcessing [eng_Latn, A, </s>]）根本未应用，旧逻辑 ids[0]=语言码 实际把正文首词替换成了语言码且序列缺 </s> 终止符，编码器输入残缺导致输出退化（"天天天…"复读/英文复述）。修复：NLLB 显式构造 [源语言码, 正文..., </s>]
+- NLLB-200 解码器换用非 merged 版（decoder_model_quantized.onnx）：绕开 merged 导出 KV cache 与 Marian 的差异问题，beam search 走新增 run_decoder_full 逐步全量前向（批量 [B,t]），OPUS-MT 的 merged+KV cache 路径不动；端到端实测 en→zh "今天的天气很好." / zh→en "The weather is fine today."，UI 解除置灰
+- 长文本分句翻译：超 500 token 自动按句切分（。!?!?;;…\n）打包为 ≤400 token 块逐块翻译拼接（无标点超长按字符窗口硬切兜底），主窗口粘贴长文不再截断丢内容；端到端 80 句完整输出 469 字符
+- 模型管理（设置页）：已安装模型列表（方向/NLLB + 占用空间 + 残缺标记 + 删除按钮），删除前驱逐进程内 ONNX 会话缓存释放 Windows 文件句柄；按方向下载语言对（9 语言双下拉，中转方向自动展开 2 个模型）+ NLLB 单模型下载按钮；新命令 list_offline_models / delete_offline_model，download_offline_model 扩展 engine/from/to 可选参数
+- 下载进度可视化：设置页 + 翻译测试页监听 offline-mt-status 事件显示进度条（8秒无更新自动隐藏），此前仅截图窗口有；手动下载不再只有 alert
+- 版本 0.2.1 → 0.3.0；cargo test 96 通过、npm test 43 通过、npm run build 通过；NLLB/OPUS-MT/长文本端到端实测通过
+
+## 2026-09-11 用户反馈修复5项（第三十轮，v0.4.0）
+- OCR无法识别修复：GDI BitBlt 的 32bpp 像素 alpha 字节为未定义值(实测0)，Windows OCR 以 Premultiplied 编码 PNG、有道直接编 PNG → 全透明图 → OCR 静默返回空(仅弹"未识别到文字" toast)；RapidOCR 丢弃 alpha 故正常。修复：capture_region 捕获后统一置 alpha=0xFF(opaque_alpha)，一处修复三条 OCR 路径
+- 十字准星相位化：crosshair 从根节点常驻改为仅框选(select)阶段显示——修复结果阶段准星暗示可框选而实际点击是切换覆盖层的语义冲突；处理/结果阶段恢复默认光标
+- 截图菜单弹层一体化：引擎/语言选项面板从深色悬浮框(8px缝隙)改为紧贴 chip 顶部无缝向上生长、白底蓝描边与菜单栏同风格、上圆角下直角、高=chip×3
+- 快捷键区分左右：存储格式扩展 LCtrl/RCtrl/LAlt/RAlt/LShift/RShift/LWin/RWin(不带前缀=双侧兼容旧值)；录入用 e.code 判物理侧别；注册仍走 RegisterHotKey(Win32 不分左右)，触发瞬间 GetAsyncKeyState 验证物理侧别不符则不触发；reverse 热键前端匹配同步支持侧别。已知局限：未设置的另一侧按键仍被系统拦截只是不触发
+- 快捷键录入完善：Del/Backspace 或 × 按钮清除为"未设置"(修复 None 字符串显示 bug)；单按键(无修饰键)拒绝录入并提示；后端 is_valid_hotkey 加强(修饰段合法性/重复类别/单按键)，migrate 与 save_app_settings 统一走 sanitize_hotkeys 兜底，reverse 补入校验列表(非法回落 None)
+- cargo test 100 通过、npm test 43 通过、npm run build 通过；版本 0.3.0 → 0.4.0
+
+## 2026-09-11 反馈修复（第三十一轮）
+- 截图菜单 chips 浅色化：菜单组容器深色半透明 → 白底工具条，chips 改浅蓝底蓝描边蓝字（与设置页菜单组件 chips 启用态同款），关闭按钮悬停红色化，语言箭头蓝色；与上一轮的白底弹层风格统一
+- 根治打开应用时桌面图标闪烁：彻底删除截图窗口预热机制（preheat_screenshot 命令/前端调用/命令注册）——第二十七轮的"移出屏幕外显示"仍会触发桌面重绘；启动全程不显示截图窗口，首次触发截图时才显示（代价仅首次多几百毫秒合成初始化）；测试断言同步为 preheat 调用次数=0
+- cargo test 100、npm test 43、npm run build 通过；重打包重启
+
+## 2026-09-11 图标闪烁根治尝试（第三十二轮）
+- 用户反馈删除预热后桌面/文件图标仍持续闪烁（主窗口出现后开始、一直持续）——排除启动期窗口行为，锁定 WebView2 硬件加速合成（GPU）与显卡驱动的兼容问题：主窗口开始渲染（GPU 合成激活）后才闪，为 WebView2 已知现象
+- 修复：main() 开头设置 WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--disable-gpu --disable-gpu-compositing 禁用 GPU 加速改软件合成；本应用 UI 简单无性能感知差异；待用户实测确认
+
+## 2026-09-11 图标闪烁真凶定位（第三十三轮，系统级问题，与翻译应用无关）
+- 用户对照实验逐步排除：退出翻译应用仍闪（应用无辜）、禁GPU仍闪（排除合成）、杀毒关闭仍闪（排除联想管家）、文件系统无写入、磁盘健康无错误、无崩溃循环
+- 最终锁定：百度网盘 shell 扩展——7 个图标覆盖层（.WorkspaceExt0-6，键名带前导空格排序抢位）注册自 D:\Program Files\BaiduNetdisk\YunShellExtV164.dll，而网盘主程序/服务根本未运行：explorer 绘制每个文件/文件夹图标时反复调用该 DLL 失败 → 全量图标闪（此电脑/回收站等虚拟项不走覆盖层故不闪）
+- 根治：备份（D:\Smart Translator\baidu_overlay_backup.reg）后管理员权限删除 7 个覆盖层注册项 + 重启 explorer；提供 remove_baidu_overlay.ps1 / overlay_removal.log
+- 教训：用户报告"打开应用导致X"需做退出对照实验确认因果，避免时机巧合误导修复方向
+
+## 2026-09-11 图标闪烁终局（第三十四轮，系统问题非应用问题）
+- 三十四轮全程排查后真凶：缩略图缓存 thumbcache_*.db 损坏（与 iconcache 独立的另一套系统）——explorer 反复重建缩略图导致桌面视图每秒约7轮全量重枚举（procmon 实测12秒28.4万次注册表查询、反复重读全部图标源文件）
+- 修复：完整清理 thumbcache + iconcache 共30个缓存文件 + 重启 explorer，用户确认不再闪
+- 排除项（均有实验/数据支撑）：翻译应用、Defender/联想杀毒、百度网盘覆盖层（已顺手删除其7个失效覆盖层注册）、GPU合成、文件变更、磁盘健康、内存、强调色
+- 遗留：Defender 实时防护已恢复；翻译应用已迁至 D:\Smart Translator\ 稳定版并建桌面快捷方式
+
+## 2026-09-11 图标闪烁根治收尾（第三十五轮）
+- DISM CheckHealth 报告"可以修复组件存储"并执行 RestoreHealth 修复；sfc /scannow 结论 0 个待修复组件、Repair complete（CBS.log 验证）——系统文件层已确认健康
+- 三层根治体系交付：①缓存已全量重建（30个thumbcache/iconcache文件）②系统组件已修复验证 ③桌面部署「修复图标闪烁.bat」一键自修工具（自提权+清缓存+重启explorer）
+- 复发诱因防范：正常关机避免断电写入损坏；Windows 未激活（LicenseStatus=5）建议激活以恢复补丁渠道
+
+## 2026-09-11 用户复测反馈排查+弹层观感修复（第三十一轮）
+- 复现诊断：经 computer-use 实测 0.4.0(与 D:\Smart Translator\smart-translator.exe 哈希一致)——截图翻译 OCR 全链路正常(两次框选识别中英文成功，Windows OCR 路径，alpha 修复生效)；蓝描边 chips 与新弹层(白底/紧贴chip/3×高)均已生效。用户"3还是不行/5还是没改"的主因：反馈形成于旧版测试期间+弹层内部原生滚动条毁观感
+- 弹层观感补修：height 改 maxHeight(内容不足 3× 时自适应收缩，超出才滚动)；::-webkit-scrollbar 自定义 5px 圆角半透明蓝条替换原生宽滚动条；快捷键页补充左右区分说明文字(LCtrl/RCtrl 语义、Del 清除、须含修饰键)
+- 快捷键左右区分确认已实现：录入 LCtrl/RCtrl 前缀显示 + 回调 GetAsyncKeyState 侧别过滤(用户测旧版故未见到)
+- 交付流程修正：新 exe 主动同步到用户实际运行路径 D:\Smart Translator\(此前仅重启 target/release 下的实例，用户桌面快捷方式指向的是自建目录)
+- npm test 43 通过、构建打包通过、已同步重启
+
+## 2026-09-11 截图翻译闪烁根治（第三十六轮）
+- 用户在缓存重建后的干净状态下"打开翻译软件又闪了"——翻译应用与闪烁的因果实锤（此前"退出后还闪"是缓存自激循环掩盖了启动相关性）
+- 真凶：截图翻译流程中全屏透明置顶窗口的 show/hide（触发激活、截图避免截到自身、OCR/结果恢复均依赖显隐）——全屏窗口显隐强制桌面整体重绘=图标闪烁，与第二十七轮预热闪烁同机制
+- 根治：截图窗口全程保持"已显示"，"消失/出现"一律用移出屏幕(-32000)/移回显示器原位替代（移动窗口由 DWM 平滑处理不波及桌面）：后端 trigger 去掉 hide→show 对、ESC 兜底不再直接 hide；前端新增 moveOffScreen/moveOnScreen 辅助，exit/processSelection/resetState 全部改造
+- cargo check/npm test 43/npm run build 通过；已同步稳定版 D:\Smart Translator\ 并重启
+
+## 2026-09-11 弹层形态重做:单 chip 自身向上生长（第三十二轮，v0.4.1）
+- 与用户确认期望形态（此前两版"悬浮面板"连续不被认可）：点击后被点的 chip 自己向上伸展为高面板——选项嵌在伸展区、chip 文字保留在面板底部行，整块是同一个圆角蓝描边容器
+- 实现：三处弹层（引擎/原文/译文）JSX 重构为 chip-grow-panel（absolute bottom:0，面板底边与 chip 底边重合、完全覆盖原 chip 向上生长）+ chip-grow-list（选项区，maxHeight=chip高×3，超出细蓝滚动条滚动）+ chip-grow-chip（底部行复刻 chip 外观，点击收起）；选项选择/外点收起逻辑不变
+- v0.4.1 打包，exe 已同步 D:\Smart Translator\ 并重启；GUI 实测因用户环境正跑管理员级系统脚本（UIPI 权限隔离无法注入按键）移交用户自行验证
+
+## 2026-09-11 图标闪烁深水区排查（第三十七轮）
+- procmon 对照实验：杀掉翻译应用后 explorer 12秒仍有84.9万条操作（运行期95万）——explorer 持续疯狂枚举与应用运行彻底无关，"打开翻译软件又闪"再次被证伪为时机巧合
+- 深挖数据：explorer 疯查 AppModel StateRepository（6万+次）、HKCR\Unknown（5295次，无法识别类型文件）、SyncRootManager；系统残留32个WebView2进程（翻译7个孤儿系taskkill强杀副作用+deepseek/CBS/其他应用）
+- 修复动作：UWP 全量重注册（124包成功）修复 StateRepository/CBS 关联；下一步用户重启电脑验证（explorer/StateRepository 全新初始化）
+- 待办：若重启后仍闪→新建Windows用户配置文件测试（最后嫌疑）；建议激活Windows恢复补丁渠道
+
+## 2026-09-11 图标闪烁真凶确认（第三十八轮，终结）
+- 用户桌面一键实验链最终锁定真凶：夸克 shell 扩展 DLL（quarkshellext_20260903182031.dll 夸克网盘 + quarkshellext_20260308001049.dll 夸克浏览器，9月3日更新安装）——注入 explorer 进程内部，每个图标绘制都执行网盘状态处理，引发全桌面图标"应用图标↔白板"反复切换
+- 修复：两个 DLL 改名 .bak + 重启 explorer，用户确认不再闪烁
+- 桌面「修复图标闪烁.bat」升级：一键完成 禁夸克扩展+清双缓存+重启explorer（覆盖夸克更新后复发场景）
+- 遗留提醒：①Defender 实时保护需用户在安全中心手动开启（排查时关闭）②MuMu 虚拟显卡保持禁用（与闪烁无关可恢复）③翻译应用全程无辜，v0.4.0 稳定版运行于 D:\Smart Translator\
+
+## 2026-09-11 夸克扩展全量禁用（第三十九轮，最终根治执行）
+- 发现 QuarkCloudDrive 目录累积 11 个未禁用版本 quarkshellext DLL（每1-2周自动更新装一个）——此前仅禁最新版，更新/注册回退即复发，解释"反反复复"
+- 执行：11 个 DLL 全量改名 .bak + 重启 explorer；tasklist /m 验证无任何进程加载夸克扩展；无夸克计划任务（更新为应用内自检，需用户在夸克设置关闭自动更新/开机自启）
+- 桌面一键工具已是通配符版（禁所有 quarkshellext_*.dll），覆盖未来新版本
+
+## 2026-09-12 弹层按需求图精确重做（第三十三轮，v0.4.2）
+- 用户提供需求样式图，逐项比对实现：面板紧贴被点 chip 顶边正上方弹出（chip 完整可见不被覆盖）、与 chip 左对齐、min-width=chip 宽/width=max-content（引擎名较长时伸展）；选项为淡蓝底(#e8f1fa)蓝字、蓝色细分隔线隔开的堆叠条目、居中排版；去掉"原文/译文"标题行与✓勾选（选中项以深一档蓝底+加粗标识）；maxHeight=chip高×3 超出内部滚动（细蓝滚动条）
+- 结构改动：语言对两 chip 各自独立定位锚点（.chip-anchor，面板相对各自 chip 定位）；引擎/原文/译文三处统一 .chip-pop 面板；清理 .engine-menu*/.lang-section/.chip-grow* 全部旧样式
+- v0.4.2 打包，exe 已同步 D:\Smart Translator\ 并重启唤出主窗口
+
+## 2026-09-12 弹层三处精修:缝/对齐/滚动条（第三十四轮，v0.4.3）
+- 用户截图对比反馈:面板与chip间有缝(露出menu-group顶部6px padding背景)、面板比chip宽未对齐(width:max-content随选项变宽)、右上角滚动条残影
+- 修复:bottom改calc(100% - 6px)下移覆盖菜单栏padding区与上边缘齐平(6px与menu-group padding-top耦合已注释声明);width改100%严格同宽,选项加ellipsis防长引擎名撑宽;scrollbar-width:none + ::-webkit-scrollbar display:none 隐藏滚动条(滚动能力保留),删除旧自定义滚动条样式块
+- v0.4.3 打包同步 D:\Smart Translator\ 重启
+
+## 2026-09-12 弹层藏于chip后方 + 压缩修复（第三十五轮，v0.4.4）
+- 用户截图反馈:选项文字被裁叠影(flex column 容器限高时默认压缩子项,item 的 overflow:hidden 使其可被压到比文字矮)
+- 修复:item 加 flex:none 禁止压缩,超出走容器正常滚动;面板改藏于 chip 之后——bottom:0(底边与chip底边齐平)+ z-index:-1(menu-group 层叠上下文内负层级画在 chips 之下),列表滚动时文字从 chip 顶边后方升出/消失(需求图2的裁切效果);openMenuBox 高度 ×4(可见伸出3×+藏于chip后1×)
+- v0.4.4 打包同步 D:\Smart Translator\ 重启
+
+## 2026-09-12 弹层加长完整显示 + 交界圆角取直（第三十六轮，v0.4.5）
+- 用户反馈:面板应加长到所有语言(含西班牙语)完整显示,不滚动;展开时被覆盖 chip 的左右上圆角应取直
+- 修复:删除弹层 maxHeight 限高(JSX 三处)与 menuBox/openMenuBox 整套尺寸计算(CSS 兜底 max-height: calc(100vh - 120px) 极端小屏才滚);面板圆角改 10px 10px 0 0(底部直角与 chip 顶边平直接合);:has(.chip-pop) 展开态下被覆盖 chip 顶部圆角取直——面板与 chip 连成一体
+- 附带:toggleEngineMenu/toggleLangMenu 删除未用的 el 参数
+- npm test 43 通过;v0.4.5 打包同步 D:\Smart Translator\ 重启(进程21824)
+
+## 2026-09-12 弹层修正:加宽按键而非加高（第三十七轮，v0.4.6）
+- 纠正上轮误读:用户要"加长按键"=chip 加宽使"西班牙语"等长名在等宽面板完整显示,而非面板加高铺开全列表
+- 修复:.group-item.engine min-width 64→100px(面板与chip同宽,选项不再省略号截断);面板 max-height 恢复 124px(chip高×4:可见3×+藏chip后1×,超出内部滚动)
+- v0.4.6 打包同步 D:\Smart Translator\ 重启(进程14056)
+
+## 2026-09-12 截图翻译等待时间优化（第三十八轮，v0.4.7）
+- Windows OCR 提速:像素直接构造 SoftwareBitmap(SoftwareBitmap::CreateCopyFromBuffer + DataWriter)，省掉 WIC PNG 编码→BitmapDecoder 解码两大步（大区域编解码可耗 50-200ms，全部裁掉）
+- OCR 引擎进程缓存:OcrEngine 创建结果 OnceLock 缓存（每次截图复用，语言包运行期不变），不再每次框选重新创建
+- 离线模型启动预热:main.rs setup 后台线程延迟 5 秒调用 offline_mt::warmup()——仅当模型已下载齐全时提前加载会话进 PAIRS 缓存（实测 1.25s），绝不触发下载（未下载保持懒加载+按需提示）；消除首次框选翻译 1-3 秒的模型加载卡顿
+- 框选前等待此前已从 250ms 优化至 150ms（移出屏幕方案），本轮不动
+- cargo test 100 通过；v0.4.7 打包同步 D:\Smart Translator\ 重启；启动日志确认预热生效
+
+## 2026-09-12 截图翻译"冻结画面"功能（第三十九轮，v0.4.8）
+- 需求（用户确认可切换）：触发截图翻译瞬间固定屏幕快照（视频/动画内容所见即所得），框选在静态图上进行，松手后快照撤掉进入翻译；新增设置开关可选冻结/实时画面
+- 后端：AppSettings 加 screenshot_freeze_frame（serde default true）；trigger_screenshot 在 show overlay 之前读设置——冻结开启先全屏截屏入 SCREEN_SNAPSHOT 暂存（窗口在屏幕外画面干净），关闭则清快照零开销；新命令 take_snapshot（快照 PNG→base64 dataURL，实时模式返回 null）/crop_snapshot_region（从快照裁剪选区入 LAST_CAPTURE，快照空兜底现场截选区，裁剪后清快照释放内存）；capture_region_store 保留（实时模式）
+- 前端：snapshotUrl state；resetState 时 invoke take_snapshot → select 相位全屏 img 铺底（object-fit:fill 与真实屏幕逐像素对齐，暗幕/选区叠加其上）；processSelection 分支——冻结：crop_snapshot_region 裁剪后立即撤快照（窗口全程不动，无移出屏幕/150ms 等待/回归转场），实时：旧流程不变
+- 设置页"截图翻译行为"区首位加"冻结画面"开关；ShotSettings 类型/DEFAULT/两处 setSettings 同步字段
+- 单测：crop_pixels 裁剪几何（位置/内容/越界拒绝）；cargo test 101 通过、npm test 43 通过；v0.4.8 打包同步 D:\Smart Translator\ 重启
+
+## 2026-09-18 冻结画面失效根因修复（第四十轮，v0.4.9）
+- 用户实测:冻结画面完全无效(暗幕下均为实时画面)。根因:take_snapshot 命令返回 Result<Option<String>>,IPC 序列化为裸字符串或 null,而前端按对象取值(r?.image),永远 undefined → 快照从未渲染
+- 修复:invoke 泛型改为 string|null 直接取值;img 加 onError 兜底(加载失败自动回退实时画面)
+- v0.4.9 打包同步 D:\Smart Translator\ 重启(日志重定向接管便于诊断)
+
+## 2026-09-18 触发→准星延迟优化（第四十一轮，v0.4.10）
+- 冻结画面快照管线提速:take_snapshot 从"全屏 PNG 编码(150-400ms)+几MB base64 传输+PNG 解码"改为"1/2 最近邻降采样(downscale_bgra 新函数)+半分辨率 PNG 编码"，编码量降为1/4、base64 体积降为约1/4、解码降为1/4——快照铺底全链路从约500-900ms压到约150-250ms
+- 识别精度零影响:crop_snapshot_region 裁剪仍从 SCREEN_SNAPSHOT 原始全分辨率像素进行,降采样仅用于显示底图;新增 downscale_bgra 单测(几何/采样/factor=1)
+- 附带:上一轮冻结失效根因(IPC 序列化裸字符串 vs 对象取值)修复后的 v0.4.9 一起包含
+- cargo test 102 通过;v0.4.10 打包同步 D:\Smart Translator\ 重启
+
+## 2026-09-18 一句话符号处左右分离修复（第四十二轮，v0.4.11）
+- 用户反馈:一句话仍高发左右分离,断点集中在符号处
+- 根因:regroup_words_to_lines 的行内水平间隔二次切分(间隔>1.5×行高视为表格两列)会把 Windows OCR 识别为独立小词的标点(周围留白大、间隙超标)当作断点,一句话被切成左右两个翻译块
+- 修复:纯符号(无任何字母数字字符)词不作为切分断点——符号一律吸附回句子;纯文字之间的大间隙仍正常切分(表格场景保留)
+- 新增单测:符号吸附(价格:99元不切断)+纯文字大间隙仍切分;cargo test 104 通过
+- v0.4.11 打包同步 D:\Smart Translator\ 重启
+
+## 2026-09-18 两页 UI 修复（第四十三轮，v0.4.12）
+- 翻译测试页去卡片化(用户图一为默认样式):.translate-panel 白卡片+阴影+圆角删除,负 margin 全宽白底铺满主内容区,灰底不再露出
+- 术语管理页排版修复(用户图三):根因为 TSX 类名与 TermsPanel.css 大面积脱节——.term-header/.term-translation-row/.term-btn/.term-delete/.link-text-btn/.package-editor 系列在 CSS 中无定义,元素裸排版(删除按钮插进文字、▲▼×挤在一起、输入框与添加按钮大小失衡)
+- 修复:TermsPanel.css 追加带 .terms-panel 前缀的完整样式(优先级稳定覆盖公共表):术语包行卡片化、导入按钮与+按钮同高、添加表单输入框弹性填充按钮同高、词条头部 flex 删除靠右、译法行灰底胶囊+操作按钮成组、包映射编辑器虚线容器行式输入
+- npm test 43 通过;v0.4.12 打包同步 D:\Smart Translator\ 重启

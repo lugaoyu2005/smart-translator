@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import TermsPanel from "./TermsPanel";
 import HistoryPanel from "./HistoryPanel";
 import "./SettingsPanel.css";
@@ -30,6 +31,19 @@ const OCR_ENGINES = [
   { id: "windows", label: "Windows 内置 OCR", desc: "本地 · 免费 · 系统自带" },
   { id: "youdao", label: "有道 OCR", desc: "云端 · 体验金计费" },
   { id: "rapidocr", label: "RapidOCR 本地", desc: "本地 · 免费 · 离线（首次下载约15MB）" },
+];
+
+// 离线翻译支持的语言（与后端 offline_mt 的语言表一致）
+const OFFLINE_LANGS = [
+  { id: "zh", label: "中文" },
+  { id: "en", label: "英语" },
+  { id: "ja", label: "日语" },
+  { id: "ko", label: "韩语" },
+  { id: "ru", label: "俄语" },
+  { id: "fr", label: "法语" },
+  { id: "de", label: "德语" },
+  { id: "es", label: "西语" },
+  { id: "pt", label: "葡语" },
 ];
 
 // 常用 AI 供应商预设（OpenAI 兼容端点，点击预填后仅需填 Key）
@@ -121,11 +135,18 @@ const ComponentIcon: React.FC<{ id: string }> = ({ id }) => {
 };
 
 // ===== 快捷键录入框：点击后捕获组合键（录入期间全局热键被临时注销，不会被抢先触发）=====
+// 修饰键用 e.code 区分左右（LCtrl/RCtrl/LAlt/RAlt/LShift/RShift/LWin/RWin）；
+// Del/Backspace 清除为未设置；必须含修饰键——单按键会抢占正常输入，拒绝录入
 const HotkeyInput: React.FC<{ value: string; onChange: (v: string) => void }> = ({
   value,
   onChange,
 }) => {
   const [recording, setRecording] = useState(false);
+  const [hint, setHint] = useState("");
+  const hintTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (hintTimer.current) clearTimeout(hintTimer.current);
+  }, []);
   useEffect(() => {
     if (!recording) return;
     const onKey = async (e: KeyboardEvent) => {
@@ -136,13 +157,38 @@ const HotkeyInput: React.FC<{ value: string; onChange: (v: string) => void }> = 
         invoke("set_hotkeys_suspended", { suspended: false }).catch(() => {});
         return;
       }
-      if (e.key === "Control" || e.key === "Alt" || e.key === "Shift" || e.key === "Meta") {
-        return; // 等待完整组合
+      // Del / Backspace：清除该快捷键
+      if (e.key === "Delete" || e.key === "Backspace") {
+        onChange("None");
+        setRecording(false);
+        invoke("set_hotkeys_suspended", { suspended: false }).catch(() => {});
+        return;
       }
+      // 修饰键单按：等待完整组合（侧别由下方 e.code 判定）
+      if (e.key === "Control" || e.key === "Alt" || e.key === "Shift" || e.key === "Meta") {
+        return;
+      }
+      // 组合键：修饰键按物理侧别记录，主键沿用 e.key
       const parts: string[] = [];
-      if (e.ctrlKey) parts.push("Ctrl");
-      if (e.altKey) parts.push("Alt");
-      if (e.shiftKey) parts.push("Shift");
+      if (e.ctrlKey)
+        parts.push(
+          e.code === "ControlRight" ? "RCtrl" : e.code === "ControlLeft" ? "LCtrl" : "Ctrl"
+        );
+      if (e.altKey)
+        parts.push(e.code === "AltRight" ? "RAlt" : e.code === "AltLeft" ? "LAlt" : "Alt");
+      if (e.shiftKey)
+        parts.push(
+          e.code === "ShiftRight" ? "RShift" : e.code === "ShiftLeft" ? "LShift" : "Shift"
+        );
+      if (e.metaKey)
+        parts.push(e.code === "MetaRight" ? "RWin" : e.code === "MetaLeft" ? "LWin" : "Win");
+      if (parts.length === 0) {
+        // 单按键拒绝（会抢占正常打字/功能键）
+        setHint("必须包含 Ctrl/Alt/Shift/Win 修饰键");
+        if (hintTimer.current) clearTimeout(hintTimer.current);
+        hintTimer.current = setTimeout(() => setHint(""), 2200);
+        return;
+      }
       parts.push(e.key.length === 1 ? e.key.toUpperCase() : e.key);
       onChange(parts.join("+"));
       setRecording(false);
@@ -152,18 +198,34 @@ const HotkeyInput: React.FC<{ value: string; onChange: (v: string) => void }> = 
     return () => window.removeEventListener("keydown", onKey, true);
   }, [recording, onChange]);
 
+  const display = !value || value === "None" ? "未设置" : value;
+
   return (
-    <button
-      type="button"
-      className={`hotkey-input ${recording ? "recording" : ""}`}
-      onClick={async () => {
-        setRecording(true);
-        invoke("set_hotkeys_suspended", { suspended: true }).catch(() => {});
-      }}
-      title="点击后按下新的组合键；Esc 取消"
-    >
-      {recording ? "请按下组合键（Esc 取消）" : value || "点击设置"}
-    </button>
+    <span className="hotkey-wrap">
+      <button
+        type="button"
+        className={`hotkey-input ${recording ? "recording" : ""}`}
+        onClick={async () => {
+          setRecording(true);
+          setHint("");
+          invoke("set_hotkeys_suspended", { suspended: true }).catch(() => {});
+        }}
+        title="点击后按下新的组合键（须含修饰键）；Del 清除；Esc 取消"
+      >
+        {recording ? "请按下组合键（Del 清除 / Esc 取消）" : display}
+      </button>
+      {!recording && !!value && value !== "None" && (
+        <button
+          type="button"
+          className="hotkey-clear"
+          title="清除该快捷键"
+          onClick={() => onChange("None")}
+        >
+          ×
+        </button>
+      )}
+      {hint && <span className="hotkey-hint">{hint}</span>}
+    </span>
   );
 };
 
@@ -280,6 +342,14 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
   onLocalChange,
 }) => {
   const [netOk, setNetOk] = useState<boolean | null>(null);
+  // 离线模型：下载/加载进度（offline-mt-status 事件，8秒无更新自动隐藏）、已安装列表、按方向下载
+  const [mtStatus, setMtStatus] = useState<string | null>(null);
+  const [mtModels, setMtModels] = useState<any[]>([]);
+  const [dlFrom, setDlFrom] = useState("en");
+  const [dlTo, setDlTo] = useState("zh");
+  const [dlBusy, setDlBusy] = useState(false);
+  const [mtNotice, setMtNotice] = useState<{ ok: boolean; text: string } | null>(null);
+  const mtStatusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (activeMenu !== "basic") return;
@@ -287,6 +357,67 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
       .then((n) => setNetOk(!!n?.is_online))
       .catch(() => setNetOk(null));
   }, [activeMenu]);
+
+  // 离线模型状态事件：进度条显示，8秒无更新自动隐藏
+  useEffect(() => {
+    const un = listen<string>("offline-mt-status", (e) => {
+      setMtStatus(e.payload);
+      if (mtStatusTimer.current) clearTimeout(mtStatusTimer.current);
+      mtStatusTimer.current = setTimeout(() => setMtStatus(null), 8000);
+    });
+    return () => {
+      un.then((f) => f());
+      if (mtStatusTimer.current) clearTimeout(mtStatusTimer.current);
+    };
+  }, []);
+
+  // 进入翻译引擎页时刷新已安装模型列表
+  const loadMtModels = () =>
+    invoke<any[]>("list_offline_models")
+      .then((list) => setMtModels(list || []))
+      .catch(() => setMtModels([]));
+  useEffect(() => {
+    if (activeMenu === "translation") loadMtModels();
+  }, [activeMenu]);
+
+  // 按方向下载 OPUS-MT 语言对（中转方向自动展开全部所需模型）
+  const downloadPair = async (engine = "opus-mt") => {
+    setDlBusy(true);
+    setMtNotice(null);
+    try {
+      await invoke("download_offline_model", {
+        engine,
+        from: dlFrom,
+        to: dlTo,
+      });
+      setMtNotice({ ok: true, text: "模型已就绪" });
+    } catch (e) {
+      setMtNotice({ ok: false, text: `下载失败：${e}` });
+    } finally {
+      setDlBusy(false);
+      loadMtModels();
+    }
+  };
+
+  const deleteModel = async (repo: string) => {
+    if (!window.confirm(`确定删除模型 ${repo}？删除后首次使用会重新下载。`)) return;
+    try {
+      await invoke("delete_offline_model", { repo });
+      setMtNotice({ ok: true, text: "已删除" });
+    } catch (e) {
+      setMtNotice({ ok: false, text: `删除失败：${e}` });
+    }
+    loadMtModels();
+  };
+
+  // 下载方向随“默认翻译方向”初始化（auto 无对应模型，按英语处理）
+  useEffect(() => {
+    const d: string = localSettings?.default_translation_direction || "";
+    if (!d.includes("->")) return;
+    const [f, t] = d.split("->");
+    if (f && f !== "auto") setDlFrom(f);
+    if (t) setDlTo(t);
+  }, [localSettings?.default_translation_direction]);
 
   const handleSettingChange = (key: string, value: any) => {
     onLocalChange({ ...localSettings, [key]: value });
@@ -871,6 +1002,21 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
             <label className="toggle-switch">
               <input
                 type="checkbox"
+                checked={localSettings?.screenshot_freeze_frame ?? true}
+                onChange={(e) =>
+                  handleSettingChange("screenshot_freeze_frame", e.target.checked)
+                }
+              />
+              <span className="toggle-slider"></span>
+            </label>
+            <span className="toggle-label">
+              冻结画面（触发瞬间固定屏幕快照，视频/动画内容所见即所得；关闭=实时画面）
+            </span>
+          </div>
+          <div className="toggle-group">
+            <label className="toggle-switch">
+              <input
+                type="checkbox"
                 checked={localSettings?.screenshot_behavior?.cover_original_text || false}
                 onChange={(e) =>
                   handleSettingChange("screenshot_behavior", {
@@ -922,7 +1068,10 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
     );
   };
 
-  const renderOfflineModel = () => (
+  const renderOfflineModel = () => {
+    // 与后端 route 一致：任一端为英语即有直达模型，其余组合经英语中转（2个模型）
+    const direct = dlFrom === "en" || dlTo === "en";
+    return (
     <div className="settings-section">
       <h3 className="section-title">离线翻译引擎</h3>
 
@@ -933,38 +1082,125 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
           value={localSettings?.offline_model || "opus-mt"}
           onChange={(e) => handleSettingChange("offline_model", e.target.value)}
         >
-          <option value="opus-mt">OPUS-MT（轻量快速 · 按语言对约30-80MB · 当前使用）</option>
-          <option value="nllb-200" disabled>
-            NLLB-200 蒸馏版（200种语言单模型 · 约600MB · 实验性完善中，暂建议 OPUS-MT）
+          <option value="opus-mt">OPUS-MT（轻量快速 · 按语言对约30-80MB）</option>
+          <option value="nllb-200">
+            NLLB-200 蒸馏版（200种语言单模型直达 · 约600MB · 解码较慢）
           </option>
           <option value="disabled">禁用离线翻译</option>
         </select>
         <div className="form-hint">
           排在在线引擎之后自动兜底，也可在截图菜单手动选中。
           首次使用某语言对时自动下载模型并存于程序目录 models/mt/，此后完全离线。
-          中↔英为专门模型直达；日/韩/俄/法/德/西/葡经英语中转。
+          OPUS-MT 中↔英为专门模型直达；日/韩/俄/法/德/西/葡经英语中转；NLLB-200 任意语言对直达。
         </div>
       </div>
 
+      {/* 模型下载/加载进度（后端 offline-mt-status 事件推送） */}
+      {mtStatus && (
+        <div className="form-group mt-status-bar" role="status">
+          <span className="mt-spinner" aria-hidden="true"></span>
+          <span>{mtStatus}</span>
+        </div>
+      )}
+
+      {/* 已安装模型列表 */}
       <div className="form-group">
-        <label className="form-label">模型下载</label>
-        <button
-          className="button secondary"
-          onClick={async () => {
-            try {
-              await invoke("download_offline_model");
-              alert("离线模型已就绪");
-            } catch (e) {
-              alert(`模型下载失败：${e}`);
-            }
-          }}
-        >
-          手动下载当前方向模型
-        </button>
+        <label className="form-label">已安装模型</label>
+        {mtModels.length === 0 ? (
+          <div className="form-hint">
+            暂无已安装模型——首次使用离线翻译时自动下载，或在下方手动下载
+          </div>
+        ) : (
+          <div className="mt-model-list">
+            {mtModels.map((m) => (
+              <div className="mt-model-row" key={m.repo}>
+                <span className="mt-model-name">
+                  {m.label}
+                  {" "}
+                  <small>{Math.max(1, Math.round(m.size_bytes / 1024 / 1024))} MB</small>
+                  {!m.complete && (
+                    <em className="mt-incomplete">（未完整，重新下载可补齐）</em>
+                  )}
+                </span>
+                <button
+                  className="button secondary mt-model-del"
+                  onClick={() => deleteModel(m.repo)}
+                  title={`删除 ${m.repo}`}
+                >
+                  删除
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* 按方向下载 OPUS-MT 语言对 */}
+      <div className="form-group">
+        <label className="form-label">下载 OPUS-MT 语言对模型</label>
+        <div className="mt-dl-row">
+          <select
+            className="form-select"
+            value={dlFrom}
+            onChange={(e) => setDlFrom(e.target.value)}
+            disabled={dlBusy}
+          >
+            {OFFLINE_LANGS.map((l) => (
+              <option key={l.id} value={l.id}>
+                {l.label}
+              </option>
+            ))}
+          </select>
+          <span className="mt-dl-arrow">→</span>
+          <select
+            className="form-select"
+            value={dlTo}
+            onChange={(e) => setDlTo(e.target.value)}
+            disabled={dlBusy}
+          >
+            {OFFLINE_LANGS.map((l) => (
+              <option key={l.id} value={l.id}>
+                {l.label}
+              </option>
+            ))}
+          </select>
+          <button
+            className="button secondary"
+            disabled={dlBusy || dlFrom === dlTo}
+            onClick={() => downloadPair("opus-mt")}
+          >
+            {dlBusy ? "下载中…" : "下载"}
+          </button>
+        </div>
         <div className="form-hint">
-          按上方“默认翻译方向”预下载所需模型（进度提示会显示在截图翻译面板），下载后可离线使用
+          {dlFrom === dlTo
+            ? "源语言与目标语言相同，无需下载"
+            : direct
+              ? "该方向有专门模型直达（下载 1 个）"
+              : "该方向无直达模型，将下载经英语中转的 2 个模型"}
         </div>
       </div>
+
+      {/* NLLB-200 单模型 */}
+      <div className="form-group">
+        <label className="form-label">下载 NLLB-200 单模型</label>
+        <button
+          className="button secondary"
+          disabled={dlBusy}
+          onClick={() => downloadPair("nllb-200")}
+        >
+          下载 NLLB-200（约600MB）
+        </button>
+        <div className="form-hint">
+          单模型覆盖全部语言对直达，无需英语中转；体积大且 CPU 解码较慢，轻量场景建议 OPUS-MT
+        </div>
+      </div>
+
+      {mtNotice && (
+        <div className={`form-group form-hint ${mtNotice.ok ? "mt-ok" : "mt-err"}`}>
+          {mtNotice.text}
+        </div>
+      )}
 
       <div className="form-group">
         <label className="form-label">术语优先级调整</label>
@@ -983,13 +1219,16 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         </div>
       </div>
     </div>
-  );
+    );
+  };
 
   const renderHotkeySettings = () => (
     <div className="settings-section">
       <h3 className="section-title">快捷键</h3>
       <p className="form-hint">
-        点击输入框后直接按下新的组合键即可录入（录入期间全局快捷键暂停，避免被抢先触发）
+        点击输入框后直接按下新的组合键即可录入（录入期间全局快捷键暂停，避免被抢先触发）。
+        修饰键区分左右：LCtrl/RCtrl = 左/右 Ctrl（LAlt/RAlt、LShift/RShift、LWin/RWin 同理），
+        不带前缀 = 两侧均可触发；组合键必须含修饰键，按 Del 清除、Esc 取消。
       </p>
 
       <div className="form-group">
@@ -1042,7 +1281,7 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         <p>
           <strong>智能翻译软件</strong>
         </p>
-        <p>版本: 0.2.1</p>
+        <p>版本: 0.4.12</p>
         <p>技术栈: Tauri 2 + React + Rust（ONNX Runtime 本地推理）</p>
         <p>
           开源地址:{" "}

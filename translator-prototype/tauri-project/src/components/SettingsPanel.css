@@ -579,3 +579,129 @@ input:checked + .toggle-slider:before {
   font-weight: 600;
   min-width: 80px;
 }
+
+/* ===== 离线翻译：下载进度条 / 已安装模型列表 / 按方向下载 ===== */
+.mt-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 4px;
+  background: #eef4fd;
+  color: #1976d2;
+  font-size: 13px;
+}
+
+.mt-spinner {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  border: 2px solid #bcd4f5;
+  border-top-color: #1976d2;
+  border-radius: 50%;
+  animation: mt-spin 0.8s linear infinite;
+}
+
+@keyframes mt-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.mt-model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mt-model-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  background: #fafafa;
+}
+
+.mt-model-name {
+  font-size: 13px;
+  color: #374151;
+}
+
+.mt-model-name small {
+  color: #9ca3af;
+}
+
+.mt-incomplete {
+  color: #d97706;
+  font-style: normal;
+  font-size: 12px;
+  margin-left: 6px;
+}
+
+.mt-model-del {
+  margin-left: 0;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: #b91c1c;
+}
+
+.mt-dl-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mt-dl-row .form-select {
+  flex: 1;
+  min-width: 0;
+}
+
+.mt-dl-row .button.secondary {
+  margin-left: 0;
+  flex: none;
+}
+
+.mt-dl-arrow {
+  color: #9ca3af;
+  flex: none;
+}
+
+.form-hint.mt-ok {
+  color: #15803d;
+}
+
+.form-hint.mt-err {
+  color: #b91c1c;
+}
+
+/* ===== 快捷键录入框：清除按钮 + 行内提示 ===== */
+.hotkey-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.hotkey-clear {
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 50%;
+  background: #f5f5f5;
+  color: #b91c1c;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  flex: none;
+}
+
+.hotkey-clear:hover {
+  background: #fee2e2;
+}
+
+.hotkey-hint {
+  color: #d97706;
+  font-size: 12px;
+}

@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import "./TranslatePanel.css";
 
 interface Language {
@@ -49,6 +50,21 @@ const TranslatePanel: React.FC<TranslatePanelProps> = ({ pendingText, onConsumed
   const [defaultEngine, setDefaultEngine] = useState("");
   // auto 状态下点击 ⇄ 的可见提示
   const [swapHint, setSwapHint] = useState(false);
+  // 离线模型下载/加载进度（offline-mt-status 事件，8秒无更新自动隐藏）
+  const [mtStatus, setMtStatus] = useState<string | null>(null);
+  const mtStatusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    const un = listen<string>("offline-mt-status", (e) => {
+      setMtStatus(e.payload);
+      if (mtStatusTimer.current) clearTimeout(mtStatusTimer.current);
+      mtStatusTimer.current = setTimeout(() => setMtStatus(null), 8000);
+    });
+    return () => {
+      un.then((f) => f());
+      if (mtStatusTimer.current) clearTimeout(mtStatusTimer.current);
+    };
+  }, []);
   const [network, setNetwork] = useState<NetworkStatus | null>(null);
 
   useEffect(() => {
@@ -243,6 +259,9 @@ const TranslatePanel: React.FC<TranslatePanelProps> = ({ pendingText, onConsumed
           测试文本预处理
         </button>
       </div>
+
+      {/* 离线模型下载/加载进度（后端 offline-mt-status 事件推送，8秒无更新自动消失） */}
+      {mtStatus && <div className="mt-status-inline" role="status">{mtStatus}</div>}
 
       {error && <div className="error-msg">{error}</div>}
 

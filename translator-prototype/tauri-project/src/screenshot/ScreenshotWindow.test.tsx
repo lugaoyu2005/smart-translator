@@ -130,6 +130,7 @@ describe("ScreenshotWindow 窗口风暴回归锁", () => {
     // 随时间无限增长：45秒内 show/hide 30次、每秒数十轮 invoke）
     expect(count("get_app_settings")).toBeLessThanOrEqual(4);
     expect(count("list_engines")).toBeLessThanOrEqual(4);
-    expect(count("preheat_screenshot")).toBeLessThanOrEqual(4);
+    // 预热已彻底移除：屏幕外全屏窗口 show/hide 仍会触发桌面重绘（图标闪烁）
+    expect(count("preheat_screenshot")).toBe(0);
   });
 });

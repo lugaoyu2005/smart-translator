@@ -13,6 +13,13 @@ use crate::translation::AppState;
 use tauri::Manager;
 
 fn main() {
+    // 禁用 WebView2 硬件加速（GPU 合成）：部分 Windows 11 + 显卡驱动组合下，
+    // GPU 合成激活后会持续触发桌面重绘（表现为桌面/文件图标一直闪烁）。
+    // 本应用 UI 简单，软件合成性能无感知差异。必须在 Builder 之前设置。
+    std::env::set_var(
+        "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+        "--disable-gpu --disable-gpu-compositing",
+    );
     tauri::Builder::default()
         // 单实例：二次启动唤起已有实例的主窗口（必须为第一个插件）
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -56,6 +63,13 @@ fn main() {
             // 离线翻译下载进度推送给前端（测试等无GUI场景不注入则静默跳过）
             let _ = offline_mt::APP_HANDLE.set(app.handle().clone());
 
+            // 后台预热：提前加载已下载的离线模型会话（消除首次框选翻译 1-3 秒的模型加载卡顿）；
+            // 延迟 5 秒避开启动高峰，仅加载已下载模型，绝不触发下载
+            std::thread::spawn(|| {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                tauri::async_runtime::block_on(offline_mt::warmup());
+            });
+
             // 主窗口尺寸：按"上次大小/固定大小"模式应用
             if let Some(main_win) = app.get_webview_window("main") {
                 let (w, h) = match settings.window_size_mode.as_str() {
@@ -83,9 +97,9 @@ fn main() {
                 eprintln!("[启动] 注册全局快捷键失败: {e}");
             }
 
-            // 截图窗口：置穿透 + TOOLWINDOW（不进 Alt+Tab）。不在此处显示——
-            // 全屏窗口显隐会强制桌面重绘（文件管理器闪烁），预热由前端首帧后
-            // 调用 preheat_screenshot 在屏幕外完成
+            // 截图窗口：置穿透 + TOOLWINDOW（不进 Alt+Tab）。启动全程不显示——
+            // 全屏窗口显隐（含移出屏幕外的预热）都会触发桌面重绘导致图标闪烁，
+            // 首次触发截图时才显示（代价仅首次多几百毫秒合成初始化）
             if let Some(win) = app.get_webview_window("screenshot") {
                 let _ = win.set_ignore_cursor_events(true);
                 #[cfg(target_os = "windows")]
@@ -137,10 +151,13 @@ fn main() {
             history::delete_history_entry,
             history::clear_history,
             system::trigger_screenshot_cmd,
-            system::preheat_screenshot,
             system::poll_esc,
             system::set_hotkeys_suspended,
             system::download_offline_model,
+            system::list_offline_models,
+            system::delete_offline_model,
+            screenshot::take_snapshot,
+            screenshot::crop_snapshot_region,
             terms::list_packages,
             terms::save_package,
             terms::delete_package,

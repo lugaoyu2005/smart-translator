@@ -19,8 +19,13 @@ body,
   position: relative;
   width: 100%;
   height: 100%;
-  cursor: crosshair;
   user-select: none;
+}
+
+/* 十字准星仅框选阶段显示：处理/结果阶段默认光标
+  （结果阶段点击是切换覆盖层，准星会误导用户去框选） */
+.screenshot-root.cross-mode {
+  cursor: crosshair;
 }
 
 /* Ctrl多选拖选模式（仅结果阶段）：箭头光标 + 根节点可选中文字（可从块外起拖） */
@@ -160,7 +165,7 @@ body,
 }
 
 /* ============ 按键组（菜单组） ============ */
-/* 整组：低透明度背景+圆角，10%→悬停100%，可拖动 */
+/* 整组：白底浅色工具条，10%→悬停100%，可拖动；chips 与设置页菜单组件同风格 */
 
 .menu-group {
   position: fixed;
@@ -169,7 +174,8 @@ body,
   gap: 6px;
   padding: 6px 8px;
   border-radius: 12px;
-  background: rgba(30, 32, 36, 0.6);
+  background: rgba(255, 255, 255, 0.97);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.2);
   opacity: 0.1;
   transition: opacity 0.2s;
   z-index: 30;
@@ -186,71 +192,92 @@ body,
   cursor: grabbing;
 }
 
-/* 引擎菜单：点击向上展开的垂直引擎选择栏 */
+/* 引擎/语言菜单：紧贴被点 chip 顶边正上方弹出的选项面板
+  （chip 完整可见；面板与 chip 左对齐、宽约等于 chip；选项为白底蓝字、
+    蓝色细分隔线隔开的堆叠条目；高度受限内部滚动） */
 .engine-wrap {
   position: relative;
 }
 
-.engine-menu {
-  position: absolute;
-  bottom: calc(100% + 8px); /* 向上展开 */
-  left: 50%;
-  transform: translateX(-50%); /* 以按钮水平居中 */
+/* 语言对内每个 chip 的独立定位锚点（面板相对各自 chip 定位） */
+.chip-anchor {
+  position: relative;
   display: flex;
-  flex-direction: column; /* 垂直布局 */
-  gap: 2px;
-  padding: 6px;
-  border-radius: 10px;
-  background: rgba(30, 32, 36, 0.94);
-  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.4);
-  z-index: 50;
-  overflow-y: auto; /* 尺寸为触发按钮3×3，超出内部滚动 */
 }
 
-.engine-menu-item {
+.chip-pop {
+  position: absolute;
+  /* 底边与 chip 底边齐平：面板整体位于 chip 上方，底部一段藏于 chip 之后
+    （负 z-index 使 chip 覆盖面板——列表滚动时文字从 chip 顶边后方升出/消失，无缝） */
+  bottom: 0;
+  left: 0; /* 与 chip 左对齐 */
+  width: 100%; /* 严格与 chip 同宽 */
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  flex-direction: column;
+  background: #e8f1fa;
+  border: 1.5px solid #1976d2;
+  border-radius: 10px 10px 0 0; /* 底部直角：与 chip 顶边平直接合 */
+  box-shadow: 0 -4px 14px rgba(25, 118, 210, 0.18);
+  overflow-y: auto; /* 超出限高内部滚动（滚动条隐藏） */
+  max-height: 124px; /* 高度受限：约 chip高×4（可见伸出3×+藏于chip后1×），不铺开全列表 */
+  scrollbar-width: none; /* 标准属性：隐藏滚动条 */
+  z-index: -1; /* 藏于 chip 之后（menu-group 层叠上下文内的负层级） */
+}
+
+/* 面板展开时被覆盖 chip 的顶部圆角取直：与面板平直连成一体 */
+.chip-anchor:has(.chip-pop) > button,
+.engine-wrap:has(.chip-pop) > button {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
+.chip-pop::-webkit-scrollbar {
+  display: none; /* Chromium：隐藏滚动条（滚动能力保留） */
+}
+
+.chip-pop-item {
+  flex: none; /* 禁止 flex 压缩子项（否则限高时文字被裁成叠影），超出走容器滚动 */
   border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: #ddd;
+  border-top: 1px solid rgba(25, 118, 210, 0.45); /* 蓝色细分隔线 */
+  background: #e8f1fa;
+  color: #1976d2;
   font-size: 13px;
   font-family: inherit;
-  padding: 7px 10px;
+  padding: 8px 14px;
   cursor: pointer;
   white-space: nowrap;
-  text-align: left;
+  text-align: center;
+  overflow: hidden; /* 等宽面板内长引擎名省略显示，不撑宽 */
+  text-overflow: ellipsis;
 }
 
-.engine-menu-item:hover {
-  background: rgba(255, 255, 255, 0.15);
-  color: #fff;
+.chip-pop-item:first-child {
+  border-top: none;
 }
 
-.engine-menu-item.active {
-  color: #8ecbff;
-  background: rgba(33, 150, 243, 0.18);
+.chip-pop-item:hover {
+  background: #d7e9f9;
 }
 
-.engine-check {
+.chip-pop-item.active {
+  background: #d0e7fa;
+  font-weight: 600;
+}
+
+.chip-pop-empty {
+  color: #8a94a6;
   font-size: 12px;
-}
-
-.engine-menu-empty {
-  color: #999;
-  font-size: 12px;
-  padding: 6px 10px;
+  padding: 8px 14px;
   white-space: nowrap;
 }
 
-/* 组内组件：同样式，透明度略高一点 */
+
+/* 组内组件：浅蓝底蓝描边蓝字（与设置页菜单组件 chips 启用态同款） */
 .group-item {
-  border: none;
+  border: 1.5px solid #1976d2;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.16);
-  color: #eee;
+  background: #e3f2fd;
+  color: #1976d2;
   font-size: 13px;
   font-family: inherit;
   padding: 6px 10px;
@@ -259,16 +286,17 @@ body,
 }
 
 .group-item:hover {
-  background: rgba(255, 255, 255, 0.3);
+  background: #d3e9fb;
 }
 
 .group-item.engine {
-  min-width: 64px;
+  /* 加宽到容纳最长语言名（“西班牙语”等3字名+边距），弹层与chip同宽才不截断选项 */
+  min-width: 100px;
 }
 
 .group-item.toggle {
   font-weight: 700;
-  color: #8ecbff;
+  color: #1976d2;
   min-width: 32px;
   text-align: center;
 }
@@ -285,7 +313,9 @@ body,
 }
 
 .group-item.close:hover {
-  background: rgba(220, 60, 60, 0.5);
+  background: #fdecea;
+  border-color: #c62828;
+  color: #c62828;
 }
 
 /* ============ 报错显示（框选区域内） ============ */
@@ -336,15 +366,10 @@ body,
 }
 
 .lang-arrow {
-  color: #ddd;
+  color: #1976d2;
   font-size: 12px;
 }
 
-.lang-section {
-  font-size: 11px;
-  color: #8a94a6;
-  padding: 4px 10px 2px;
-}
 
 /* ============ 提示 ============ */
 
@@ -369,4 +394,14 @@ body,
 .mt-status {
   margin-top: 4px;
   opacity: 0.85;
+}
+
+/* 冻结画面：触发瞬间的全屏快照铺底（暗幕/选区/提示叠加其上） */
+.freeze-snapshot {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill; /* 快照物理尺寸铺满窗口逻辑尺寸，与真实屏幕逐像素对齐 */
+  pointer-events: none;
 }

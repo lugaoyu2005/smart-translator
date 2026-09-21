@@ -12,6 +12,10 @@ use std::sync::Mutex;
 /// 把"截图"与"OCR"拆成两步，让前端在较慢的OCR期间恢复UI显示
 static LAST_CAPTURE: Mutex<Option<ScreenshotData>> = Mutex::new(None);
 
+/// 冻结画面：触发截图翻译瞬间的全屏快照（show overlay 前截取，画面干净）。
+/// 框选完成后从中裁剪选区送 OCR；实时画面模式为空（走现场截屏兜底）
+static SCREEN_SNAPSHOT: Mutex<Option<ScreenshotData>> = Mutex::new(None);
+
 /// 截图数据：原始BGRA像素 + 尺寸
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ScreenshotData {
@@ -59,6 +63,61 @@ mod win {
         GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, HGDIOBJ,
         SRCCOPY,
     };
+
+    /// GDI BitBlt 的 32bpp 像素 alpha 字节是未定义值（实测通常为 0），统一置为不透明。
+    /// 不修复的话 Windows OCR（Premultiplied 语义）与有道 OCR（像素直接编 PNG）
+    /// 会拿到全透明图而静默返回空结果；RapidOCR 丢弃 alpha 不受影响
+    pub(crate) fn opaque_alpha(pixels: &mut [u8]) {
+        for px in pixels.chunks_exact_mut(4) {
+            px[3] = 0xFF;
+        }
+    }
+
+    /// BGRA 像素编码为 PNG（冻结快照 dataURL 用；像素 alpha 需已置 0xFF）
+    pub fn encode_png(pixels: &[u8], width: i32, height: i32) -> Result<Vec<u8>, String> {
+        use windows::Graphics::Imaging::{BitmapAlphaMode, BitmapEncoder, BitmapPixelFormat};
+        use windows::Storage::Streams::{DataReader, InMemoryRandomAccessStream};
+
+        let stream =
+            InMemoryRandomAccessStream::new().map_err(|e| format!("创建内存流失败: {e}"))?;
+        let encoder_id =
+            BitmapEncoder::PngEncoderId().map_err(|e| format!("获取PNG编码器ID失败: {e}"))?;
+        let encoder = BitmapEncoder::CreateAsync(encoder_id, &stream)
+            .map_err(|e| format!("创建编码器失败: {e}"))?
+            .get()
+            .map_err(|e| format!("初始化编码器失败: {e}"))?;
+
+        encoder
+            .SetPixelData(
+                BitmapPixelFormat::Bgra8,
+                BitmapAlphaMode::Premultiplied,
+                width as u32,
+                height as u32,
+                1.0,
+                1.0,
+                pixels,
+            )
+            .map_err(|e| format!("写入像素数据失败: {e}"))?;
+        encoder
+            .FlushAsync()
+            .map_err(|e| format!("启动编码失败: {e}"))?
+            .get()
+            .map_err(|e| format!("编码完成失败: {e}"))?;
+
+        let size = stream.Size().map_err(|e| format!("读取流大小失败: {e}"))? as u32;
+        let reader =
+            DataReader::CreateDataReader(&stream).map_err(|e| format!("创建读取器失败: {e}"))?;
+        reader
+            .LoadAsync(size)
+            .map_err(|e| format!("加载流数据失败: {e}"))?
+            .get()
+            .map_err(|e| format!("读取流数据失败: {e}"))?;
+        let mut buf = vec![0u8; size as usize];
+        reader
+            .ReadBytes(&mut buf)
+            .map_err(|e| format!("读取字节失败: {e}"))?;
+        Ok(buf)
+    }
 
     /// GDI截图：捕获屏幕指定区域，返回BGRA像素（自顶向下）
     pub fn capture_region(
@@ -134,6 +193,8 @@ mod win {
             if lines == 0 {
                 return Err("GetDIBits读取像素失败".to_string());
             }
+
+            opaque_alpha(&mut pixels);
 
             Ok(ScreenshotData {
                 pixels,
@@ -264,13 +325,20 @@ mod win {
             let max_h = line.iter().map(|x| x.height).fold(0.0f64, f64::max);
 
             // 行内按水平间隔二次切分：间隔 > 1.5×行高 视为左右并排的独立文本
-            // （表格两列、标签+值等），不再硬拼成一行（用户反馈：间隔过大仍识别一起）
+            // （表格两列、标签+值等），不再硬拼成一行（用户反馈：间隔过大仍识别一起）。
+            // 纯符号（标点）词不作为断点——Windows OCR 常把标点识别为独立小词且周围留白大，
+            // 用户反馈"一句话在符号处高发左右分离"，标点一律吸附回句子
+            let is_symbol_only =
+                |t: &str| !t.chars().any(|c| c.is_alphanumeric());
             let mut segments: Vec<Vec<&OcrWordItem>> = vec![vec![&line[0]]];
             for w in line.iter().skip(1) {
                 let seg = segments.last_mut().unwrap();
                 let prev = seg.last().unwrap();
                 let gap_x = w.x - (prev.x + prev.width);
-                if gap_x > max_h * 1.5 {
+                if gap_x > max_h * 1.5
+                    && !is_symbol_only(&prev.text)
+                    && !is_symbol_only(&w.text)
+                {
                     segments.push(vec![w]);
                 } else {
                     seg.push(w);
@@ -340,53 +408,28 @@ mod win {
         height: i32,
         corrections: &[(String, String)],
     ) -> Result<OcrResult, String> {
-        use windows::Graphics::Imaging::{
-            BitmapAlphaMode, BitmapDecoder, BitmapEncoder, BitmapPixelFormat,
-        };
-        use windows::Storage::Streams::InMemoryRandomAccessStream;
+        use windows::Graphics::Imaging::{BitmapPixelFormat, SoftwareBitmap};
+        use windows::Storage::Streams::DataWriter;
 
         // 小区域放大后再识别（提升小字号识别率，修复小框选误判）
         let (pixels, width, height, scale) = upscale_pixels(pixels, width, height);
 
-        // 通过WinRT编码器将像素写入流（Bgra8）
-        let stream =
-            InMemoryRandomAccessStream::new().map_err(|e| format!("创建内存流失败: {e}"))?;
-
-        let encoder_id =
-            BitmapEncoder::PngEncoderId().map_err(|e| format!("获取PNG编码器ID失败: {e}"))?;
-        let encoder = BitmapEncoder::CreateAsync(encoder_id, &stream)
-            .map_err(|e| format!("创建编码器失败: {e}"))?
-            .get()
-            .map_err(|e| format!("初始化编码器失败: {e}"))?;
-
-        encoder
-            .SetPixelData(
-                BitmapPixelFormat::Bgra8,
-                BitmapAlphaMode::Premultiplied,
-                width as u32,
-                height as u32,
-                1.0,
-                1.0,
-                &pixels,
-            )
+        // 像素直接构造 SoftwareBitmap——省掉 PNG 编码+解码两大步
+        // （曾走 WIC PngEncoder→BitmapDecoder 往返，大区域仅编解码即可耗 50-200ms）
+        let writer = DataWriter::new().map_err(|e| format!("创建DataWriter失败: {e}"))?;
+        writer
+            .WriteBytes(&pixels)
             .map_err(|e| format!("写入像素数据失败: {e}"))?;
-        encoder
-            .FlushAsync()
-            .map_err(|e| format!("启动编码失败: {e}"))?
-            .get()
-            .map_err(|e| format!("编码完成失败: {e}"))?;
-
-        // 重置流位置，解码为SoftwareBitmap
-        stream.Seek(0).map_err(|e| format!("重置流失败: {e}"))?;
-        let decoder = BitmapDecoder::CreateAsync(&stream)
-            .map_err(|e| format!("创建解码器失败: {e}"))?
-            .get()
-            .map_err(|e| format!("初始化解码器失败: {e}"))?;
-        let bitmap = decoder
-            .GetSoftwareBitmapAsync()
-            .map_err(|e| format!("启动位图解码失败: {e}"))?
-            .get()
-            .map_err(|e| format!("位图解码失败: {e}"))?;
+        let buffer = writer
+            .DetachBuffer()
+            .map_err(|e| format!("提取像素缓冲失败: {e}"))?;
+        let bitmap = SoftwareBitmap::CreateCopyFromBuffer(
+            &buffer,
+            BitmapPixelFormat::Bgra8,
+            width,
+            height,
+        )
+        .map_err(|e| format!("构造位图失败: {e}"))?;
 
         // 创建OCR引擎：优先中文
         let (engine, lang_name) = create_ocr_engine()?;
@@ -446,8 +489,23 @@ mod win {
         })
     }
 
-    /// 创建OCR引擎：中文优先，fallback用户配置语言
+    /// 创建OCR引擎：中文优先，fallback用户配置语言。
+    /// 引擎进程内缓存（创建有开销，每次截图复用；语言包运行期不变）
     fn create_ocr_engine() -> Result<(windows::Media::Ocr::OcrEngine, String), String> {
+        static CACHED: std::sync::OnceLock<
+            Option<(windows::Media::Ocr::OcrEngine, String)>,
+        > = std::sync::OnceLock::new();
+        if let Some(hit) = CACHED.get() {
+            return hit
+                .clone()
+                .ok_or_else(|| "无法创建OCR引擎（系统未安装OCR语言包）".to_string());
+        }
+        let result = create_ocr_engine_fresh();
+        let _ = CACHED.set(result.as_ref().ok().cloned());
+        result
+    }
+
+    fn create_ocr_engine_fresh() -> Result<(windows::Media::Ocr::OcrEngine, String), String> {
         use windows::Globalization::Language;
         use windows::Media::Ocr::OcrEngine;
 
@@ -481,6 +539,139 @@ pub fn capture_region_store(x: i32, y: i32, width: i32, height: i32) -> Result<(
             .lock()
             .map_err(|_| "截图缓存锁不可用".to_string())? = Some(data);
         Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (x, y, width, height);
+        Err("当前平台暂不支持截图".to_string())
+    }
+}
+
+/// 冻结画面：截取屏幕区域（物理坐标）存入快照暂存（trigger_screenshot 在 show overlay 前调用）
+pub fn capture_snapshot_region(x: i32, y: i32, width: i32, height: i32) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let data = win::capture_region(x, y, width, height)?;
+        *SCREEN_SNAPSHOT
+            .lock()
+            .map_err(|_| "快照缓存锁不可用".to_string())? = Some(data);
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (x, y, width, height);
+        Err("当前平台暂不支持截图".to_string())
+    }
+}
+
+/// BGRA 像素按 factor 整数倍最近邻降采样（冻结底图显示专用：
+/// 半分辨率 PNG 编码/传输/解码耗时约为全屏的 1/4~1/5；识别仍用原始像素不受影响）
+fn downscale_bgra(
+    pixels: &[u8],
+    width: i32,
+    height: i32,
+    factor: u32,
+) -> (Vec<u8>, i32, i32) {
+    let f = factor.max(1) as usize;
+    let nw = ((width as usize) / f).max(1);
+    let nh = ((height as usize) / f).max(1);
+    let stride = (width as usize) * 4;
+    let mut out = Vec::with_capacity(nw * nh * 4);
+    for ny in 0..nh {
+        let src_row = ny * f * stride;
+        for nx in 0..nw {
+            let src = src_row + nx * f * 4;
+            out.extend_from_slice(&pixels[src..src + 4]);
+        }
+    }
+    (out, nw as i32, nh as i32)
+}
+
+/// Tauri命令：取触发瞬间快照，返回 PNG dataURL（冻结模式前端全屏铺底显示）。
+/// 半分辨率(1/2) PNG：编码+传输+解码全链路 ~150-250ms（原全屏 PNG 约 500-900ms）。
+/// 无快照（实时模式/截屏失败）返回 image: null，前端不渲染冻结层
+#[tauri::command]
+pub fn take_snapshot() -> Result<Option<String>, String> {
+    use base64::Engine as _;
+    #[cfg(target_os = "windows")]
+    {
+        let guard = SCREEN_SNAPSHOT
+            .lock()
+            .map_err(|_| "快照缓存锁不可用".to_string())?;
+        match guard.as_ref() {
+            Some(data) => {
+                let (px, w2, h2) =
+                    downscale_bgra(&data.pixels, data.width, data.height, 2);
+                let png = win::encode_png(&px, w2, h2)?;
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+                Ok(Some(format!("data:image/png;base64,{b64}")))
+            }
+            None => Ok(None),
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(None)
+    }
+}
+
+/// 从全屏快照按物理坐标裁剪选区（纯函数：越界/无效选区返回 None）
+fn crop_pixels(
+    snap: &ScreenshotData,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) -> Option<ScreenshotData> {
+    if x < 0
+        || y < 0
+        || width <= 0
+        || height <= 0
+        || x + width > snap.width
+        || y + height > snap.height
+    {
+        return None;
+    }
+    // BGRA 行主序裁剪：逐行拷贝选区像素
+    let mut out = Vec::with_capacity((width * height * 4) as usize);
+    for row in y..y + height {
+        let start = ((row * snap.width) + x) * 4;
+        let end = start + width * 4;
+        out.extend_from_slice(&snap.pixels[start as usize..end as usize]);
+    }
+    Some(ScreenshotData {
+        pixels: out,
+        width,
+        height,
+    })
+}
+
+/// Tauri命令：从冻结快照裁剪选区（物理坐标）存入 LAST_CAPTURE 供 OCR。
+/// 快照为空（实时模式/降级）时兜底现场截选区——两条模式共用此命令
+#[tauri::command]
+pub fn crop_snapshot_region(x: i32, y: i32, width: i32, height: i32) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let crop = {
+            let guard = SCREEN_SNAPSHOT
+                .lock()
+                .map_err(|_| "快照缓存锁不可用".to_string())?;
+            guard.as_ref().and_then(|snap| crop_pixels(snap, x, y, width, height))
+        };
+        match crop {
+            Some(data) => {
+                *LAST_CAPTURE
+                    .lock()
+                    .map_err(|_| "截图缓存锁不可用".to_string())? = Some(data);
+                // 选区已取出：清掉全屏快照释放内存（约 数十MB）
+                *SCREEN_SNAPSHOT
+                    .lock()
+                    .map_err(|_| "快照缓存锁不可用".to_string())? = None;
+                Ok(())
+            }
+            // 无快照（实时模式）或选区越界（拓扑变更等）：现场截选区兜底
+            None => capture_region_store(x, y, width, height),
+        }
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -782,6 +973,85 @@ pub fn capture_region(x: i32, y: i32, width: i32, height: i32) -> Result<Screens
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_crop_pixels_geometry() {
+        // 2x2 快照，四像素各不同（BGRA）
+        let snap = ScreenshotData {
+            pixels: vec![1, 1, 1, 255, 2, 2, 2, 255, 3, 3, 3, 255, 4, 4, 4, 255],
+            width: 2,
+            height: 2,
+        };
+        // 右下像素裁剪：位置/尺寸/内容逐字节校验
+        let c = crop_pixels(&snap, 1, 1, 1, 1).unwrap();
+        assert_eq!((c.width, c.height), (1, 1));
+        assert_eq!(c.pixels, vec![4, 4, 4, 255]);
+        // 左上区域 2x1
+        let c2 = crop_pixels(&snap, 0, 0, 2, 1).unwrap();
+        assert_eq!(c2.pixels, vec![1, 1, 1, 255, 2, 2, 2, 255]);
+        // 越界/无效选区拒绝（现场截屏兜底）
+        assert!(crop_pixels(&snap, 1, 1, 2, 1).is_none());
+        assert!(crop_pixels(&snap, -1, 0, 1, 1).is_none());
+        assert!(crop_pixels(&snap, 0, 0, 0, 1).is_none());
+    }
+
+    #[test]
+    fn test_downscale_bgra() {
+        // 4x2 快照，每像素 BGR 值互异
+        let mut px = Vec::new();
+        for v in [[10u8, 11, 12], [20, 21, 22], [30, 31, 32], [40, 41, 42]] {
+            px.extend_from_slice(&[v[0], v[1], v[2], 255]);
+        }
+        for v in [[50u8, 51, 52], [60, 61, 62], [70, 71, 72], [80, 81, 82]] {
+            px.extend_from_slice(&[v[0], v[1], v[2], 255]);
+        }
+        // factor=2 → 2x1，采样每块左上像素（BGRA 原样拷贝）
+        let (out, w, h) = downscale_bgra(&px, 4, 2, 2);
+        assert_eq!((w, h), (2, 1));
+        assert_eq!(out, vec![10, 11, 12, 255, 30, 31, 32, 255]);
+        // factor=1 → 原样拷贝，尺寸不变
+        let (out2, w2, h2) = downscale_bgra(&px, 4, 2, 1);
+        assert_eq!((w2, h2), (4, 2));
+        assert_eq!(out2.len(), 4 * 2 * 4);
+        assert_eq!(&out2[0..4], &[10, 11, 12, 255]);
+    }
+
+    #[test]
+    fn test_regroup_symbol_no_split() {
+        // 同一行内大间隙但断点处是标点词：不切断（符号吸附回句子）
+        let words = vec![
+            win::OcrWordItem { text: "价格".into(), x: 0.0, y: 0.0, width: 30.0, height: 20.0 },
+            win::OcrWordItem { text: ":".into(), x: 90.0, y: 4.0, width: 8.0, height: 12.0 },
+            win::OcrWordItem { text: "99元".into(), x: 160.0, y: 0.0, width: 40.0, height: 20.0 },
+        ];
+        let lines = win::regroup_words_to_lines(words, &[]);
+        assert_eq!(lines.len(), 1, "含标点的大间隙不应切断同一句话");
+        assert_eq!(lines[0].text, "价格:99元");
+    }
+
+    #[test]
+    fn test_regroup_text_gap_splits() {
+        // 同一行纯文字大间隙（表格两列场景）：仍切分为独立文本
+        let words = vec![
+            win::OcrWordItem { text: "名称".into(), x: 0.0, y: 0.0, width: 30.0, height: 20.0 },
+            win::OcrWordItem { text: "数值".into(), x: 160.0, y: 0.0, width: 30.0, height: 20.0 },
+        ];
+        let lines = win::regroup_words_to_lines(words, &[]);
+        assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn test_opaque_alpha() {
+        // GDI 截图 alpha 通常为 0：统一置 0xFF，RGB 通道不动
+        let mut px = vec![10u8, 20, 30, 0, 40, 50, 60, 0, 1, 2, 3, 255];
+        win::opaque_alpha(&mut px);
+        assert_eq!(px, vec![10, 20, 30, 255, 40, 50, 60, 255, 1, 2, 3, 255]);
+        // 非4倍数长度：尾部不足一个像素的字节不动（当前数据结构不会出现，防御性）
+        let mut tail = vec![1u8, 2, 3, 4, 9];
+        win::opaque_alpha(&mut tail);
+        assert_eq!(&tail[..4], &[1, 2, 3, 255]);
+        assert_eq!(tail[4], 9);
+    }
 
     /// 端到端验证 RapidOCR：模型自动下载 + ONNX Runtime 加载 + 推理管线
     /// 首次运行需联网下载约15MB模型；白图无文字应返回空结果
