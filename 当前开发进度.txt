@@ -1,3 +1,40 @@
+# 当前开发进度
+
+> 最新版本:**v0.4.14**(2026-09-21 构建) · 整理于 2026-10-08
+> 本文档为第 1–45 轮开发的累积日志;下方"最新状态速览"为当前结论,其后为历史轮次原文。
+
+## 一、最新状态速览(v0.4.14)
+
+### 已交付功能
+| 模块 | 状态 | 说明 |
+|---|---|---|
+| 在线翻译 | ✅ | 7 家:百度、有道、腾讯云、阿里云、小牛、DeepL、自定义 OpenAI 兼容 |
+| 离线翻译 | ✅ | OPUS-MT 中/英/日(经英语中转),int8 量化 + KV cache + beam search;NLLB-200 代码保留(实验性置灰) |
+| 截图翻译 | ✅ | 冻结画面、Windows/RapidOCR/有道 三 OCR、覆盖样式、菜单组件可配、边缘累赘几何过滤 |
+| 划词翻译 | ✅ | 全局热键 → 模拟复制 → 主窗口翻译 |
+| 术语库 | ✅ | 术语包 + 方案 + 内置符号纠错 45 条 + CSV/TSV/TXT/JSON 导入 |
+| 翻译历史 | ✅ | 上限 500,搜索/复制/删除 |
+| 系统集成 | ✅ | 托盘、开机自启、单实例、全局快捷键(左右修饰键区分) |
+
+### 验证基线
+- Rust 单元/集成/性能/安全/猴子测试:**cargo test 106 通过**(v0.4.14)
+- 前端:vitest 43 通过;```npm run build```(tsc + vite)通过
+- 系统级链路:```npm run test:system``` 五步全通过
+
+### 待办 / 后续项
+- NLLB-200 解码退化(KV cache 结构差异,需对照 transformers.js 排查)→ 目前实验性置灰
+- 配置/历史迁移到 ```%APPDATA%```(便携式设计当前存 exe 同目录)
+- Windows 未激活,建议激活以恢复补丁渠道
+
+### 整洁化记录(2026-10-08)
+- 源码从回收站恢复到 ```src\```(含 .git / .gitignore / .zcode / docs)
+- 删除:Procmon 抓包(pm2/pm3 共 1.53GiB)、系统排查脚本与日志、```tools\```、```frames_c\```、```release\``` 构建产物(共回收 4.44GiB)
+- 文档迁入 ```docs\``` 并补齐 CHANGELOG v0.4.13/v0.4.14、新增 README
+
+---
+
+## 二、历史轮次记录
+
 当前开发进度如下（基于本会话已确立的事实，更新于 2026-09-06）：
 
 已交付功能 ✅
@@ -369,3 +406,226 @@ RapidOCR本地OCR	✅ 完成	PaddleOCR PP-OCRv6 模型+ONNX Runtime推理，完�
 - 术语管理页排版修复(用户图三):根因为 TSX 类名与 TermsPanel.css 大面积脱节——.term-header/.term-translation-row/.term-btn/.term-delete/.link-text-btn/.package-editor 系列在 CSS 中无定义,元素裸排版(删除按钮插进文字、▲▼×挤在一起、输入框与添加按钮大小失衡)
 - 修复:TermsPanel.css 追加带 .terms-panel 前缀的完整样式(优先级稳定覆盖公共表):术语包行卡片化、导入按钮与+按钮同高、添加表单输入框弹性填充按钮同高、词条头部 flex 删除靠右、译法行灰底胶囊+操作按钮成组、包映射编辑器虚线容器行式输入
 - npm test 43 通过;v0.4.12 打包同步 D:\Smart Translator\ 重启
+
+## 2026-09-18 翻译覆盖块边缘累赘过滤（第四十四轮，v0.4.13）
+- 用户反馈:冻结翻译右键菜单时,覆盖块左右边缘有奇奇怪怪的累赘小块(左侧图标列被OCR成"P"/"7"/"8",右侧子菜单箭头">")
+- 修复两层:
+  1. segment级过滤:孤立单字符非CJK块(图标/装饰误识别为字母数字)丢弃,不产生覆盖块
+  2. 文本级过滤:行内大间隙(>1.5×行高)处的孤立符号词不进文本(曾吸附为正文尾部累赘如"...IDEA>";词保留在segment维持间隙链,不影响后续词的切分判定)
+- 权衡说明:极稀疏(间隙>1.5×行高)的孤立标点会被略去(如"价格:99元"→"价格99元"),换取消除边缘噪声;小间隙句内标点不受影响
+- 新增单测:图标噪声过滤(P/IDEA/>场景);cargo test 105 通过
+- v0.4.13 打包同步 D:\Smart Translator\ 重启
+
+## 2026-09-21 边缘累赘二次修复:几何过滤（第四十五轮，v0.4.14）
+- 用户重测 0.4.13 累赘仍在("巴"/"PC"/"k"/"&"/">"),根因:上一轮单字符过滤阈值太窄——"巴"是单CJK字符被放行、"PC"两字符超阈值、图标词实际识别结果可能多字符
+- 换几何方案(不依赖字符内容):regroup 末尾过滤"水平方向与所有其他行均无重叠的小方字块"(宽度≤行高×2.5,行数≥3才启用避免误杀少量孤立内容)——右键菜单图标列/箭头与正文列无水平重叠,整列清除;正文行与同列行必然水平重叠,完整保留;表格两列场景每列行间互有重叠也不受影响
+- 保留上轮:segment级单字符过滤 + 文本级大间隙符号略去
+- 新增单测:右键菜单场景(k/&/图标列+正文+右箭头)边缘整列清除、正文保留;cargo test 106 通过
+- v0.4.14 打包同步 D:\Smart Translator\ 重启
+
+
+## 2026-10-09 用户反馈 7 项修复（第四十六轮，v0.4.15）
+
+### 严重缺陷：保存密钥后引擎不生效
+- 根因：`save_app_settings` 只落盘 + 应用自启/热键，**从不重建 `TranslationManager`**；而 `TranslationManager::new` 在构造时就 `filter(is_configured)` 永久剔除未填密钥的引擎。启动时（密钥为空）构建的引擎列表被冻结，填好密钥保存后内存里仍是空的 → 截图菜单/翻译测试都只剩"离线翻译"（它 is_configured 恒为 true）
+- 连带后果：截图翻译实际走离线 OPUS-MT，逐段 beam search 解码 → 单张截图 20s+，且对技术文本输出中英混杂乱码（用户截图里的"1.1.开放的ID ID EAE和进口Proct."）
+- 修复：`save_app_settings` 增加 `State<AppState>` 注入，落盘后按新设置重建管理器（重建前先把未落盘的术语使用计数写回 terms.json）；同时补发此前**只监听不发送**的 `screenshot-settings-updated` 事件，截图窗口即时刷新引擎/菜单组件
+- 回归测试：`regression_engine_manager_rebuilt_after_key_save`（空密钥→仅离线；填密钥重建→百度/有道立即出现）
+
+### 截图翻译弹层圆角与显示
+- 根因：`.chip-pop` 用 `bottom:0` + `z-index:-1` 藏在 chip 之后，chip 自身 8px 圆角而面板下缘是直角 → 面板直角从 chip 圆角缺口透出（左下/右下角错位描边）
+- 修复：`bottom: calc(100% - 1.5px)` + `border-bottom:none` + `z-index:6`，面板整体位于 chip 正上方并压住其顶边框，接缝无双线
+
+### 翻译测试页
+- 离线翻译不检测网络延迟：新增 `offlineEngine` 判定 + `engineResolved` 门控（等"当前翻译源"读出后再决定是否探测，避免挂载瞬间先探测一次）；离线时显示"离线翻译（本地模型）· 不检测网络延迟"；在线引擎照旧显示延迟
+
+### 设置页
+- 保存设置/恢复默认改为**全菜单 tab 可用**（此前术语/历史/翻译测试/关于不显示保存栏）
+- 基础设置：删除"系统右键菜单"说明块（功能已不存在）；新增"打开时进入的页面"下拉（后端 `AppSettings.startup_menu` + serde default + migrate 白名单校验，前端 `MENU_IDS` 二次兜底）
+- 快捷键侧别反馈：新增 `hotkey-feedback` 行——录入中实时显示"已按下：LCtrl + LShift"，设置后常驻"左 Ctrl 专用（仅该侧按键触发）"/"Ctrl/Alt 两侧均可触发（未区分左右）"；侧别判定改为 keydown/keyup 维护按住集合（修复"先按 LCtrl 再按 LShift 时 Ctrl 丢侧别"）
+
+### 诊断工具
+- 新增 `dump_ocr_debug` 命令 + `ST_DEBUG_BLOCKS=1` 开关：落盘选区/OCR行/分组/覆盖块几何到 `ocr_debug.log`，用于定位只能在真实屏幕上复现的覆盖块排版问题（默认关闭）
+
+### 验证
+- `npx tsc --noEmit` 通过；`npx vitest run` **51 通过**（原 43 + 新增 8：启动页/非法启动页回落/全 tab 保存栏、离线不测延迟/在线仍显示延迟、基础设置改版、快捷键侧别反馈）
+- 版本 0.4.14 → 0.4.15（Cargo.toml / tauri.conf.json / 关于页）
+
+
+### 构建环境重建（同日，随 v0.4.15 交付）
+- 本机原有 Rust/MSVC 工具链已不存在（`~\.cargo`、`~\.rustup`、VS/Build Tools/Windows Kits 全无，全盘搜 `cargo.exe` 零结果），本次为从零重建：
+  - **Rust** 1.99.0（rustup，stable-x86_64-pc-windows-msvc，minimal profile，按用户级安装免管理员）
+  - **MSVC** Visual Studio 2022 Build Tools 17.14 + `Microsoft.VisualStudio.Workload.VCTools`（MSVC 14.44.35207 + Windows SDK 10.0.26100）
+  - 依赖经 `cargo fetch` 重新下载并**更新了 Cargo.lock**（原锁文件与新 cargo 不兼容，`--locked` 被拒）
+- **ONNX Runtime 供应方式变更（重要）**：`ort` 默认从 `cdn.pyke.io` 下载预编译库，该域名在本网络**完全不可达**（curl 超时）。改为使用官方 GitHub Release：
+  - `onnxruntime-win-x64-1.28.0.zip` → `%USERPROFILE%\.ort\onnxruntime-win-x64-1.28.0`，构建时设 `ORT_LIB_LOCATION=<该目录>\lib`
+  - 官方 Release 提供的是**导入库（动态链接）**，而 pyke 分发是静态库——因此 v0.4.15 的 exe 从 46MB 变为 24MB，并**新增运行时依赖 `onnxruntime.dll`**
+  - 已把 `onnxruntime.dll` 声明为 `bundle.resources`（MSI/NSIS 自动装到 exe 同目录；MSI 8.5→14.0MB、NSIS 5.7→9.6MB），并加入 `.gitignore`（本地下载的二进制不入库）
+  - 绿色版部署需手动把 `onnxruntime.dll` 复制到 exe 同目录（已复制，并实测启动正常：进程存活 + WebView2 子进程拉起）
+- **验证**：`cargo test --release` **110 通过 / 0 失败 / 10 ignored**；`npx vitest run` **51 通过**；`npx tsc --noEmit` 通过；`npm run tauri build` 产出绿色 exe + MSI + NSIS
+- **回归核查**：用**用户真实 settings.json** 跑 `test_deserialize_user_settings_file` 通过（确认新二进制能正确解析线上配置）
+- **遗留**：旧 v0.4.14 exe 未保留 `.bak`（部署时被直接覆盖；如需回退可用 git 历史重新构建）；MSVC 与 ORT 属于构建机本地环境，换机器需按《快速启动指南》第五节重新准备
+
+
+## 2026-10-12 用户复测反馈修复（第四十七轮，v0.4.16）
+
+### 截图翻译：译文被裁掉（图 1"文字未完全显示"）
+- 现象：覆盖块里中文译文最后一行被切掉半截（Minecraft MOD SAFE MODE 对话框）
+- 根因：`.block` 按 OCR **原文**矩形 1:1 覆盖，译文换行后可能占更多行；字号由 `fitFontSize` 用 canvas 估算，中英混排的换行点差异 / 字体回退 / 行高取整都会让估算偏大，超出部分被 `overflow:hidden` 裁掉
+- 修复：`ScreenshotWindow` 增加**渲染后实测校正** `useLayoutEffect`——以真实 DOM 为准（临时切"自动高度+顶部对齐"量真实内容高度，规避 `align-items:center` 时 scrollHeight 测不到顶部溢出），逐像素收敛字号；到 8px 下限仍装不下就放开固定高度让色块向下生长
+
+### 离线翻译：失控长输出（图 2 离线翻译一条胡言乱语）
+- 复现（新增 `#[ignore]` 诊断测试 `diag_offline_mt_degenerate_input`，用真实模型）：`"Mini Map and Mini Map test"` → **149 字 / 6.86 秒**的胡言乱语，与用户截图一致；对照 `"Hello world, this is a test."` → 15 字正常
+- 根因：小模型对难译输入不吐 EOS，beam search 一路生成到 `MAX_NEW_TOKENS=256`；且**未结束的束也进入候选池**，其长度归一化平均对数概率反而更高，把失控输出选了出来
+- 修复：① 输出上限按源长度自适应（源token×3+16，下限 24）；② 优先采用 EOS 正常结束的假设，只有全部未结束才退回原行为
+- 效果：该用例 **149 字 / 6.86s → 47 字 / 2.10s**；正常句保持原样
+- 对照实验（用真实模型实测，避免凭感觉调参）：`NO_REPEAT_NGRAM=3` 更差（"请禁用…" 出现三遍复述）、贪心解码（束宽1）全面更差（连 "Hello world" 都退化）→ 维持 n=2 / 束宽4
+- 遗留（诚实记录）：OPUS-MT en→zh 对 "Mini Map" 这类输入本身给不出正确译文，截断只解决"失控"不解决"译错"；该场景应走在线引擎
+
+### 验证
+- `cargo test --release` 110 通过 / 0 失败 / 11 ignored；`npx vitest run` 51 通过；`npx tsc --noEmit` 通过
+- 版本 0.4.15 → 0.4.16
+
+
+## 2026-10-12 快捷键截图"要点一下鼠标才出选框"（第四十八轮，v0.4.17）
+
+### 现象
+用户：用快捷键触发截图翻译后，约 **80%** 的情况要先用鼠标点一下才出现选框。
+
+### 根因（第 36 轮改动的副作用）
+- 第 36 轮为根治桌面图标闪烁，把截图窗口显隐从 `show/hide` 换成**移出屏幕** `(-32000,-32000)` 待命
+- Chromium 的**原生窗口遮挡检测**（`CalculateNativeWinOcclusion`）判定"不在任何显示器上"的窗口为被遮挡 → renderer 后台化 → **合成器停止产帧**、rAF/定时器节流
+- `trigger_screenshot` 里 `SetWindowPos` 用的是 `SWP_NOMOVE`（不移动窗口），`show()` 对已显示窗口是空操作 → **事件发出时窗口仍在屏幕外**；真正的归位发生在前端事件回调的 `moveOnScreen()` 里
+- 结果：state 已更新但画不出帧，要有输入事件（鼠标点一下）才唤醒 renderer。间歇性（80%）来自遮挡检测的轮询时机
+
+### 修复
+1. `main.rs` 的 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` 补上 `--disable-features=CalculateNativeWinOcclusion`，并加 `--disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling`——屏幕外待命不再被当作后台
+2. `trigger_screenshot` **先把窗口移回屏幕内**（主屏原点，与前端 `currentMonitor()` 缓存的 `monitorPos` 同坐标系，前端随后的 `moveOnScreen` 是同点幂等移动，不产生二次跳动），再 `show → focus → emit`，消除"事件先于画面"的竞态
+
+### 验证
+- `cargo test --release` 110 通过 / 0 失败 / 11 ignored；`npx vitest run` 51 通过
+- 版本 0.4.16 → 0.4.17
+
+
+### OPUS-MT vs NLLB-200 实测对照（用户机器，真实模型，en→zh）
+
+用户已下载 NLLB-200（865MB）并把 `offline_model` 切到 `nllb-200`、`current_engine` 设为"离线翻译"。
+用 `diag_offline_mt_degenerate_input`（已扩展为同时跑两个模型）实测：
+
+| 输入 | OPUS-MT（77M） | NLLB-200 蒸馏（600M） |
+|---|---|---|
+| Mini Map and Mini Map test | 47字 / 2.47s / **完全乱码** | 11字 / **10.36s** / "迷你地图和迷米地图测试" ✅ |
+| Mini Map test | 34字 / 1.01s / 乱码 | 6字 / 2.76s / "迷你地图测试" ✅ |
+| Hello world, this is a test. | 15字 / 0.54s ✅ | 10字 / 4.32s ✅ |
+| The weather is nice today. | 23字 / 1.06s（有重复） | 8字 / 3.88s / "今天的天气很好." ✅ |
+| One or more mods caused the game to crash on launch. | 23字 / 0.74s ✅ | 17字 / **8.25s**（尾部"崩溃"被截） |
+| Please disable some mods and restart the game to see if it works. | 36字 / 1.09s | 22字 / 8.35s ✅ |
+
+**结论**：NLLB 质量是碾压性的（连 OPUS 完全译不对的 "Mini Map" 都基本正确），但**慢 4–8 倍**。
+慢的根因不是模型本身，而是当前实现走的是**非 merged 解码器 + 每步全量重解码**（O(n²)）——
+第 25 轮因 merged 版 KV cache 导出差异回退，第 29 轮改成非 merged 才修好退化。
+**修好 merged 解码器 + KV cache 是单点收益最大的一步**（预期 5–10×），另外仓库里现成有
+`decoder_model_merged_q4.onnx` / `encoder_model_q4.onnx`（4bit，体积减半）可作备选。
+
+**内存代价**：NLLB 常驻约 1.2GB（启动后 5 秒的预热就把 600M 模型加载进内存，
+即使不使用离线翻译也占着）——这是"启动预热消除首帧卡顿"与"内存占用"之间的取舍。
+
+
+## 2026-10-14 "选了有道 OCR 却还在用 RapidOCR"（第四十九轮，v0.4.18）
+
+### 现象
+用户：「为什么我选择有道 OCR，结果是正在下载 RapidOCR」
+
+### 诊断过程（先证实再改）
+1. 读 `settings.json`：`ocr_engine = "rapidocr"`，而该文件 **5 分钟前刚被保存过** —— 说明保存动作发生了，但草稿里就是 rapidocr
+2. 代码链：RapidOCR 的模型下载只存在于 `screenshot.rs` 的 `"rapidocr"` 分支（`rapidocr_ocr_pixels` → `ensure_ppocrv6_small_models`），走有道分支根本不碰它；且截图 OCR 用的是 `load_settings()`（读磁盘），未保存的草稿对它不可见
+3. 枚举 settings.json 的写入方：`App.saveDraft`、截图窗口的 `selectEngine`/`applyLang`（都是先读盘再写回，不会回滚已保存的值）、主窗口关闭时的窗口尺寸回写（同样读盘再写）→ **没有任何路径能把已保存的 youdao 改回 rapidocr**
+4. 写测试验证 UI：点击「有道 OCR」文字 → `onLocalChange` 调用次数 **0** —— 根因确认
+
+### 根因
+所有 `toggle-group` 行的结构是 `<div>` + 开关 `<label>`(44×24) + **平行的**文字 `<span>`。文字不在 label 里，**点文字没有任何反应**，只有精准点中那个小开关才生效。用户点的是文字 → 草稿没变 → 保存下去还是 RapidOCR → 首次使用触发模型下载。
+
+### 修复
+1. 10 处含开关的 `toggle-group` 整行容器由 `<div>` 改为 `<label>`，内层开关 `<label>` 同步改 `<span>`（避免 label 嵌套导致双重触发）；纯展示的「网络状态」行保持不动
+2. `.toggle-group` 加 `cursor: pointer`
+3. 顺带补上**未保存修改提示**：截图翻译读取的是已保存的 `settings.json`，未保存改动对它不可见——现在草稿 ≠ 已保存时，侧边栏底部显示「● 有未保存的修改」并给保存按钮加橙色描边
+
+### 验证
+- `SettingsPanel.test.tsx` 新增回归用例「点击 OCR 引擎整行文字即可切换」：修复前失败（0 次调用）、修复后通过
+- `App.test.tsx` 新增「有未保存修改时给出可见提示」：改动后出现、保存后消失
+- `npx vitest run` **53 通过**；`npx tsc --noEmit` 通过；版本 0.4.17 → 0.4.18
+
+
+## 2026-10-14 截图模糊 + 原译同步 + 触发唤醒（第五十轮，v0.4.19）
+
+### 1. 蒙版层出现后屏幕发虚（用户："我分得清暗和模糊的区别"）
+- 根因：v0.4.10 为压触发延迟，把冻结快照改成 **1/2 降采样 + PNG**（`downscale_bgra(...,2)` + `win::encode_png`），前端 `object-fit: fill` 把这半分辨率位图拉回全屏。当时的判断是"识别仍用原始像素不受影响"——但用户看的是**底图**，观感就是整屏糊
+- 实机参数：显示器 **2880×1800 @200% 缩放**（截图窗口物理尺寸与显示器一致，几何本身没问题）
+- 修复：新增 `encode_snapshot_jpeg`，冻结底图改**全分辨率 JPEG(q85)**；JPEG 失败回退旧半分辨率 PNG
+- 实测（`perf_snapshot_jpeg_encode`，2880×1800）：全分辨率 JPEG **109.2ms / 839KB**；旧半分辨率 PNG **33.1ms / 77KB** → 代价约 +76ms
+- 取舍：清晰度是用户明确诉求，且「冻结画面」本身是设置开关——嫌慢可以关掉，换成实时屏幕（零编码开销且清晰）
+
+### 2. 截图菜单「原/译」同步到覆盖层
+- 此前 `copyMode` 只决定"复制什么"；现在覆盖块显示内容也随之切换：选「原」显示原文、选「译」显示译文
+- 新增 `shownBlockText(block, copyMode)`，渲染与"渲染后字号收敛"逻辑共用同一份文本，并把 `copyMode` 加入该 effect 依赖，切换后字号会重算
+
+### 3. "快捷键触发后要点一下鼠标才出选框"——两个确定性缺陷（第三个仍未证实）
+- **缺陷 A（已修）**：实机 dump 截图窗口 `EXSTYLE=0x00040118`（APPWINDOW|WINDOWEDGE|ACCEPTFILES|TOPMOST）——**没有 `WS_EX_NOACTIVATE`、没有 `WS_EX_TOOLWINDOW`**，与《窗口行为守则》铁律不符。原因是 `SetWindowLong` 改扩展样式后必须补 `SetWindowPos(SWP_FRAMECHANGED)` 才生效，而 `main.rs` 里一直缺这一步
+- **缺陷 B（已修）**：窗口长期停在屏幕外时 WebView2 renderer 可能被降级而不产帧。现在在窗口**仍在屏幕外**时先做一次 1px 尺寸变化强制重新布局产帧（代价为零，用户看不到），再归位 → show → focus → emit
+- **仍未证实的部分**：本轮无法在无人值守下复现——模拟发送 LAlt+Q（keybd_event / SendInput 两种注入 + VK_MENU/VK_LMENU 两种变体）都没能触发截图窗口从 -32000 归位，因此无法自行观测"蒙版是否渲染"。已请用户复测；若仍复现，下一步加生命周期埋点（后端 trigger 各阶段时间戳 + 前端收到事件/rAF/首帧/首个鼠标事件）定位
+
+### 4. 待办（用户确认加入）
+- **NLLB 提速**：改用 merged 解码器 + KV cache（当前非 merged 每步全量重解码 O(n²)，预期 5–10×）；备选 q4 量化（体积 600MB→约 300MB）
+- 若截图触发问题未根治：加上述生命周期埋点
+
+### 验证
+- `cargo test --release` 110 通过 / 0 失败 / 12 ignored；`npx vitest run` 53 通过；`npx tsc --noEmit` 通过
+- 版本 0.4.18 → 0.4.19
+
+
+## 2026-10-14 第五十一轮（v0.4.20）：NLLB 提速 + 5 项界面改进
+
+### 待办1 · NLLB merged 解码器 + KV cache —— 已交付，1.9×
+- **诊断门槛（先做后改）**：读代码发现 KV cache 能力是**从模型 I/O 通用推导**的（`past_key_values.*` 输入 ↔ `present.*` 输出），NLLB 之所以走慢路径**只是因为它加载的是非 merged 文件**。因此实现很小：
+  1. `load_pair` 里 NLLB 也加载 `decoder_model_merged_quantized.onnx`（缺失自动降级到旧的 merged int8 → 非 merged）
+  2. `(cache_flag_in, past_io)` 的推导去掉按家族的硬编码，改为"有 `use_cache_branch` 就按 merged 处理"
+  3. `beam_decode` 与束重排改为按 `past_io.is_empty()` 分支，而不是按 `ModelKind`
+- **实测对照（同机同 6 句，SMART_TRANSLATOR_MODELS_DIR 指向本地模型）**
+
+| 句子 | 非 merged（旧） | merged（新） | 提速 |
+|---|---|---|---|
+| Mini Map and Mini Map test | 10.36s | 8.02s | 1.3× |
+| Mini Map test | 2.76s | 2.04s | 1.35× |
+| Hello world, this is a test. | 4.32s | 2.56s | 1.7× |
+| The weather is nice today. | 3.88s | 2.32s | 1.7× |
+| One or more mods caused the game to crash… | 8.25s | 4.09s | 2.0× |
+| Please disable some mods and restart… | 8.35s | 4.68s | 1.8× |
+| **6 句合计** | **44.8s** | **23.7s** | **约 1.9×** |
+
+- **诚实结论**：未达计划里 4× 的预期。解码器确实从 O(n²) 变成 O(n)，但**编码器（600M 参数一次性前向）与 CPU matmul 占了剩余时间的大头**，短句尤其明显。译文基本一致（首句由"迷你地图和迷米地图测试"变为"小地图和小地图测试"，其余相同）
+
+### 待办2 · q4 量化 —— **方案不成立，已如实撤销**
+- 计划里"600MB→约300MB"是我的**推测**。实测查 hf-mirror 元数据：
+
+| 文件 | int8 | q4 |
+|---|---|---|
+| encoder | 399.7 MB | **1095.7 MB** |
+| decoder(merged) | 453.5 MB | **1126.8 MB** |
+| 合计 | **0.85 GB** | **2.17 GB** |
+
+- q4 导出反而**大 2.5 倍**，与"体积优先"的定位完全相反 → **不提供该选项**（避免误导下载 2.17GB）；后端保留 `nllb_variant` 字段与 q4→int8→非merged 的降级链，日后要实测 q4 速度可直接放开。已清理下载到一半的半成品 906MB
+
+### 界面改进（5 项）
+1. **引擎徽标统一绿色**：`.engine-badge.default-engine` 由蓝底蓝边 `#e3f2fd/#1565c0/#64b5f6` 改为与 `.selected` 同款 `#e8f5e9/#1b5e20/#4caf50`；按用户"要的就是不区分"的确认，默认与手动指定不做视觉区分
+2. **保存交互重构**：删掉上一轮加的"● 有未保存的修改"文字与 `.save-dirty-hint` 样式；改为 `.button.primary.dirty` 橙底高亮 + 阴影；tooltip 写明"未保存的改动在退出程序后丢弃"；**点 × 立即丢弃草稿**——Rust 在 `hide()` 之前发 `main-window-hidden`，前端监听后把草稿回滚到已保存状态（放在 hide 前发是为了避免窗口隐藏后前端被节流收不到）
+3. **自定义AI 显示名 + 拒绝重名 + 修既有 bug**：
+   - 引擎名 = 供应商名（`build_manager` 不再拼 `自定义AI-` 前缀，空名回落 `自定义AI`，并在后端再做一次兜底去重）
+   - 重名拒绝：设置页名称输入框即时标红 + 行内报错；`addProvider` 直接拦截；后端抽出 `validate_custom_provider_names()` 在落盘前兜底拒绝
+   - **既有 bug**：`enabled_name()` 只认 `"自定义AI"`，多自定义供应商的 `current_engine` 会被判非法并**在每次启动时被重置**。现在按"是否为已启用供应商的显示名"判定；`migrate()` 同时把旧值 `自定义AI-DeepSeek` 归一化为 `DeepSeek`
+4. **覆盖层默认显示可配置**：新增 `overlay_default_mode`(original/translated/last) 与 `overlay_last_mode`；每次进入框选相位按设置解析初值；只有选"上次"时，截图菜单的「原/译」才回写记录
+5. **严格对齐 = 贴合原文 + 饱和填充**：删除 `expandedRect` 的 +10% 扩张（该项即"边框由选中文字决定"），块矩形一律取 OCR 紧致框；`fitFontSize` 新增 `saturated` 参数，行距上限 1.45→2.0 让文字恰好铺满不留余量。默认（弹性）分支行为不变
+
+### 验证
+- `cargo test --release` **114 通过 / 0 失败 / 12 ignored**（新增：自定义引擎名不被 migrate 重置、旧前缀归一化、重名拒绝、覆盖层默认字段校验）
+- `npx vitest run` **57 通过**（新增：徽标配色不含蓝色系、供应商重名行内报错、覆盖层三态选项；并改写保存交互用例为"按钮高亮 + 点×丢弃"）
+- `npx tsc --noEmit` 通过；版本 0.4.19 → 0.4.20
