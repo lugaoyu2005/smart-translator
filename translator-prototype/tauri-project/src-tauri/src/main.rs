@@ -10,15 +10,21 @@ mod terms;
 mod translation;
 
 use crate::translation::AppState;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 fn main() {
     // 禁用 WebView2 硬件加速（GPU 合成）：部分 Windows 11 + 显卡驱动组合下，
     // GPU 合成激活后会持续触发桌面重绘（表现为桌面/文件图标一直闪烁）。
     // 本应用 UI 简单，软件合成性能无感知差异。必须在 Builder 之前设置。
+    //
+    // 后半段是"截图窗口待命态停在屏幕外"这个设计的必要配套：
+    // 截图窗口不 hide 而是移到 (-32000,-32000)（见 trigger_screenshot），
+    // Chromium 的原生窗口遮挡检测会把"不在任何显示器上"的窗口判定为被遮挡，
+    // 进而把 renderer 后台化——合成器停止产帧、rAF/定时器被节流。结果是
+    // 快捷键触发后 state 已更新却画不出来，要点一下鼠标才出选框（用户反馈）。
     std::env::set_var(
         "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-        "--disable-gpu --disable-gpu-compositing",
+        "--disable-gpu --disable-gpu-compositing          --disable-features=CalculateNativeWinOcclusion          --disable-backgrounding-occluded-windows          --disable-renderer-backgrounding          --disable-background-timer-throttling",
     );
     tauri::Builder::default()
         // 单实例：二次启动唤起已有实例的主窗口（必须为第一个插件）
@@ -44,6 +50,9 @@ fn main() {
                             let _ = system::save_settings(&settings);
                         }
                     }
+                    // 点 × = 放弃未保存的改动：先通知前端把草稿回滚到"上次保存"的状态，
+                    // 再隐藏到托盘。放在 hide 之前发，避免窗口隐藏后前端被节流而收不到。
+                    let _ = window.emit_to("main", "main-window-hidden", ());
                     api.prevent_close();
                     let _ = window.hide();
                 }
@@ -105,7 +114,8 @@ fn main() {
                 #[cfg(target_os = "windows")]
                 unsafe {
                     use windows::Win32::UI::WindowsAndMessaging::{
-                        GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE,
+                        GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE,
+                        SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_EX_NOACTIVATE,
                         WS_EX_TOOLWINDOW,
                     };
                     if let Ok(hwnd) = win.hwnd() {
@@ -116,6 +126,22 @@ fn main() {
                             hwnd,
                             GWL_EXSTYLE,
                             style | (WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) as isize,
+                        );
+                        // 关键补充：SetWindowLong 改扩展样式后必须调 SetWindowPos(SWP_FRAMECHANGED)
+                        // 才会真正生效（窗口数据被缓存）。此前只写样式不带 FRAMECHANGED，
+                        // 实测窗口 EXSTYLE 里根本没有 NOACTIVATE/TOOLWINDOW——
+                        // 与《窗口行为守则》的铁律不符。
+                        let _ = SetWindowPos(
+                            hwnd,
+                            None,
+                            0,
+                            0,
+                            0,
+                            0,
+                            SWP_FRAMECHANGED
+                                | SWP_NOMOVE
+                                | SWP_NOSIZE
+                                | SWP_NOZORDER,
                         );
                     }
                 }
@@ -147,6 +173,7 @@ fn main() {
             system::open_external,
             system::get_app_settings,
             system::save_app_settings,
+            system::dump_ocr_debug,
             history::list_history,
             history::delete_history_entry,
             history::clear_history,

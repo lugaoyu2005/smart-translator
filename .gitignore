@@ -12,3 +12,6 @@ terms.json
 *.exe
 build_err.txt
 .zcode/
+
+# ONNX Runtime 运行时库（本地从 onnxruntime 官方 release 下载，不入库）
+**/src-tauri/onnxruntime.dll

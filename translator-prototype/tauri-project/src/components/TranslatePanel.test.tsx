@@ -194,6 +194,33 @@ describe("TranslatePanel（翻译测试页）", () => {
       await screen.findByText("正在下载模型 42%（34MB/80MB）")
     ).toBeInTheDocument();
   });
+
+  it("功能: 当前翻译源=离线翻译 → 不检测网络延迟", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "get_app_settings")
+        return Promise.resolve({ current_engine: "离线翻译" });
+      return setupDefault(cmd);
+    });
+    invokeMock.mockClear(); // 只统计本次渲染产生的调用（mock 调用记录跨用例累积）
+    render(<TranslatePanel />);
+    expect(
+      await screen.findByText("离线翻译（本地模型）· 不检测网络延迟")
+    ).toBeInTheDocument();
+    const netCalls = invokeMock.mock.calls.filter((c) => c[0] === "get_network_status");
+    expect(netCalls).toHaveLength(0);
+  });
+
+  it("回归: 在线引擎（百度）仍显示网络延迟", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "get_app_settings")
+        return Promise.resolve({ current_engine: "百度翻译" });
+      if (cmd === "get_network_status")
+        return Promise.resolve({ is_online: true, connection_type: "在线", latency: 25 });
+      return setupDefault(cmd);
+    });
+    render(<TranslatePanel />);
+    expect(await screen.findByText(/在线（延迟 25ms）/)).toBeInTheDocument();
+  });
 });
 
 // 未被用例覆写的命令走默认实现

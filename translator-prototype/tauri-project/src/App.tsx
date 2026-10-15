@@ -7,6 +7,18 @@ import SettingsPanel from "./components/SettingsPanel";
 import TranslatePanel from "./components/TranslatePanel";
 import "./App.css";
 
+/** 菜单页 id（与 menuItems 一致）：用于「打开时进入的页面」设置校验 */
+const MENU_IDS = [
+  "basic",
+  "translation",
+  "translate",
+  "screenshot",
+  "terms",
+  "history",
+  "hotkeys",
+  "about",
+];
+
 function App() {
   const [activeMenu, setActiveMenu] = useState("basic");
   const [settings, setSettings] = useState<any>(null);
@@ -72,11 +84,31 @@ function App() {
     };
   }, []);
 
+  // 已保存设置的镜像：给下面的事件回调用，避免把订阅绑在 settings 上反复重建
+  const savedSettingsRef = useRef<any>(null);
+  useEffect(() => {
+    savedSettingsRef.current = settings;
+  }, [settings]);
+
+  // 点 × 隐藏到托盘 = 放弃未保存的改动（Rust 侧 hide 之前发的事件）：
+  // 草稿直接回滚到"上次保存"，不静默留着，语义与"未保存的改动在退出程序后丢弃"一致
+  useEffect(() => {
+    const un = listen("main-window-hidden", () => {
+      setLocalSettings(savedSettingsRef.current);
+    });
+    return () => {
+      un.then((f) => f());
+    };
+  }, []);
+
   const loadSettings = async () => {
     try {
-      const settings = await invoke("get_app_settings");
+      const settings = await invoke<any>("get_app_settings");
       setSettings(settings);
       setLocalSettings(settings); // 同步设置页草稿（缺失会导致页面永远“加载中…”）
+      // 启动页：按设置进入指定菜单（默认基础设置）
+      const startup = String(settings?.startup_menu || "basic");
+      if (MENU_IDS.includes(startup)) setActiveMenu(startup);
     } catch (error) {
       console.error("Failed to load settings:", error);
       setSavedTip({ ok: false, msg: `设置加载失败：${error}` });
@@ -97,6 +129,16 @@ function App() {
   };
   const resetDraft = () => setLocalSettings(settings);
 
+  // 草稿与"已保存配置"是否不一致。
+  // 重要：截图翻译流水线在识别/翻译那一刻是**从 settings.json 重新读**的
+  // （screenshot.rs: load_settings()），所以未保存的改动对截图完全不可见。
+  // 用户反馈"我选了有道 OCR，结果还在用 RapidOCR"就是踩了这个坑：
+  // 加上可见提示，避免把"改了但没保存"误判成"设置不生效"。
+  const dirty =
+    !!localSettings &&
+    !!settings &&
+    JSON.stringify(localSettings) !== JSON.stringify(settings);
+
   // 菜单：翻译测试作为单独入口
   const menuItems = [
     { id: "basic", label: "基础设置", icon: "⚙️" },
@@ -116,10 +158,14 @@ function App() {
           activeMenu={activeMenu}
           onMenuChange={setActiveMenu}
           footer={
-            localSettings &&
-            !["terms", "history", "translate", "about"].includes(activeMenu) ? (
+            // 全菜单 tab 均显示保存/恢复：草稿是全局单份，一次保存即应用全部设置
+            localSettings ? (
               <div className="sidebar-save">
-                <button className="button primary" onClick={saveDraft}>
+                <button
+                  className={`button primary ${dirty ? "dirty" : ""}`}
+                  onClick={saveDraft}
+                  title="保存全部设置；未保存的改动在退出程序后丢弃（点 × 隐藏到托盘也会丢弃未保存的改动）"
+                >
                   保存设置
                 </button>
                 <button className="button secondary" onClick={resetDraft}>

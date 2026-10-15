@@ -9,6 +9,20 @@
   overflow-y: auto;
   background-color: #f5f5f5;
 }
+/* 有未保存改动时高亮"保存设置"按钮（不再用文字提示，避免布局杂乱）：
+   截图翻译读取的是已保存的 settings.json，未保存的改动对它不可见，
+   所以必须让"还没保存"这件事在按钮上就能看出来。 */
+.button.primary.dirty {
+  background: #f59e0b;
+  border-color: #d97706;
+  color: #fff;
+  box-shadow: 0 2px 10px rgba(217, 119, 6, 0.45);
+}
+
+.button.primary.dirty:hover {
+  background: #d97706;
+}
+
 /* 保存设置成功提示弹窗：点击遮罩关闭，仅一行居中标题 */
 .saved-mask {
   position: fixed;

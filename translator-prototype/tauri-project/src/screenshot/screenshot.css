@@ -207,21 +207,24 @@ body,
 
 .chip-pop {
   position: absolute;
-  /* 底边与 chip 底边齐平：面板整体位于 chip 上方，底部一段藏于 chip 之后
-    （负 z-index 使 chip 覆盖面板——列表滚动时文字从 chip 顶边后方升出/消失，无缝） */
-  bottom: 0;
+  /* 面板整体位于 chip 正上方：底边压住 chip 顶边框 1.5px，与"顶部圆角取直"的
+     chip 连成一体。不再用 bottom:0 + 负 z-index 的"藏于 chip 之后"方案——
+     chip 自身有 8px 圆角而面板下缘是直角，面板直角会从 chip 圆角处透出
+     （用户反馈的"左下/右下角圆角样式错误、chip 上一圈错位描边"）。 */
+  bottom: calc(100% - 1.5px);
   left: 0; /* 与 chip 左对齐 */
   width: 100%; /* 严格与 chip 同宽 */
   display: flex;
   flex-direction: column;
   background: #e8f1fa;
   border: 1.5px solid #1976d2;
-  border-radius: 10px 10px 0 0; /* 底部直角：与 chip 顶边平直接合 */
+  border-bottom: none; /* 与 chip 顶边接合处不画横线，避免双线 */
+  border-radius: 10px 10px 0 0; /* 只圆上方两角，下缘与 chip 顶边平接 */
   box-shadow: 0 -4px 14px rgba(25, 118, 210, 0.18);
   overflow-y: auto; /* 超出限高内部滚动（滚动条隐藏） */
-  max-height: 124px; /* 高度受限：约 chip高×4（可见伸出3×+藏于chip后1×），不铺开全列表 */
+  max-height: 132px; /* 约 chip 高×3 的可见高度，超出内部滚动，不铺开全列表 */
   scrollbar-width: none; /* 标准属性：隐藏滚动条 */
-  z-index: -1; /* 藏于 chip 之后（menu-group 层叠上下文内的负层级） */
+  z-index: 6; /* 位于 chip 之上（仅底边 1.5px 重叠，用于盖住接缝） */
 }
 
 /* 面板展开时被覆盖 chip 的顶部圆角取直：与面板平直连成一体 */

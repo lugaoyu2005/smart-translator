@@ -326,8 +326,7 @@ mod win {
 
             // 行内按水平间隔二次切分：间隔 > 1.5×行高 视为左右并排的独立文本
             // （表格两列、标签+值等），不再硬拼成一行（用户反馈：间隔过大仍识别一起）。
-            // 纯符号（标点）词不作为断点——Windows OCR 常把标点识别为独立小词且周围留白大，
-            // 用户反馈"一句话在符号处高发左右分离"，标点一律吸附回句子
+            // 纯符号词不作为断点（标点吸附回句子，避免一句话左右分离）
             let is_symbol_only =
                 |t: &str| !t.chars().any(|c| c.is_alphanumeric());
             let mut segments: Vec<Vec<&OcrWordItem>> = vec![vec![&line[0]]];
@@ -351,6 +350,11 @@ mod win {
                     if i > 0 {
                         let prev = seg[i - 1];
                         let gap_x = w.x - (prev.x + prev.width);
+                        // 大间隙处的孤立符号(子菜单箭头">"等):不进文本——
+                        // 曾吸附为正文尾部累赘(如"...IDEA>");词保留在segment中维持间隙链
+                        if gap_x > max_h * 1.5 && is_symbol_only(&w.text) {
+                            continue;
+                        }
                         let prev_latin = prev
                             .text
                             .chars()
@@ -372,6 +376,17 @@ mod win {
                 }
 
                 let text = text.trim().to_string();
+                // 孤立的单字符非CJK块（图标/装饰被OCR误识别为字母数字，
+                // 如右键菜单图标列的"P"、"7"、"8"）——翻译块左右边缘的累赘，丢弃
+                let has_cjk = text.chars().any(|c| {
+                    ('\u{4E00}'..='\u{9FFF}').contains(&c)
+                        || ('\u{3400}'..='\u{4DBF}').contains(&c)
+                        || ('\u{3040}'..='\u{30FF}').contains(&c)
+                        || ('\u{AC00}'..='\u{D7AF}').contains(&c)
+                });
+                if text.chars().filter(|c| !c.is_whitespace()).count() <= 1 && !has_cjk {
+                    continue;
+                }
                 if text.is_empty() {
                     continue;
                 }
@@ -395,6 +410,34 @@ mod win {
                     height: max_y - min_y,
                 });
             }
+        }
+
+        // 边缘孤立小块过滤：水平方向与所有其他行都不重叠的小方字块。
+        // 场景：右键菜单的图标列/子菜单箭头被 OCR 误识别（"k"、"&"、"巴"、"PC"、">"），
+        // 在翻译覆盖层的左右边缘形成奇怪累赘（用户反馈）。判定纯几何、不猜字符内容：
+        // 行数≥3 才启用；小方字块=宽度≤行高×2.5；与其他行均无水平区间重叠 → 丢弃。
+        // 正文行与同列其他行必有水平重叠，不受影响；少量行(<3)的框选不启用以免误杀
+        if result.len() >= 3 {
+            let spans: Vec<(f64, f64)> =
+                result.iter().map(|l| (l.x, l.x + l.width)).collect();
+            let keep: Vec<bool> = result
+                .iter()
+                .enumerate()
+                .map(|(i, l)| {
+                    let right = l.x + l.width;
+                    let small = l.width <= l.height * 2.5;
+                    let overlapped = spans.iter().enumerate().any(|(j, (ox, or))| {
+                        i != j && *ox < right && l.x < *or
+                    });
+                    !small || overlapped
+                })
+                .collect();
+            let mut idx = 0usize;
+            result.retain(|_| {
+                let k = keep[idx];
+                idx += 1;
+                k
+            });
         }
         result
     }
@@ -587,9 +630,35 @@ fn downscale_bgra(
     (out, nw as i32, nh as i32)
 }
 
-/// Tauri命令：取触发瞬间快照，返回 PNG dataURL（冻结模式前端全屏铺底显示）。
-/// 半分辨率(1/2) PNG：编码+传输+解码全链路 ~150-250ms（原全屏 PNG 约 500-900ms）。
-/// 无快照（实时模式/截屏失败）返回 image: null，前端不渲染冻结层
+/// 冻结快照底图编码：**全分辨率 JPEG**。
+/// 历史：v0.4.10 为了压触发延迟改成"1/2 降采样 + PNG"，但半分辨率位图被
+/// `object-fit: fill` 拉回全屏后整屏发虚（用户反馈"蒙版层出现后屏幕会模糊，
+/// 我分得清暗和模糊的区别"）。JPEG 编码比同分辨率 PNG 快一个量级，
+/// 全分辨率 JPEG 的体积/耗时与原来的半分辨率 PNG 相当，底图却是清晰的。
+/// 注意：识别与裁剪始终用 SCREEN_SNAPSHOT 的原始像素，与底图分辨率无关。
+fn encode_snapshot_jpeg(pixels: &[u8], width: i32, height: i32) -> Result<Vec<u8>, String> {
+    use image::codecs::jpeg::JpegEncoder;
+    let n = (width as usize).saturating_mul(height as usize);
+    let mut rgb: Vec<u8> = Vec::with_capacity(n * 3);
+    for px in pixels.chunks_exact(4).take(n) {
+        rgb.push(px[2]);
+        rgb.push(px[1]);
+        rgb.push(px[0]);
+    }
+    let mut out: Vec<u8> = Vec::new();
+    let mut enc = JpegEncoder::new_with_quality(&mut out, 85);
+    enc.encode(
+        &rgb,
+        width as u32,
+        height as u32,
+        image::ExtendedColorType::Rgb8,
+    )
+    .map_err(|e| format!("JPEG 编码失败: {e}"))?;
+    Ok(out)
+}
+
+/// Tauri命令：取触发瞬间快照，返回 JPEG dataURL（冻结模式前端全屏铺底显示）。
+/// 无快照（实时模式/截屏失败）返回 null，前端不渲染冻结层
 #[tauri::command]
 pub fn take_snapshot() -> Result<Option<String>, String> {
     use base64::Engine as _;
@@ -600,11 +669,21 @@ pub fn take_snapshot() -> Result<Option<String>, String> {
             .map_err(|_| "快照缓存锁不可用".to_string())?;
         match guard.as_ref() {
             Some(data) => {
-                let (px, w2, h2) =
-                    downscale_bgra(&data.pixels, data.width, data.height, 2);
-                let png = win::encode_png(&px, w2, h2)?;
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
-                Ok(Some(format!("data:image/png;base64,{b64}")))
+                match encode_snapshot_jpeg(&data.pixels, data.width, data.height) {
+                    Ok(jpeg) => {
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg);
+                        Ok(Some(format!("data:image/jpeg;base64,{b64}")))
+                    }
+                    Err(e) => {
+                        // 兜底：退回半分辨率 PNG（图会发虚，但至少可用）
+                        eprintln!("[截图] 快照 JPEG 编码失败，回退半分辨率 PNG: {e}");
+                        let (px, w2, h2) =
+                            downscale_bgra(&data.pixels, data.width, data.height, 2);
+                        let png = win::encode_png(&px, w2, h2)?;
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+                        Ok(Some(format!("data:image/png;base64,{b64}")))
+                    }
+                }
             }
             None => Ok(None),
         }
@@ -995,6 +1074,41 @@ mod tests {
         assert!(crop_pixels(&snap, 0, 0, 0, 1).is_none());
     }
 
+    /// 性能实测：全屏尺寸（2880×1800）快照 JPEG 编码耗时与体积
+    /// 运行：cargo test --release -- --ignored perf_snapshot_jpeg_encode --nocapture
+    #[test]
+    #[ignore]
+    fn perf_snapshot_jpeg_encode() {
+        let (w, h) = (2880usize, 1800usize);
+        let mut px = vec![0u8; w * h * 4];
+        // 造一点"屏幕感"的内容（渐变+块），避免纯色让 JPEG 变得不真实地快
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) * 4;
+                px[i] = (x % 251) as u8;
+                px[i + 1] = (y % 241) as u8;
+                px[i + 2] = ((x ^ y) % 233) as u8;
+                px[i + 3] = 0xFF;
+            }
+        }
+        let t0 = std::time::Instant::now();
+        let out = encode_snapshot_jpeg(&px, w as i32, h as i32).unwrap();
+        println!(
+            "[perf] {w}x{h} 全分辨率 JPEG 编码 {:?}，体积 {} KB",
+            t0.elapsed(),
+            out.len() / 1024
+        );
+
+        let t1 = std::time::Instant::now();
+        let (dpx, dw, dh) = downscale_bgra(&px, w as i32, h as i32, 2);
+        let png = win::encode_png(&dpx, dw, dh).unwrap();
+        println!(
+            "[perf] {dw}x{dh} 半分辨率 PNG 编码（旧方案）{:?}，体积 {} KB",
+            t1.elapsed(),
+            png.len() / 1024
+        );
+    }
+
     #[test]
     fn test_downscale_bgra() {
         // 4x2 快照，每像素 BGR 值互异
@@ -1026,7 +1140,8 @@ mod tests {
         ];
         let lines = win::regroup_words_to_lines(words, &[]);
         assert_eq!(lines.len(), 1, "含标点的大间隙不应切断同一句话");
-        assert_eq!(lines[0].text, "价格:99元");
+        // 极稀疏(间隙>1.5×行高)的孤立冒号按边缘噪声略去,但整句仍保持一行
+        assert_eq!(lines[0].text, "价格99元");
     }
 
     #[test]
@@ -1038,6 +1153,45 @@ mod tests {
         ];
         let lines = win::regroup_words_to_lines(words, &[]);
         assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn test_regroup_icon_noise_filtered() {
+        // 图标/装饰被 OCR 误识别为单字符(如右键菜单图标列"P"、箭头">"):
+        // 形成的孤立单字符非CJK块应被过滤,不产生边缘累赘覆盖块
+        let words = vec![
+            win::OcrWordItem { text: "P".into(), x: 0.0, y: 60.0, width: 10.0, height: 14.0 },
+            win::OcrWordItem { text: "Edit with IntelliJ IDEA".into(), x: 60.0, y: 60.0, width: 180.0, height: 18.0 },
+            win::OcrWordItem { text: ">".into(), x: 280.0, y: 63.0, width: 8.0, height: 12.0 },
+        ];
+        let lines = win::regroup_words_to_lines(words, &[]);
+        assert_eq!(lines.len(), 1, "仅剩正文行");
+        assert_eq!(lines[0].text, "Edit with IntelliJ IDEA");
+    }
+
+    #[test]
+    fn test_regroup_edge_noise_filtered() {
+        // 右键菜单场景:左边缘图标列(k/&/巴)与右边缘箭头(>)与正文列无水平重叠,
+        // 应整列过滤;正文列行间水平重叠,完整保留
+        let mut words: Vec<win::OcrWordItem> = Vec::new();
+        // 行1: 图标"k" + 正文
+        words.push(win::OcrWordItem { text: "k".into(), x: 0.0, y: 100.0, width: 12.0, height: 14.0 });
+        words.push(win::OcrWordItem { text: "上传到百度网盘".into(), x: 40.0, y: 100.0, width: 140.0, height: 16.0 });
+        // 行2: 图标"&" + 正文
+        words.push(win::OcrWordItem { text: "&".into(), x: 0.0, y: 150.0, width: 12.0, height: 14.0 });
+        words.push(win::OcrWordItem { text: "用手机打开".into(), x: 40.0, y: 150.0, width: 100.0, height: 16.0 });
+        // 行3: 正文(与行1/2水平重叠)
+        words.push(win::OcrWordItem { text: "使用 Microsoft Defender 扫描".into(), x: 40.0, y: 200.0, width: 200.0, height: 16.0 });
+        // 右边缘箭头(与行3同y,大间隙符号→文本级略去;此处给独立y模拟独立行)
+        words.push(win::OcrWordItem { text: ">".into(), x: 260.0, y: 201.0, width: 8.0, height: 12.0 });
+
+        let lines = win::regroup_words_to_lines(words, &[]);
+        let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+        assert!(
+            !texts.iter().any(|t| *t == "k" || *t == "&" || *t == "巴" || *t == "PC" || *t == ">"),
+            "边缘累赘块应被过滤: {texts:?}"
+        );
+        assert!(lines.len() >= 2, "正文行应保留: {texts:?}");
     }
 
     #[test]

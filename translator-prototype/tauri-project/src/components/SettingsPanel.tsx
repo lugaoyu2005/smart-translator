@@ -137,51 +137,137 @@ const ComponentIcon: React.FC<{ id: string }> = ({ id }) => {
 // ===== 快捷键录入框：点击后捕获组合键（录入期间全局热键被临时注销，不会被抢先触发）=====
 // 修饰键用 e.code 区分左右（LCtrl/RCtrl/LAlt/RAlt/LShift/RShift/LWin/RWin）；
 // Del/Backspace 清除为未设置；必须含修饰键——单按键会抢占正常输入，拒绝录入
+
+/** 侧别标签 → 可读说明 */
+const SIDE_LABELS: Record<string, string> = {
+  LCtrl: "左 Ctrl",
+  RCtrl: "右 Ctrl",
+  LAlt: "左 Alt",
+  RAlt: "右 Alt",
+  LShift: "左 Shift",
+  RShift: "右 Shift",
+  LWin: "左 Win",
+  RWin: "右 Win",
+};
+
+/** 已设置的组合键 → 左右侧别说明（输入框下方常驻反馈文案） */
+function describeHotkey(value: string): string {
+  if (!value || value === "None") return "未设置（不注册全局热键）";
+  const parts = value.split("+");
+  const sides: string[] = [];
+  const both: string[] = [];
+  for (const p of parts) {
+    if (SIDE_LABELS[p]) sides.push(SIDE_LABELS[p]);
+    else if (["Ctrl", "Alt", "Shift", "Win"].includes(p)) both.push(p);
+  }
+  if (sides.length) {
+    const head = `${sides.join(" + ")} 专用（仅该侧按键触发）`;
+    return both.length ? `${head}；${both.join("/")} 两侧均可` : head;
+  }
+  if (both.length) return `${both.join("/")} 两侧均可触发（未区分左右）`;
+  return "未包含修饰键侧别信息";
+}
+
 const HotkeyInput: React.FC<{ value: string; onChange: (v: string) => void }> = ({
   value,
   onChange,
 }) => {
   const [recording, setRecording] = useState(false);
   const [hint, setHint] = useState("");
+  // 录入期间实时显示已按下的修饰键（含左右侧别）：修复"提示区分左右但下方无反馈"
+  const [live, setLive] = useState<string[]>([]);
+  // 按住集合：keydown 加入 / keyup 移除；组合键的修饰键侧别由它判定
+  // （旧实现只看"按下的正好是修饰键"的那一次事件，先按 LCtrl 再按 LShift 时 Ctrl 会丢失侧别）
+  const heldRef = useRef<string[]>([]);
   const hintTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => {
     if (hintTimer.current) clearTimeout(hintTimer.current);
   }, []);
+
   useEffect(() => {
     if (!recording) return;
-    const onKey = async (e: KeyboardEvent) => {
+
+    // e.code → 侧别标签（无侧别信息的修饰键回落通用名）
+    const modifierTag = (e: KeyboardEvent): string | null => {
+      switch (e.code) {
+        case "ControlLeft":
+          return "LCtrl";
+        case "ControlRight":
+          return "RCtrl";
+        case "AltLeft":
+          return "LAlt";
+        case "AltRight":
+          return "RAlt";
+        case "ShiftLeft":
+          return "LShift";
+        case "ShiftRight":
+          return "RShift";
+        case "MetaLeft":
+          return "LWin";
+        case "MetaRight":
+          return "RWin";
+      }
+      if (e.key === "Control") return "Ctrl";
+      if (e.key === "Alt") return "Alt";
+      if (e.key === "Shift") return "Shift";
+      if (e.key === "Meta") return "Win";
+      return null;
+    };
+
+    const stopRecording = () => {
+      heldRef.current = [];
+      setLive([]);
+      setRecording(false);
+      invoke("set_hotkeys_suspended", { suspended: false }).catch(() => {});
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
       e.preventDefault();
       e.stopPropagation();
+      const tag = modifierTag(e);
+      if (tag) {
+        // 同类修饰键只保留最新按下的一个（LCtrl→RCtrl 切换时替换）
+        const family = tag.replace(/^[LR]/, "");
+        heldRef.current = heldRef.current.filter(
+          (t) => t.replace(/^[LR]/, "") !== family
+        );
+        heldRef.current = [...heldRef.current, tag];
+        setLive(heldRef.current);
+      }
       if (e.key === "Escape") {
-        setRecording(false);
-        invoke("set_hotkeys_suspended", { suspended: false }).catch(() => {});
+        setHint("");
+        stopRecording();
         return;
       }
       // Del / Backspace：清除该快捷键
       if (e.key === "Delete" || e.key === "Backspace") {
         onChange("None");
-        setRecording(false);
-        invoke("set_hotkeys_suspended", { suspended: false }).catch(() => {});
+        stopRecording();
         return;
       }
-      // 修饰键单按：等待完整组合（侧别由下方 e.code 判定）
-      if (e.key === "Control" || e.key === "Alt" || e.key === "Shift" || e.key === "Meta") {
+      // 修饰键单按：等待完整组合（侧别由 heldRef 判定）
+      if (
+        e.key === "Control" ||
+        e.key === "Alt" ||
+        e.key === "Shift" ||
+        e.key === "Meta"
+      ) {
         return;
       }
       // 组合键：修饰键按物理侧别记录，主键沿用 e.key
-      const parts: string[] = [];
-      if (e.ctrlKey)
-        parts.push(
-          e.code === "ControlRight" ? "RCtrl" : e.code === "ControlLeft" ? "LCtrl" : "Ctrl"
+      const sideOf = (family: string, flag: boolean): string | null => {
+        if (!flag) return null;
+        const sided = heldRef.current.find(
+          (t) => t.length > family.length && t.endsWith(family)
         );
-      if (e.altKey)
-        parts.push(e.code === "AltRight" ? "RAlt" : e.code === "AltLeft" ? "LAlt" : "Alt");
-      if (e.shiftKey)
-        parts.push(
-          e.code === "ShiftRight" ? "RShift" : e.code === "ShiftLeft" ? "LShift" : "Shift"
-        );
-      if (e.metaKey)
-        parts.push(e.code === "MetaRight" ? "RWin" : e.code === "MetaLeft" ? "LWin" : "Win");
+        return sided ?? family;
+      };
+      const parts = [
+        sideOf("Ctrl", e.ctrlKey),
+        sideOf("Alt", e.altKey),
+        sideOf("Shift", e.shiftKey),
+        sideOf("Win", e.metaKey),
+      ].filter((p): p is string => !!p);
       if (parts.length === 0) {
         // 单按键拒绝（会抢占正常打字/功能键）
         setHint("必须包含 Ctrl/Alt/Shift/Win 修饰键");
@@ -191,40 +277,63 @@ const HotkeyInput: React.FC<{ value: string; onChange: (v: string) => void }> = 
       }
       parts.push(e.key.length === 1 ? e.key.toUpperCase() : e.key);
       onChange(parts.join("+"));
-      setRecording(false);
-      invoke("set_hotkeys_suspended", { suspended: false }).catch(() => {});
+      stopRecording();
     };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
+
+    const onKeyUp = (e: KeyboardEvent) => {
+      const tag = modifierTag(e);
+      if (!tag) return;
+      heldRef.current = heldRef.current.filter((t) => t !== tag);
+      setLive(heldRef.current);
+    };
+
+    window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("keyup", onKeyUp, true);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("keyup", onKeyUp, true);
+    };
   }, [recording, onChange]);
 
   const display = !value || value === "None" ? "未设置" : value;
 
   return (
-    <span className="hotkey-wrap">
-      <button
-        type="button"
-        className={`hotkey-input ${recording ? "recording" : ""}`}
-        onClick={async () => {
-          setRecording(true);
-          setHint("");
-          invoke("set_hotkeys_suspended", { suspended: true }).catch(() => {});
-        }}
-        title="点击后按下新的组合键（须含修饰键）；Del 清除；Esc 取消"
-      >
-        {recording ? "请按下组合键（Del 清除 / Esc 取消）" : display}
-      </button>
-      {!recording && !!value && value !== "None" && (
+    <span className="hotkey-field">
+      <span className="hotkey-wrap">
         <button
           type="button"
-          className="hotkey-clear"
-          title="清除该快捷键"
-          onClick={() => onChange("None")}
+          className={`hotkey-input ${recording ? "recording" : ""}`}
+          onClick={async () => {
+            heldRef.current = [];
+            setLive([]);
+            setRecording(true);
+            setHint("");
+            invoke("set_hotkeys_suspended", { suspended: true }).catch(() => {});
+          }}
+          title="点击后按下新的组合键（须含修饰键）；Del 清除；Esc 取消"
         >
-          ×
+          {recording ? "请按下组合键（Del 清除 / Esc 取消）" : display}
         </button>
-      )}
-      {hint && <span className="hotkey-hint">{hint}</span>}
+        {!recording && !!value && value !== "None" && (
+          <button
+            type="button"
+            className="hotkey-clear"
+            title="清除该快捷键"
+            onClick={() => onChange("None")}
+          >
+            ×
+          </button>
+        )}
+        {hint && <span className="hotkey-hint">{hint}</span>}
+      </span>
+      {/* 侧别反馈：录入中显示实时按下的修饰键；已设置时说明左右侧别语义 */}
+      <span className={`hotkey-feedback ${recording ? "live" : ""}`}>
+        {recording
+          ? live.length
+            ? `已按下：${live.join(" + ")}`
+            : "等待组合键…（按住的修饰键会显示左右侧别）"
+          : describeHotkey(value)}
+      </span>
     </span>
   );
 };
@@ -325,6 +434,18 @@ const ComponentChips: React.FC<{
     </div>
   );
 };
+
+/** 「打开时进入的页面」选项（与 App.tsx 的 MENU_IDS 同源，改动需同步） */
+const STARTUP_MENUS = [
+  { id: "basic", label: "基础设置" },
+  { id: "translation", label: "翻译引擎" },
+  { id: "translate", label: "翻译测试" },
+  { id: "screenshot", label: "截图翻译" },
+  { id: "terms", label: "术语管理" },
+  { id: "history", label: "翻译历史" },
+  { id: "hotkeys", label: "快捷键" },
+  { id: "about", label: "关于" },
+];
 
 // ===== 组件 =====
 
@@ -462,6 +583,25 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
   // ===== 自定义多供应商 =====
   const customProviders: any[] = localSettings?.custom_providers || [];
+  // 供应商名就是引擎显示名，必须唯一（用户要求：不做"自定义AI-"前缀，重名直接拒绝）
+  const providerDisplayName = (cp: any) =>
+    String(cp?.name || "").trim() || "自定义AI";
+  const duplicateProviderIdx = new Set<number>();
+  {
+    const seen = new Map<string, number>();
+    customProviders.forEach((cp, i) => {
+      if (!String(cp?.base_url || "").trim()) return; // 未填地址的不生成引擎，不参与判重
+      const n = providerDisplayName(cp);
+      const prev = seen.get(n);
+      if (prev !== undefined) {
+        duplicateProviderIdx.add(i);
+        duplicateProviderIdx.add(prev);
+      } else {
+        seen.set(n, i);
+      }
+    });
+  }
+  const [providerNotice, setProviderNotice] = useState("");
   const updateProvider = (idx: number, field: string, value: string) => {
     onLocalChange({
       ...localSettings,
@@ -471,6 +611,12 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
     });
   };
   const addProvider = (preset?: (typeof AI_PRESETS)[number]) => {
+    const wanted = (preset?.name || "").trim();
+    if (wanted && customProviders.some((cp) => providerDisplayName(cp) === wanted)) {
+      setProviderNotice(`已存在名为「${wanted}」的供应商，不重复添加`);
+      return;
+    }
+    setProviderNotice("");
     const np = {
       id: `cp_${Date.now()}`,
       name: preset?.name || "",
@@ -507,23 +653,23 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         <h3 className="section-title">基础设置</h3>
 
         <div className="form-group">
-          <div className="toggle-group">
-            <label className="toggle-switch">
+          <label className="toggle-group">
+            <span className="toggle-switch">
               <input
                 type="checkbox"
                 checked={localSettings?.autostart || false}
                 onChange={(e) => handleSettingChange("autostart", e.target.checked)}
               />
               <span className="toggle-slider"></span>
-            </label>
+            </span>
             <span className="toggle-label">开机自启动</span>
-          </div>
+          </label>
         </div>
 
         <div className="form-group">
           <label className="form-label">启动时主界面</label>
-          <div className="toggle-group">
-            <label className="toggle-switch">
+          <label className="toggle-group">
+            <span className="toggle-switch">
               <input
                 type="checkbox"
                 checked={localSettings?.startup_show_window || false}
@@ -532,12 +678,31 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 }
               />
               <span className="toggle-slider"></span>
-            </label>
+            </span>
             <span className="toggle-label">
               {localSettings?.startup_show_window
                 ? "显示在前台"
                 : "隐藏在托盘（点击任务栏托盘图标唤出）"}
             </span>
+          </label>
+        </div>
+
+        <div className="form-group">
+          <label className="form-label">打开时进入的页面</label>
+          <select
+            className="form-select"
+            aria-label="打开时进入的页面"
+            value={localSettings?.startup_menu || "basic"}
+            onChange={(e) => handleSettingChange("startup_menu", e.target.value)}
+          >
+            {STARTUP_MENUS.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.label}
+              </option>
+            ))}
+          </select>
+          <div className="form-hint">
+            打开主界面后默认停留的菜单页（保存设置后生效）
           </div>
         </div>
 
@@ -559,8 +724,8 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
         <div className="form-group">
           <label className="form-label">主窗口大小</label>
-          <div className="toggle-group">
-            <label className="toggle-switch">
+          <label className="toggle-group">
+            <span className="toggle-switch">
               <input
                 type="checkbox"
                 checked={localSettings?.window_size_mode === "fixed"}
@@ -572,13 +737,13 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 }
               />
               <span className="toggle-slider"></span>
-            </label>
+            </span>
             <span className="toggle-label">
               {localSettings?.window_size_mode === "fixed"
                 ? "固定大小"
                 : "记住上次大小"}
             </span>
-          </div>
+          </label>
           {localSettings?.window_size_mode === "fixed" && (
             <div className="api-keys">
               <input
@@ -619,14 +784,7 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
           </div>
         </div>
 
-        <div className="form-group">
-          <label className="form-label">系统右键菜单</label>
-          <p className="form-hint">
-            已自动启用：在文件/文件夹上右键可见“智能翻译”菜单项，点击后捕获屏幕选中文本并翻译。
-            选中文本的右键菜单由各应用私有（系统限制无法全局注入），请使用 Ctrl+Alt+X 划词。
-          </p>
         </div>
-      </div>
     );
   };
 
@@ -641,15 +799,15 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         <div className="form-group">
           <label className="form-label">在线翻译引擎</label>
           {ONLINE_PROVIDERS.map((p) => (
-            <div className="toggle-group" key={p.id}>
-              <label className="toggle-switch">
+            <label className="toggle-group" key={p.id}>
+              <span className="toggle-switch">
                 <input
                   type="checkbox"
                   checked={localSettings?.online_apis?.includes(p.id) || false}
                   onChange={(e) => toggleOnlineApi(p.id, e.target.checked)}
                 />
                 <span className="toggle-slider"></span>
-              </label>
+              </span>
               <span className="toggle-label">
                 {p.label}
                 {p.id !== "custom" && (
@@ -658,7 +816,7 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
                   </span>
                 )}
               </span>
-            </div>
+            </label>
           ))}
           <p className="form-hint">
             启用的引擎与离线翻译会出现在截图翻译的引擎菜单中（启用的引擎在下方填写密钥）
@@ -787,16 +945,30 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         {localSettings?.online_apis?.includes("custom") && (
           <div className="form-group">
             <label className="form-label">自定义AI（OpenAI 兼容）· 支持多个供应商</label>
+            <div className="form-hint">
+              供应商名称会作为翻译引擎名显示（如填 deepseek 就显示 deepseek）；名称必须唯一
+            </div>
+            {(duplicateProviderIdx.size > 0 || providerNotice) && (
+              <div className="form-hint provider-dup" role="alert">
+                {providerNotice ||
+                  "供应商名称重复：引擎名就是供应商名，请改成唯一名称后再保存"}
+              </div>
+            )}
 
             {customProviders.map((cp, idx) => (
               <div className="custom-provider-row" key={cp.id || idx}>
                 <div className="custom-provider-fields">
                   <input
                     type="text"
-                    className="form-input"
-                    placeholder="供应商名称（如 DeepSeek）"
+                    className={`form-input ${
+                      duplicateProviderIdx.has(idx) ? "input-error" : ""
+                    }`}
+                    placeholder="供应商名称（如 deepseek）"
                     value={cp.name || ""}
                     onChange={(e) => updateProvider(idx, "name", e.target.value)}
+                    title={
+                      duplicateProviderIdx.has(idx) ? "该名称已被其它供应商占用" : undefined
+                    }
                   />
                   <input
                     type="text"
@@ -895,20 +1067,20 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
     <div className="settings-section">
       <h3 className="section-title">OCR 引擎</h3>
       {OCR_ENGINES.map((o) => (
-        <div className="toggle-group" key={o.id}>
-          <label className="toggle-switch">
+        <label className="toggle-group" key={o.id}>
+          <span className="toggle-switch">
             <input
               type="checkbox"
               checked={localSettings?.ocr_engine === o.id}
               onChange={() => handleSettingChange("ocr_engine", o.id)}
             />
             <span className="toggle-slider"></span>
-          </label>
+          </span>
           <span className="toggle-label">
             {o.label}
             <span className="provider-badge">{o.desc}</span>
           </span>
-        </div>
+        </label>
       ))}
       <p className="form-hint">
         单选：同时只有一个 OCR 引擎生效，用于截图翻译的文字识别（识别出的部首/符号错误可由术语管理的“常用符号纠错包”纠正）
@@ -979,8 +1151,27 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         </div>
 
         <div className="form-group">
-          <div className="toggle-group">
-            <label className="toggle-switch">
+          <label className="form-label">覆盖层默认显示</label>
+          <select
+            className="form-select"
+            aria-label="覆盖层默认显示"
+            value={localSettings?.overlay_default_mode || "original"}
+            onChange={(e) =>
+              handleSettingChange("overlay_default_mode", e.target.value)
+            }
+          >
+            <option value="original">原文</option>
+            <option value="translated">译文</option>
+            <option value="last">上次（沿用截图菜单里最后一次的选择）</option>
+          </select>
+          <div className="form-hint">
+            每次开始截图翻译时覆盖块显示什么；截图菜单里的「原/译」按钮仍可随时临时切换
+          </div>
+        </div>
+
+        <div className="form-group">
+          <label className="toggle-group">
+            <span className="toggle-switch">
               <input
                 type="checkbox"
                 checked={localSettings?.overlay_expand || false}
@@ -989,17 +1180,17 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 }
               />
               <span className="toggle-slider"></span>
-            </label>
-            <span className="toggle-label">
-              严格对齐模式（译文空间 = 原文区域 +10%，字号自动填充）
             </span>
-          </div>
+            <span className="toggle-label">
+              严格对齐模式（覆盖块严格贴合选中文字边框，字号饱和填满、不留余量）
+            </span>
+          </label>
         </div>
 
         <div className="form-group">
           <label className="form-label">截图翻译行为</label>
-          <div className="toggle-group">
-            <label className="toggle-switch">
+          <label className="toggle-group">
+            <span className="toggle-switch">
               <input
                 type="checkbox"
                 checked={localSettings?.screenshot_freeze_frame ?? true}
@@ -1008,13 +1199,13 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 }
               />
               <span className="toggle-slider"></span>
-            </label>
+            </span>
             <span className="toggle-label">
               冻结画面（触发瞬间固定屏幕快照，视频/动画内容所见即所得；关闭=实时画面）
             </span>
-          </div>
-          <div className="toggle-group">
-            <label className="toggle-switch">
+          </label>
+          <label className="toggle-group">
+            <span className="toggle-switch">
               <input
                 type="checkbox"
                 checked={localSettings?.screenshot_behavior?.cover_original_text || false}
@@ -1026,12 +1217,12 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 }
               />
               <span className="toggle-slider"></span>
-            </label>
+            </span>
             <span className="toggle-label">默认覆盖原文显示翻译</span>
-          </div>
+          </label>
 
-          <div className="toggle-group">
-            <label className="toggle-switch">
+          <label className="toggle-group">
+            <span className="toggle-switch">
               <input
                 type="checkbox"
                 checked={localSettings?.screenshot_behavior?.left_click_toggle || false}
@@ -1043,12 +1234,12 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 }
               />
               <span className="toggle-slider"></span>
-            </label>
+            </span>
             <span className="toggle-label">左键隐藏/显示翻译结果</span>
-          </div>
+          </label>
 
-          <div className="toggle-group">
-            <label className="toggle-switch">
+          <label className="toggle-group">
+            <span className="toggle-switch">
               <input
                 type="checkbox"
                 checked={localSettings?.screenshot_behavior?.right_click_exit || false}
@@ -1060,9 +1251,9 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 }
               />
               <span className="toggle-slider"></span>
-            </label>
+            </span>
             <span className="toggle-label">右键退出截图翻译</span>
-          </div>
+          </label>
         </div>
       </div>
     );
@@ -1084,7 +1275,7 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         >
           <option value="opus-mt">OPUS-MT（轻量快速 · 按语言对约30-80MB）</option>
           <option value="nllb-200">
-            NLLB-200 蒸馏版（200种语言单模型直达 · 约600MB · 解码较慢）
+            NLLB-200 蒸馏版（200种语言单模型直达 · 质量最好 · 体积最大）
           </option>
           <option value="disabled">禁用离线翻译</option>
         </select>
@@ -1094,6 +1285,12 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
           OPUS-MT 中↔英为专门模型直达；日/韩/俄/法/德/西/葡经英语中转；NLLB-200 任意语言对直达。
         </div>
       </div>
+
+      {/* NLLB 精度变体：UI 暂不暴露。
+          实测（查 hf-mirror 仓库元数据）q4 导出反而更大——encoder 1095.7MB / decoder 1126.8MB
+          合计 2.17GB，而 int8 只要 0.85GB，与"体积减半"的预期相反，故不作为选项提供。
+          后端已支持 nllb_variant 字段与 q4→int8→非merged 的自动降级链，
+          日后若要实测 q4 在 CPU 上是否更快，把下面这段放开即可。 */}
 
       {/* 模型下载/加载进度（后端 offline-mt-status 事件推送） */}
       {mtStatus && (
@@ -1281,7 +1478,7 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         <p>
           <strong>智能翻译软件</strong>
         </p>
-        <p>版本: 0.4.12</p>
+        <p>版本: 0.4.20</p>
         <p>技术栈: Tauri 2 + React + Rust（ONNX Runtime 本地推理）</p>
         <p>
           开源地址:{" "}

@@ -60,15 +60,25 @@ pub fn build_manager(settings: &crate::system::AppSettings) -> TranslationManage
             &providers.custom_openai_model,
         )));
     }
+    // 引擎显示名只保留供应商名（用户要求：界面上不要"自定义AI-"这类前缀）。
+    // 设置页会拒绝重名，这里再做一次兜底去重，避免引擎名冲突导致 current_engine 指向不明。
+    let mut used_names: Vec<String> = engines.iter().map(|e| e.name().to_string()).collect();
     for cp in &settings.custom_providers {
         if cp.base_url.trim().is_empty() {
             continue;
         }
-        let display = if cp.name.trim().is_empty() {
+        let base = if cp.name.trim().is_empty() {
             "自定义AI".to_string()
         } else {
-            format!("自定义AI-{}", cp.name.trim())
+            cp.name.trim().to_string()
         };
+        let mut display = base.clone();
+        let mut n = 2usize;
+        while used_names.iter().any(|u| u == &display) {
+            display = format!("{base}-{n}");
+            n += 1;
+        }
+        used_names.push(display.clone());
         engines.push(Box::new(OpenAICompatEngine::new_named(
             &display, &cp.base_url, &cp.api_key, &cp.model,
         )));
@@ -313,6 +323,47 @@ mod tests {
     }
 
     #[test]
+    fn regression_engine_manager_rebuilt_after_key_save() {
+        // 回归（v0.4.15）：保存 API 密钥后必须立即重建引擎管理器。
+        // save_app_settings 现在会 build_manager 重建，否则填好密钥的在线引擎
+        // 要重启应用才会出现在截图菜单/翻译测试的引擎列表里。
+        let mut settings = AppSettings::default();
+        // 保存前：百度/有道已启用但密钥为空 → 构建时被 is_configured 过滤，只剩离线兜底
+        let before: Vec<String> = build_manager(&settings)
+            .list_engines()
+            .iter()
+            .map(|e| e.name.clone())
+            .collect();
+        assert_eq!(before, vec!["离线翻译".to_string()]);
+
+        // 用户填好密钥保存后：用同一份设置重建 → 在线引擎必须立即出现
+        settings.baidu_app_id = "app-id".to_string();
+        settings.baidu_secret = "secret".to_string();
+        settings.youdao_app_key = "key".to_string();
+        settings.youdao_app_secret = "secret".to_string();
+        assert_eq!(
+            build_manager(&settings)
+                .list_engines()
+                .iter()
+                .map(|e| e.name.clone())
+                .collect::<Vec<String>>(),
+            vec![
+                "百度翻译".to_string(),
+                "有道智云".to_string(),
+                "离线翻译".to_string()
+            ],
+            "重建后在线引擎必须立即可用"
+        );
+        // configured 过滤后仍必须非空（截图菜单/翻译测试都按 configured 过滤）
+        let configured = build_manager(&settings)
+            .list_engines()
+            .into_iter()
+            .filter(|e| e.configured)
+            .count();
+        assert_eq!(configured, 3);
+    }
+
+    #[test]
     fn integration_disabled_offline_builds_empty() {
         let mut settings = AppSettings::default();
         settings.offline_engine = "disabled".to_string();
@@ -365,7 +416,7 @@ mod tests {
         let names: Vec<String> = m.list_engines().iter().map(|e| e.name.clone()).collect();
         assert_eq!(
             names,
-            vec!["自定义AI-DeepSeek".to_string(), "自定义AI".to_string()],
+            vec!["DeepSeek".to_string(), "自定义AI".to_string()],
             "空名回落'自定义AI'，空base_url被跳过"
         );
     }

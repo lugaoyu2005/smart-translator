@@ -145,20 +145,26 @@ fn nllb_lang(code: &str) -> &'static str {
     }
 }
 
-/// 确保 NLLB-200 模型就绪（tokenizer + encoder/非merged解码器 量化版，约600MB）。
-/// 不用 merged 解码器：其 KV cache 导出与 Marian 存在差异，实测会退化输出
+/// 确保 NLLB-200 模型就绪（tokenizer + encoder + merged 解码器）。
+/// 精度由 settings.nllb_variant 决定：int8（量化版，约 850MB）/ q4（4bit，约 600MB）。
+/// merged 解码器带 KV cache，取代了 v0.4.19 及之前"逐步全量重解码"的慢路径。
 pub async fn ensure_nllb_model() -> Result<PathBuf, String> {
     let dir = models_root().join(NLLB_REPO.replace('/', "_"));
-    let files = [
-        ("tokenizer.json", dir.join("tokenizer.json")),
-        (
-            "onnx/encoder_model_quantized.onnx",
-            dir.join("encoder_model_quantized.onnx"),
-        ),
-        (
-            "onnx/decoder_model_quantized.onnx",
-            dir.join("decoder_model_quantized.onnx"),
-        ),
+    let q4 = crate::system::load_settings().nllb_variant == "q4";
+    let enc_name = if q4 {
+        "encoder_model_q4.onnx"
+    } else {
+        "encoder_model_quantized.onnx"
+    };
+    let dec_name = if q4 {
+        "decoder_model_merged_q4.onnx"
+    } else {
+        "decoder_model_merged_quantized.onnx"
+    };
+    let files: Vec<(String, PathBuf)> = vec![
+        ("tokenizer.json".to_string(), dir.join("tokenizer.json")),
+        (format!("onnx/{enc_name}"), dir.join(enc_name)),
+        (format!("onnx/{dec_name}"), dir.join(dec_name)),
     ];
     let mut need_download = false;
     for (_, dest) in &files {
@@ -395,13 +401,44 @@ fn load_pair(dir: &PathBuf, kind: ModelKind) -> Result<Arc<Mutex<MtPair>>, Strin
             .commit_from_file(path)
             .map_err(|e| format!("ORT模型加载失败（{}）: {e}", path.display()))
     };
-    let encoder = build(&dir.join("encoder_model_quantized.onnx"))?;
-    // OPUS-MT 用 merged 解码器（KV cache）；NLLB 用非 merged（逐步全量前向）
-    let decoder_file = match kind {
-        ModelKind::OpusMt => "decoder_model_merged_quantized.onnx",
-        ModelKind::Nllb200 => "decoder_model_quantized.onnx",
+    // 精度变体只作用于 NLLB（仓库里有 q4 导出；OPUS-MT 只有 int8）
+    let q4 = kind == ModelKind::Nllb200
+        && crate::system::load_settings().nllb_variant == "q4";
+    // 按"优先级候选列表"取第一个存在的文件：q4 → merged int8 → 非 merged(int8)，
+    // 任何一级缺失都能自动降级，不会因为换了精度设置就直接报错。
+    let pick = |cands: &[&str]| -> std::path::PathBuf {
+        cands
+            .iter()
+            .map(|n| dir.join(n))
+            .find(|p| p.exists())
+            .unwrap_or_else(|| dir.join(cands[0]))
     };
-    let decoder = build(&dir.join(decoder_file))?;
+    let encoder_file = if q4 {
+        pick(&["encoder_model_q4.onnx", "encoder_model_quantized.onnx"])
+    } else {
+        pick(&["encoder_model_quantized.onnx"])
+    };
+    let encoder = build(&encoder_file)?;
+    // 两种模型都优先用 merged 解码器（KV cache）：每步只喂最新 token，
+    // 取代原先 NLLB 的"逐步全量重解码"（O(n²)，实测 6 句 44.8s → 23.7s）。
+    let decoder_path = match kind {
+        ModelKind::OpusMt => pick(&["decoder_model_merged_quantized.onnx"]),
+        ModelKind::Nllb200 => {
+            if q4 {
+                pick(&[
+                    "decoder_model_merged_q4.onnx",
+                    "decoder_model_merged_quantized.onnx",
+                    "decoder_model_quantized.onnx",
+                ])
+            } else {
+                pick(&[
+                    "decoder_model_merged_quantized.onnx",
+                    "decoder_model_quantized.onnx",
+                ])
+            }
+        }
+    };
+    let decoder = build(&decoder_path)?;
 
     let enc_inputs: Vec<String> = encoder.inputs().iter().map(|i| i.name().to_string()).collect();
     let enc_outputs: Vec<String> = encoder.outputs().iter().map(|o| o.name().to_string()).collect();
@@ -410,10 +447,11 @@ fn load_pair(dir: &PathBuf, kind: ModelKind) -> Result<Arc<Mutex<MtPair>>, Strin
 
     // KV cache 必需输入：use_cache_branch 开关 + past_key_values.N.*（与 present.N.* 成对）。
     // 仅 OPUS-MT(merged) 需要；NLLB(非merged) 无 past 输入，直接全量前向
-    let (cache_flag_in, past_io) = match kind {
-        ModelKind::Nllb200 => (String::new(), Vec::new()),
-        ModelKind::OpusMt => {
-            let cache_flag_in = find_input(&dec_inputs, "use_cache_branch")?;
+    // KV cache 能力完全由模型 I/O 决定（不按模型家族硬编码）：
+    // 有 use_cache_branch 输入 = merged 解码器（present.* 与 past_key_values.* 成对）；
+    // 没有 = 非 merged，退回逐步全量前向。OPUS-MT 与 NLLB 共用同一套推导。
+    let (cache_flag_in, past_io) = match find_input(&dec_inputs, "use_cache_branch") {
+        Ok(cache_flag_in) => {
             let mut past_in: Vec<String> = dec_inputs
                 .iter()
                 .filter(|n| n.starts_with("past_key_values"))
@@ -431,12 +469,13 @@ fn load_pair(dir: &PathBuf, kind: ModelKind) -> Result<Arc<Mutex<MtPair>>, Strin
             }
             if past_io.is_empty() {
                 return Err(
-                    "解码器没有 past_key_values 输入（非 merged 格式，无法启用 KV cache）"
+                    "解码器声明了 use_cache_branch 但没有 past_key_values 输入（模型异常）"
                         .to_string(),
                 );
             }
             (cache_flag_in, past_io)
         }
+        Err(_) => (String::new(), Vec::new()),
     };
     // logits 输出 = 非 present 输出的第一个
     let dec_out_name = dec_outputs
@@ -880,6 +919,13 @@ fn beam_decode(
     }
     let attn: Vec<i64> = vec![1; ids.len()];
 
+    // 输出长度上限按源长度自适应：正常翻译不会超过源 token 的约 3 倍。
+    // 小模型遇到难以翻译的输入时可能不吐 EOS，一路生成到步数上限
+    // （实测 "Mini Map and Mini Map test" → 149 字 / 6.9 秒的胡言乱语），
+    // 按源长度截断既压住失控输出，也顺带把这类输入的耗时降下来。
+    let src_len = ids.len().max(1);
+    let max_new = max_new_tokens.min((src_len * 3 + 16).max(24));
+
     let (hidden, enc_len, enc_dim) = run_encoder(pair, &ids, &attn)?;
 
     struct Hypo {
@@ -892,14 +938,15 @@ fn beam_decode(
     let mut dec_past: Option<PastTensors> = None;
     let mut enc_past: Option<PastTensors> = None;
 
-    for _step in 0..max_new_tokens {
+    for _step in 0..max_new {
         if beams.is_empty() {
             break;
         }
         // NLLB：非 merged 解码器逐步全量前向（无缓存，绕开其 merged 导出的 KV cache 问题）；
         // OPUS-MT：首步走全量分支（仅起始token）取回有效 cross-attention KV，
         // 之后只喂各束最新token + 上步缓存（encoder 输出为空，忽略）
-        let logits_batch = if pair.kind == ModelKind::Nllb200 {
+        // 有 KV cache（merged 解码器）走增量路径；否则逐步全量重解码兜底
+        let logits_batch = if pair.past_io.is_empty() {
             let dec_ids: Vec<Vec<i64>> = beams.iter().map(|b| b.tokens.clone()).collect();
             run_decoder_full(pair, &dec_ids, &hidden, enc_len, enc_dim, &attn)?
         } else {
@@ -976,7 +1023,7 @@ fn beam_decode(
         }
         // 缓存按"谁被保留"重排；encoder 组仅按父束复制（内容恒定），供下一步使用。
         // NLLB 全量前向无缓存，跳过
-        if pair.kind == ModelKind::OpusMt {
+        if !pair.past_io.is_empty() {
             dec_past = Some(dec_past.take().ok_or("解码缓存状态异常")?.reordered(&parents));
             enc_past = Some(enc_past.take().ok_or("解码缓存状态异常")?.reordered(&parents));
         }
@@ -985,8 +1032,15 @@ fn beam_decode(
             break;
         }
     }
-    completed.extend(beams); // 未完成的也参与评分
-    if completed.is_empty() {
+    // 优先采用 EOS 正常结束的假设：未结束的束都是被长度上限截断的
+    // （小模型失控时它们的平均对数概率反而可能更高，会把整段胡言乱语选出来）。
+    // 只有当没有任何束吐出 EOS 时才退回完整候选池，保持原行为不退化。
+    let mut pool: Vec<Hypo> = if !completed.is_empty() {
+        std::mem::take(&mut completed)
+    } else {
+        beams
+    };
+    if pool.is_empty() {
         return Err("解码失败：无候选".to_string());
     }
     // GNMT 长度惩罚（(5+len)/6）：兼顾防短句偏好与防长输出偏好
@@ -994,10 +1048,10 @@ fn beam_decode(
         let len = (h.tokens.len() - 1).max(1) as f32;
         h.logprob / ((5.0 + len) / 6.0)
     };
-    completed.sort_unstable_by(|a, b| {
+    pool.sort_unstable_by(|a, b| {
         score(b).partial_cmp(&score(a)).unwrap_or(std::cmp::Ordering::Equal)
     });
-    let best = &completed[0];
+    let best = &pool[0];
     let out_ids: Vec<u32> = best.tokens[1..].iter().map(|&t| t as u32).collect();
     pair.tokenizer
         .decode(&out_ids, true)
@@ -1479,6 +1533,41 @@ mod tests {
         println!("[offline-mt] en→zh 纯推理 {:?}: {out2}", t1.elapsed());
         assert!(out2.chars().any(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c)));
         assert!(out.chars().any(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c)));
+    }
+
+    /// 诊断：复现"短输入触发失控长输出"（用户反馈：Mini Map and Mini Map test
+    /// 被离线 en→zh 译成一百多字的胡言乱语）。需真实模型：
+    /// set SMART_TRANSLATOR_MODELS_DIR=<models\mt> 后
+    /// cargo test --release -- --ignored diag_offline_mt_degenerate_input --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn diag_offline_mt_degenerate_input() {
+        for model in ["opus-mt", "nllb-200"] {
+            diag_one_model(model).await;
+        }
+    }
+
+    async fn diag_one_model(model: &str) {
+        println!("===== 模型: {model} =====");
+        let engine = OfflineMtEngine::with_model(model);
+        for s in [
+            "Mini Map and Mini Map test",
+            "Mini Map test",
+            "Hello world, this is a test.",
+            "The weather is nice today.",
+            "One or more mods caused the game to crash on launch.",
+            "Please disable some mods and restart the game to see if it works.",
+        ] {
+            let t0 = std::time::Instant::now();
+            match engine.translate(s, "en", "zh").await {
+                Ok(out) => println!(
+                    "[diag] {s:?}\n   -> {} 字 ({:?}): {out}",
+                    out.chars().count(),
+                    t0.elapsed()
+                ),
+                Err(e) => println!("[diag] {s:?} -> ERR {e}"),
+            }
+        }
     }
 
     /// 端到端：zh→en（复用已下载缓存）

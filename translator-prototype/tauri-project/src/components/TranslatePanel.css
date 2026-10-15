@@ -80,11 +80,13 @@
   border-radius: 10px;
 }
 
-/* 默认引擎（未手动指定时）：中性蓝描边框到默认引擎上 */
+/* 默认引擎（未手动指定时）：与"手动指定"同款绿色描边。
+   原先用中性蓝底蓝框，和相邻的绿色徽标混在一起显得杂乱（用户反馈"过于冗余"），
+   按确认结论统一绿色、不做视觉区分——"默认/指定"的信息只保留在 title 提示里。 */
 .engine-badge.default-engine {
-  background-color: #e3f2fd;
-  color: #1565c0;
-  border: 1.5px solid #64b5f6;
+  background-color: #e8f5e9;
+  color: #1b5e20;
+  border: 1.5px solid #4caf50;
   border-radius: 10px;
 }
 

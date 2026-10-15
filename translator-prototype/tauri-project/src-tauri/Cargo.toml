@@ -1,6 +1,6 @@
 [package]
 name = "smart-translator"
-version = "0.4.12"
+version = "0.4.20"
 description = "智能翻译软件 - 支持离线翻译、在线翻译、截图翻译"
 edition = "2021"
 
@@ -35,7 +35,7 @@ tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
 # 单实例：二次启动唤起已有窗口
 tauri-plugin-single-instance = "2"
 # 截图与OCR（Windows内置OCR，无需外部安装）
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",

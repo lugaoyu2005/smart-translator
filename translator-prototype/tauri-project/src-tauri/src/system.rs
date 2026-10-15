@@ -45,9 +45,15 @@ pub struct AppSettings {
     // 旧版"无背景模式"开关（迁移用：true → overlay_mode = none）
     #[serde(default)]
     pub overlay_transparent_legacy: bool,
-    // 文本严格对齐模式：译文空间 = 原文区域 +10%（避让重叠），字号自动填充
+    // 文本严格对齐模式：块严格贴合选中文字的紧致框，字号饱和填满（不留余量）
     #[serde(default)]
     pub overlay_expand: bool,
+    // 覆盖层默认显示内容：original=原文 / translated=译文 / last=沿用上次在截图菜单里的选择
+    #[serde(default = "default_overlay_default_mode")]
+    pub overlay_default_mode: String,
+    // 仅当 overlay_default_mode == "last" 时生效：记住截图菜单里最后一次的选择
+    #[serde(default = "default_overlay_last_mode")]
+    pub overlay_last_mode: String,
     // 冻结画面：触发截图翻译瞬间固定屏幕快照（动态内容所见即所得，框选的是静态图）；
     // 关闭 = 实时画面（框选松手后才实际截屏，旧行为）
     #[serde(default = "default_true")]
@@ -72,12 +78,22 @@ pub struct AppSettings {
     // 启动行为：true=主界面显示在前台 false=隐藏到托盘（默认）
     #[serde(default)]
     pub startup_show_window: bool,
+    // 主界面默认进入的菜单页
+    // （basic/translation/translate/screenshot/terms/history/hotkeys/about）
+    #[serde(default = "default_startup_menu")]
+    pub startup_menu: String,
     // 多自定义 OpenAI 兼容供应商（每个生成独立引擎）
     #[serde(default)]
     pub custom_providers: Vec<CustomProvider>,
     // 离线翻译模型选择（opus-mt 可用；nllb-200 下一版本接入）
     #[serde(default = "default_offline_model")]
     pub offline_model: String,
+    // NLLB 精度变体：int8=量化版(默认，encoder 400MB + merged decoder 454MB)。
+    // q4 导出实测**反而更大**（encoder 1095.7MB + decoder 1126.8MB = 2.17GB），
+    // 与"体积减半"预期相反，因此 UI 不暴露该选项；字段与加载链路保留，
+    // 便于日后实测 q4 在 CPU 上是否更快时直接切换。
+    #[serde(default = "default_nllb_variant")]
+    pub nllb_variant: String,
     // 常用符号纠错包（内置部首/箭头等误识别纠正）总开关
     #[serde(default = "default_true")]
     pub builtin_symbols_enabled: bool,
@@ -105,6 +121,46 @@ fn default_true() -> bool {
 
 fn default_current_engine() -> String {
     "百度翻译".to_string()
+}
+
+/// 主界面默认进入的菜单页（与前端 MENU_IDS 一致）
+fn default_startup_menu() -> String {
+    "basic".to_string()
+}
+
+/// 自定义AI 供应商名称唯一性校验（save_app_settings 落盘前调用，单测直接复用）。
+/// 名称即引擎显示名，重名会让"当前翻译源"指向不明。
+pub fn validate_custom_provider_names(settings: &AppSettings) -> Result<(), String> {
+    let mut seen: Vec<String> = Vec::new();
+    for cp in &settings.custom_providers {
+        if cp.base_url.trim().is_empty() {
+            continue; // 未填地址的供应商不生成引擎，不参与判重
+        }
+        let name = if cp.name.trim().is_empty() {
+            "自定义AI".to_string()
+        } else {
+            cp.name.trim().to_string()
+        };
+        if seen.iter().any(|s| s == &name) {
+            return Err(format!(
+                "自定义AI 供应商名称重复：{name}。请改成唯一名称后再保存"
+            ));
+        }
+        seen.push(name);
+    }
+    Ok(())
+}
+
+fn default_nllb_variant() -> String {
+    "int8".to_string()
+}
+
+fn default_overlay_default_mode() -> String {
+    "original".to_string()
+}
+
+fn default_overlay_last_mode() -> String {
+    "original".to_string()
 }
 
 fn default_select_translate_enabled() -> bool {
@@ -197,6 +253,8 @@ impl Default for AppSettings {
             overlay_mode: None,
             overlay_transparent_legacy: false,
             overlay_expand: false,
+            overlay_default_mode: default_overlay_default_mode(),
+            overlay_last_mode: default_overlay_last_mode(),
             screenshot_freeze_frame: true,
             select_translate_enabled: true,
             current_engine: default_current_engine(),
@@ -207,8 +265,10 @@ impl Default for AppSettings {
             window_last_height: 0,
             providers: ProviderSettings::default(),
             startup_show_window: false,
+            startup_menu: default_startup_menu(),
             custom_providers: Vec::new(),
             offline_model: default_offline_model(),
+            nllb_variant: default_nllb_variant(),
             builtin_symbols_enabled: true,
         }
     }
@@ -231,6 +291,59 @@ fn migrate(settings: &mut AppSettings) {
     // 离线翻译已定案为 OPUS-MT 本地模型；旧下拉中的 argos 选项归一为 marian（启用）
     if settings.offline_engine == "argos" {
         settings.offline_engine = "marian".to_string();
+    }
+    // 启动页：非法/历史值回落基础设置
+    {
+        const STARTUP_MENUS: [&str; 8] = [
+            "basic",
+            "translation",
+            "translate",
+            "screenshot",
+            "terms",
+            "history",
+            "hotkeys",
+            "about",
+        ];
+        if !STARTUP_MENUS.contains(&settings.startup_menu.as_str()) {
+            settings.startup_menu = default_startup_menu();
+        }
+    }
+    // NLLB 精度：非法值回落 int8
+    if !["int8", "q4"].contains(&settings.nllb_variant.as_str()) {
+        settings.nllb_variant = default_nllb_variant();
+    }
+    // 覆盖层默认显示内容 / 上次选择：非法值回落 original
+    if !["original", "translated", "last"].contains(&settings.overlay_default_mode.as_str()) {
+        settings.overlay_default_mode = default_overlay_default_mode();
+    }
+    if !["original", "translated"].contains(&settings.overlay_last_mode.as_str()) {
+        settings.overlay_last_mode = default_overlay_last_mode();
+    }
+    // 自定义AI：引擎显示名不再带"自定义AI-"前缀（旧值归一化），并保证供应商名唯一。
+    // 必须在下面 current_engine 合法性校验之前执行，否则老用户的当前翻译源会被判非法而重置。
+    {
+        if let Some(rest) = settings.current_engine.strip_prefix("自定义AI-") {
+            settings.current_engine = rest.trim().to_string();
+        }
+        let mut seen: Vec<String> = Vec::new();
+        for cp in settings.custom_providers.iter_mut() {
+            if cp.base_url.trim().is_empty() {
+                continue;
+            }
+            let base = if cp.name.trim().is_empty() {
+                "自定义AI".to_string()
+            } else {
+                cp.name.trim().to_string()
+            };
+            let mut d = base.clone();
+            let mut n = 2usize;
+            while seen.iter().any(|s| s == &d) {
+                d = format!("{base}-{n}");
+                n += 1;
+            }
+            cp.name = d.clone();
+            seen.push(d);
+        }
     }
     // 菜单组组件：旧语义（数组=启用集）迁移为“全序+禁用集合”
     {
@@ -307,9 +420,37 @@ fn migrate(settings: &mut AppSettings) {
     if settings.overlay_mode.is_none() && settings.overlay_transparent_legacy {
         settings.overlay_mode = Some("none".to_string());
     }
+    // 自定义AI 供应商的引擎名 = 供应商名（与 build_manager 的去重规则一致）。
+    // 旧实现只认 "自定义AI"，多供应商的 current_engine 会被判非法并在启动时被重置（既有 bug）。
+    let custom_engine_names: Vec<String> = {
+        let mut used: Vec<String> = Vec::new();
+        settings
+            .custom_providers
+            .iter()
+            .filter(|cp| !cp.base_url.trim().is_empty())
+            .map(|cp| {
+                let base = if cp.name.trim().is_empty() {
+                    "自定义AI".to_string()
+                } else {
+                    cp.name.trim().to_string()
+                };
+                let mut d = base.clone();
+                let mut n = 2usize;
+                while used.iter().any(|u| u == &d) {
+                    d = format!("{base}-{n}");
+                    n += 1;
+                }
+                used.push(d.clone());
+                d
+            })
+            .collect()
+    };
     // 当前翻译源不在启用列表时，回落到第一个启用的引擎（名称↔ID映射）
     // 名称↔ID全量映射（与 engines.rs 各引擎 name() 对应）
     let enabled_name = |name: &str| {
+        if custom_engine_names.iter().any(|n| n == name) {
+            return true;
+        }
         let id = match name {
             "百度翻译" => "baidu",
             "有道智云" => "youdao",
@@ -450,6 +591,25 @@ pub fn trigger_screenshot(app: &AppHandle) {
             }
         }
         let _ = win.set_ignore_cursor_events(false);
+        // 【唤醒渲染】窗口长期停在屏幕外时，WebView2 的 renderer 可能被降级/挂起，
+        // 即使解除了遮挡检测也可能不产帧——表现就是"快捷键触发了但画面不出来，
+        // 动一下鼠标才出现"。这里在窗口仍位于屏幕外时先做一次 1px 尺寸变化，
+        // 强制 WebView 重新布局并产出一帧（此时代价为零：窗口在屏幕外，用户看不到）。
+        if let Ok(size) = win.inner_size() {
+            let _ = win.set_size(tauri::PhysicalSize::new(
+                size.width,
+                size.height.saturating_sub(1),
+            ));
+            let _ = win.set_size(tauri::PhysicalSize::new(size.width, size.height));
+        }
+        // 【顺序很关键】先归位到屏幕内，再 show/focus/emit。
+        // 待命态窗口停在 (-32000,-32000)：只要它还不在任何显示器上，Chromium 的
+        // 遮挡检测就会把 renderer 判定为后台并停止产帧——此时 emit 过去的事件
+        // 即使更新了 state 也画不出来，必须等一次鼠标输入才出画面（用户反馈
+        // "快捷键触发后有 80% 概率需要点一下鼠标才出现选框"）。
+        // 主屏原点 (0,0) 与前端 currentMonitor() 缓存的 monitorPos 在同一坐标系，
+        // 前端随后的 moveOnScreen 是同点幂等移动，不会产生二次跳动。
+        let _ = win.set_position(tauri::PhysicalPosition::new(0, 0));
         // 首次触发时窗口仍是 tauri.conf 的 visible:false，需要 show；
         // 之后窗口保持可见（待命=停在屏幕外），show 为幂等空操作
         let _ = win.show();
@@ -941,6 +1101,35 @@ pub fn open_external(url: String) -> Result<(), String> {
     }
 }
 
+/// 诊断命令：把 OCR 行 / 分组 / 覆盖块几何写入 exe 同目录 ocr_debug.log。
+/// 仅当环境变量 ST_DEBUG_BLOCKS=1 时生效（正常运行零开销，前端 fire-and-forget）。
+/// 用途：定位"覆盖块与原文行不对齐/有英文残留"这类只能靠真实截图复现的排版问题。
+#[tauri::command]
+pub async fn dump_ocr_debug(payload: String) -> Result<(), String> {
+    if std::env::var("ST_DEBUG_BLOCKS").ok().as_deref() != Some("1") {
+        return Ok(());
+    }
+    let mut path = std::env::current_exe().unwrap_or_default();
+    path.pop();
+    path.push("ocr_debug.log");
+    let mut body = String::new();
+    body.push_str(&format!(
+        "\n=== {} ===\n",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+    ));
+    body.push_str(&payload);
+    body.push('\n');
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("打开调试日志失败: {e}"))?;
+    f.write_all(body.as_bytes())
+        .map_err(|e| format!("写入调试日志失败: {e}"))?;
+    Ok(())
+}
+
 // Tauri命令：获取网络状态（真实检测）
 #[tauri::command]
 pub async fn get_network_status() -> Result<NetworkStatus, String> {
@@ -958,10 +1147,14 @@ pub async fn get_app_settings() -> Result<AppSettings, String> {
 #[tauri::command]
 pub async fn save_app_settings(
     app: tauri::AppHandle,
+    state: tauri::State<'_, crate::translation::AppState>,
     mut settings: AppSettings,
 ) -> Result<(), String> {
     // 快捷键格式兜底校验（前端已拦截，此处防其他来源的非法值落盘）
     sanitize_hotkeys(&mut settings);
+    // 自定义AI 供应商不允许重名：引擎显示名就是供应商名，重名会让 current_engine
+    // 指向不明。前端已做即时拦截，这里兜底防止绕过前端直接落盘。
+    validate_custom_provider_names(&settings)?;
     // 同步内置符号纠错开关（OCR 纠错链路读取）
     crate::engines::BUILTIN_SYMBOLS_ON.store(
         settings.builtin_symbols_enabled,
@@ -971,6 +1164,19 @@ pub async fn save_app_settings(
     let json = serde_json::to_string_pretty(&settings)
         .map_err(|e| format!("序列化设置失败: {e}"))?;
     std::fs::write(&path, json).map_err(|e| format!("写入设置文件失败: {e}"))?;
+
+    // 引擎即时生效：按新设置重建翻译管理器。否则刚填写的 API 密钥要重启应用后
+    // 才会出现在截图菜单/翻译测试的引擎列表里（"保存后引擎无显示"的根因）
+    {
+        let mut guard = state.manager.lock().await;
+        // 重建会从 terms.json 重新加载，先把未落盘的使用计数写回，避免丢失
+        if guard.take_term_dirty() {
+            let _ = crate::terms::save_term_base(guard.term_base());
+        }
+        *guard = crate::translation::build_manager(&settings);
+    }
+    // 通知截图窗口设置已更新（引擎列表/菜单组件/覆盖样式即时生效）
+    let _ = app.emit_to("screenshot", "screenshot-settings-updated", ());
 
     // 系统集成设置即时生效；失败信息返回给前端提示（文件已保存）
     let mut errs: Vec<String> = Vec::new();
@@ -1055,6 +1261,7 @@ mod tests {
         assert_eq!(s.online_apis, vec!["baidu", "youdao"]);
         assert_eq!(s.offline_model, "opus-mt");
         assert!(s.builtin_symbols_enabled);
+        assert_eq!(s.startup_menu, "basic", "默认启动页必须是基础设置");
     }
 
     #[test]
@@ -1081,6 +1288,132 @@ mod tests {
         s.offline_engine = "argos".to_string();
         migrate(&mut s);
         assert_eq!(s.offline_engine, "marian");
+    }
+
+    #[test]
+    fn regression_custom_engine_name_not_reset_by_migrate() {
+        // 回归（v0.4.20）：自定义供应商的引擎名就是供应商名，
+        // 旧 enabled_name() 只认 "自定义AI"，导致 current_engine 启动时被重置。
+        let mut s = AppSettings::default();
+        s.online_apis = vec!["custom".to_string()];
+        s.custom_providers = vec![CustomProvider {
+            id: "p1".into(),
+            name: "deepseek".into(),
+            base_url: "https://api.deepseek.com/v1".into(),
+            api_key: "k".into(),
+            model: "deepseek-chat".into(),
+        }];
+        s.current_engine = "deepseek".to_string();
+        migrate(&mut s);
+        assert_eq!(s.current_engine, "deepseek", "自定义供应商名不得被判非法而重置");
+    }
+
+    #[test]
+    fn regression_migrate_strips_custom_engine_prefix() {
+        // 旧配置里存的是 "自定义AI-DeepSeek"，归一化为供应商名
+        let mut s = AppSettings::default();
+        s.online_apis = vec!["custom".to_string()];
+        s.custom_providers = vec![CustomProvider {
+            id: "p1".into(),
+            name: "DeepSeek".into(),
+            base_url: "https://api.deepseek.com/v1".into(),
+            api_key: "k".into(),
+            model: "deepseek-chat".into(),
+        }];
+        s.current_engine = "自定义AI-DeepSeek".to_string();
+        migrate(&mut s);
+        assert_eq!(s.current_engine, "DeepSeek");
+    }
+
+    #[test]
+    fn security_duplicate_custom_provider_names_rejected() {
+        let mut s = AppSettings::default();
+        s.custom_providers = vec![
+            CustomProvider {
+                id: "p1".into(),
+                name: "deepseek".into(),
+                base_url: "https://a/v1".into(),
+                api_key: "k".into(),
+                model: "m".into(),
+            },
+            CustomProvider {
+                id: "p2".into(),
+                name: "deepseek".into(),
+                base_url: "https://b/v1".into(),
+                api_key: "k".into(),
+                model: "m".into(),
+            },
+        ];
+        assert!(validate_custom_provider_names(&s).is_err(), "重名必须被拒绝");
+
+        // 未填地址的不生成引擎 → 不参与判重
+        s.custom_providers[1].base_url = String::new();
+        assert!(validate_custom_provider_names(&s).is_ok());
+
+        // 改成唯一名后通过
+        s.custom_providers[1].base_url = "https://b/v1".into();
+        s.custom_providers[1].name = "kimi".into();
+        assert!(validate_custom_provider_names(&s).is_ok());
+    }
+
+    #[test]
+    fn sanity_overlay_default_mode_fields() {
+        let s = AppSettings::default();
+        assert_eq!(s.overlay_default_mode, "original");
+        assert_eq!(s.overlay_last_mode, "original");
+        // 非法值回落
+        let mut bad = AppSettings::default();
+        bad.overlay_default_mode = "nope".into();
+        bad.overlay_last_mode = "nope".into();
+        migrate(&mut bad);
+        assert_eq!(bad.overlay_default_mode, "original");
+        assert_eq!(bad.overlay_last_mode, "original");
+        // 合法值保留
+        let mut ok = AppSettings::default();
+        ok.overlay_default_mode = "last".into();
+        ok.overlay_last_mode = "translated".into();
+        migrate(&mut ok);
+        assert_eq!(ok.overlay_default_mode, "last");
+        assert_eq!(ok.overlay_last_mode, "translated");
+    }
+
+    #[test]
+    fn regression_migrate_invalid_startup_menu_falls_back() {
+        // 非法/篡改的启动页必须回落基础设置（前端也会二次校验）
+        for bad in ["nope", "", "basic ", "TERMS", "settings"] {
+            let mut s = AppSettings::default();
+            s.startup_menu = bad.to_string();
+            migrate(&mut s);
+            assert_eq!(s.startup_menu, "basic", "非法启动页 {bad:?} 应回落 basic");
+        }
+    }
+
+    #[test]
+    fn regression_migrate_valid_startup_menu_kept() {
+        for good in [
+            "basic",
+            "translation",
+            "translate",
+            "screenshot",
+            "terms",
+            "history",
+            "hotkeys",
+            "about",
+        ] {
+            let mut s = AppSettings::default();
+            s.startup_menu = good.to_string();
+            migrate(&mut s);
+            assert_eq!(s.startup_menu, good, "合法启动页 {good:?} 不得被改写");
+        }
+    }
+
+    #[test]
+    fn regression_startup_menu_deserializes_when_missing() {
+        // 旧 settings.json 没有 startup_menu 字段时必须能反序列化并回落默认值
+        let mut value = serde_json::to_value(AppSettings::default()).unwrap();
+        value.as_object_mut().unwrap().remove("startup_menu");
+        let s: AppSettings = serde_json::from_value(value).expect("旧配置必须可反序列化");
+        assert_eq!(s.startup_menu, "basic");
     }
 
     #[test]

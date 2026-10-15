@@ -44,8 +44,10 @@ interface ShotSettings {
   screenshot_components: string[]; // 全序
   screenshot_components_disabled: string[]; // 禁用集合
   overlay_mode: string; // dark=黑底白字 light=白底黑字 none=无背景
-  overlay_expand: boolean; // 严格对齐模式
+  overlay_expand: boolean; // 严格对齐模式：块贴合原文 + 字号饱和填满
   screenshot_freeze_frame: boolean; // 冻结画面：触发瞬间固定屏幕快照
+  overlay_default_mode: string; // original=原文 / translated=译文 / last=沿用上次
+  overlay_last_mode: string; // "last" 模式下记住的上次选择
 }
 
 const DEFAULT_SETTINGS: ShotSettings = {
@@ -54,7 +56,21 @@ const DEFAULT_SETTINGS: ShotSettings = {
   screenshot_freeze_frame: true,
   overlay_mode: "dark",
   overlay_expand: false,
+  overlay_default_mode: "original",
+  overlay_last_mode: "original",
 };
+
+/** 按设置解析"本次进入截图时覆盖块该显示原文还是译文" */
+function resolveCopyMode(s: {
+  overlay_default_mode?: string;
+  overlay_last_mode?: string;
+}): CopyMode {
+  if (s?.overlay_default_mode === "translated") return "translated";
+  if (s?.overlay_default_mode === "last") {
+    return s?.overlay_last_mode === "translated" ? "translated" : "original";
+  }
+  return "original";
+}
 
 type Phase = "idle" | "select" | "processing" | "result";
 type CopyMode = "original" | "translated";
@@ -134,7 +150,9 @@ let measureCanvas: HTMLCanvasElement | null = null;
 function fitFontSize(
   text: string,
   blockW: number,
-  blockH: number
+  blockH: number,
+  /** 严格对齐模式：字号饱和填满（行距上限放宽到 2.0，不留余量） */
+  saturated = false
 ): { size: number; lineHeight: number } {
   const fallback = { size: 14, lineHeight: 1.3 };
   const t = (text || "").trim();
@@ -201,12 +219,20 @@ function fitFontSize(
       lh = 1.12;
     }
   }
-  // 多行且高度富余：行距上浮铺满色块（上限1.45）
+  // 多行且高度富余：行距上浮铺满色块。
+  // 严格对齐模式要求"完全饱和、不留余量"，行距上限从 1.45 放宽到 2.0，
+  // 让文字把框内空间吃满（框越大字越大，且不剩空白）。
   const lines = wrappedLineCount(size);
   if (lines > 1 && lines * size * lh < usableH) {
-    lh = Math.min(1.45, usableH / lines / size);
+    lh = Math.min(saturated ? 2.0 : 1.45, usableH / lines / size);
   }
   return { size, lineHeight: lh };
+}
+
+/** 覆盖块当前应显示的内容：与菜单栏「原/译」开关同步（原=原文，译=译文） */
+function shownBlockText(b: Block, copyMode: CopyMode): string {
+  const t = copyMode === "original" ? b.original : b.translation;
+  return t && t.trim() ? t : "…";
 }
 
 // ============ 组件 ============
@@ -225,6 +251,8 @@ const ScreenshotWindow: React.FC = () => {
   const [dragging, setDragging] = useState(false);
   const [selection, setSelection] = useState({ x: 0, y: 0, width: 0, height: 0 });
   const [blocks, setBlocks] = useState<Block[]>([]);
+  // 覆盖块 DOM 引用：渲染后按真实排版收敛字号（见下方 useLayoutEffect）
+  const blockEls = useRef<(HTMLDivElement | null)[]>([]);
   const [overlayVisible, setOverlayVisible] = useState(true);
   const [noText, setNoText] = useState(false);
   const [error, setError] = useState("");
@@ -299,6 +327,8 @@ const ScreenshotWindow: React.FC = () => {
           overlay_mode: s?.overlay_mode || DEFAULT_SETTINGS.overlay_mode,
           overlay_expand: !!s?.overlay_expand,
           screenshot_freeze_frame: s?.screenshot_freeze_frame ?? true,
+          overlay_default_mode: String(s?.overlay_default_mode || "original"),
+          overlay_last_mode: String(s?.overlay_last_mode || "original"),
         });
         const dir = String(s?.default_translation_direction || "auto->zh").split("->");
         setSrcLang(dir[0] || "auto");
@@ -329,6 +359,8 @@ const ScreenshotWindow: React.FC = () => {
           overlay_mode: s?.overlay_mode || DEFAULT_SETTINGS.overlay_mode,
           overlay_expand: !!s?.overlay_expand,
           screenshot_freeze_frame: s?.screenshot_freeze_frame ?? true,
+          overlay_default_mode: String(s?.overlay_default_mode || "original"),
+          overlay_last_mode: String(s?.overlay_last_mode || "original"),
         });
         const dir = String(s?.default_translation_direction || "auto->zh").split("->");
         setSrcLang(dir[0] || "auto");
@@ -443,7 +475,8 @@ const ScreenshotWindow: React.FC = () => {
     setNoText(false);
     setError("");
     setMtStatus("");
-    setCopyMode("original");
+    // 覆盖层默认显示：原文 / 译文 / 上次（截图菜单里的最后一次选择）
+    setCopyMode(resolveCopyMode(settings));
     setPicked([]);
     setGroupDragging(false);
     setEngineMenuOpen(false);
@@ -457,7 +490,7 @@ const ScreenshotWindow: React.FC = () => {
       .catch(() => setSnapshotUrl(null));
     // 触发时窗口可能停在屏幕外待命位：回归屏幕（Rust 侧已 show + 置前台）
     void moveOnScreen();
-  }, [moveOnScreen]);
+  }, [moveOnScreen, settings]);
 
   // 托盘菜单/全局快捷键触发截图：Rust侧已显示窗口，这里重置到框选模式
   useEffect(() => {
@@ -687,6 +720,25 @@ const ScreenshotWindow: React.FC = () => {
       });
       setBlocks(newBlocks);
 
+      // 诊断（仅在 ST_DEBUG_BLOCKS=1 时后端才落盘）：记录选区/OCR行/分组/块几何，
+      // 用于定位覆盖块与原文行不对齐的问题；fire-and-forget，不阻塞翻译流程
+      void invoke("dump_ocr_debug", {
+        payload: JSON.stringify({
+          scaleFactor: sf,
+          selection: sel,
+          ocrLines: cssLines,
+          groupCount: groups.length,
+          groups: groups.map((g) => g.map((l) => l.text)),
+          blocks: newBlocks.map((b) => ({
+            x: b.x,
+            y: b.y,
+            w: b.width,
+            h: b.height,
+            original: b.original,
+          })),
+        }),
+      }).catch(() => {});
+
       // 窗口已恢复可见（截图完成后），只需切换到翻译阶段文案
       setProcStage("translate");
 
@@ -869,37 +921,65 @@ const ScreenshotWindow: React.FC = () => {
     else applyLang(srcLang, code);
   };
 
-  // 严格对齐模式：译文区域 = 原文矩形 +10%（与其它块重叠时 x 从10%递减至不重叠）
-  const expandedRect = (
-    i: number,
-    r: { x: number; y: number; width: number; height: number }
-  ) => {
-    if (!settings.overlay_expand) return r;
-    const others = blocks.filter((_, k) => k !== i);
-    const overlaps = (c: {
-      x: number;
-      y: number;
-      width: number;
-      height: number;
-    }) =>
-      others.some(
-        (o) =>
-          c.x < o.x + o.width &&
-          c.x + c.width > o.x &&
-          c.y < o.y + o.height &&
-          c.y + c.height > o.y
+  // 渲染后用真实 DOM 校正字号（用户反馈"文字未完全显示"）：
+  // fitFontSize 的 canvas 估算与实际排版存在偏差（中英混排换行点、字体回退、
+  // 行高取整），估算偏大时 .block 的 overflow:hidden 会把最后一行裁掉。
+  // 这里以实测为准收敛：① 逐像素缩小字号直到装得下；② 缩到下限仍装不下，
+  // 就放开固定高度让色块向下生长——宁可多盖一点也不丢字。
+  useLayoutEffect(() => {
+    if (phase !== "result" || !overlayVisible) return;
+    const MIN_FONT = 8;
+    blocks.forEach((b, i) => {
+      const el = blockEls.current[i];
+      if (!el) return;
+      const rect = expandedRect(i, b);
+      // 每次校正都回到"设计值"再收敛，避免把上一轮的缩小结果当成起点。
+      // 用"当前显示内容"（原/译）算，切换开关后字号要跟着重算
+      const fit = fitFontSize(
+        shownBlockText(b, copyMode),
+        rect.width,
+        rect.height,
+        settings.overlay_expand
       );
-    for (let x = 0.1; x >= 0; x -= 0.01) {
-      const cand = {
-        x: r.x,
-        y: r.y,
-        width: r.width * (1 + x),
-        height: r.height * (1 + x),
+      el.style.lineHeight = String(fit.lineHeight);
+      // 量真实内容高度：临时切到"自动高度 + 顶部对齐"再量。
+      // （align-items:center 时溢出同时发生在上下两侧，scrollHeight 测不到顶部溢出）
+      const measure = (): number => {
+        const h = el.style.height;
+        const a = el.style.alignItems;
+        el.style.height = "auto";
+        el.style.alignItems = "flex-start";
+        const contentH = el.scrollHeight;
+        el.style.height = h;
+        el.style.alignItems = a;
+        return contentH;
       };
-      if (!overlaps(cand)) return cand;
-    }
-    return r;
-  };
+      let fs = fit.size;
+      el.style.fontSize = `${fs}px`;
+      el.style.height = `${rect.height}px`;
+      let guard = 0;
+      while (fs > MIN_FONT && guard < 60 && measure() > rect.height) {
+        fs = Math.max(MIN_FONT, fs - 1);
+        el.style.fontSize = `${fs}px`;
+        guard += 1;
+      }
+      if (measure() > rect.height) {
+        // 缩到下限仍装不下：放开固定高度，让色块向下生长（不丢字优先）
+        el.style.height = "auto";
+        el.style.alignItems = "flex-start";
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase, overlayVisible, blocks, settings.overlay_expand, copyMode]);
+
+  // 覆盖块矩形：一律取"选中文字的紧致包围盒"。
+  // 严格对齐模式此前会做 +10% 扩张（避让重叠），但用户要求"边框由选中文字决定"，
+  // 所以扩张逻辑已移除——块 = 该组 OCR 文字的并集矩形（blocks 构建时即为紧致框），
+  // 差异化只体现在字号：严格对齐走饱和填充（见 fitFontSize 的 saturated）。
+  const expandedRect = (
+    _i: number,
+    r: { x: number; y: number; width: number; height: number }
+  ) => r;
 
   // 应用内快捷键：反转原文/译文（组合键读设置 hotkeys.reverse，ref 持有最新值避免闭包过期）
   const langPairRef = useRef({ src: "auto", dst: "zh" });
@@ -1100,11 +1180,21 @@ const ScreenshotWindow: React.FC = () => {
           // 严格对齐模式：译文区域 = 原文矩形 +10%（与其它块重叠时递减至不重叠）
           const rect = expandedRect(i, b);
           const mode = settings.overlay_mode;
-          const fit = fitFontSize(b.translation, rect.width, rect.height);
+          // 菜单栏「原/译」开关同步到覆盖层：选"原"时块内显示原文，便于和底图对照
+          const shown = shownBlockText(b, copyMode);
+          const fit = fitFontSize(
+            shown,
+            rect.width,
+            rect.height,
+            settings.overlay_expand
+          );
           return (
           <div
             key={i}
             className="block"
+            ref={(el) => {
+              blockEls.current[i] = el;
+            }}
             onMouseDown={(e) => {
               // 记录修饰键快照（供mouseup累积片段用）
               dragWasCtrl.current = ctrlHeld;
@@ -1168,7 +1258,7 @@ const ScreenshotWindow: React.FC = () => {
               cursor: "text",
             }}
           >
-            {b.translation || "…"}
+            {shown}
           </div>
           );
         })}
@@ -1343,12 +1433,21 @@ if (comp === "copy")
               <button
                 className="group-item toggle"
                 onMouseDown={(e) => e.stopPropagation()}
-                onClick={() =>
-                  setCopyMode((m) =>
-                    m === "original" ? "translated" : "original"
-                  )
-                }
-                title="切换复制内容：原文/译文"
+                onClick={() => {
+                  const next = copyMode === "original" ? "translated" : "original";
+                  setCopyMode(next);
+                  // 仅当设置为"上次"时才记住这次选择；固定模式下临时切换不污染默认值
+                  if (settings.overlay_default_mode === "last") {
+                    void (async () => {
+                      try {
+                        const s = await invoke<any>("get_app_settings");
+                        s.overlay_last_mode = next;
+                        await invoke("save_app_settings", { settings: s });
+                      } catch {}
+                    })();
+                  }
+                }}
+                title="切换显示与复制内容：原文/译文（覆盖块同步切换）"
               >
                 {copyMode === "original" ? "原" : "译"}
               </button>
@@ -1360,7 +1459,7 @@ if (comp === "copy")
               className="group-item close"
               onMouseDown={(e) => e.stopPropagation()}
               onClick={exit}
-              title="退出截图翻译"
+              title="退出截图翻译（Esc）"
             >
               ×
             </button>

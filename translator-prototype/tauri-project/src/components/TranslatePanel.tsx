@@ -48,6 +48,8 @@ const TranslatePanel: React.FC<TranslatePanelProps> = ({ pendingText, onConsumed
   // 手动指定引擎（翻译测试用）：null=默认优先级（描边框在默认引擎上）
   const [selectedEngine, setSelectedEngine] = useState<string | null>(null);
   const [defaultEngine, setDefaultEngine] = useState("");
+  // "当前翻译源"是否已读出（决定要不要探测网络延迟）
+  const [engineResolved, setEngineResolved] = useState(false);
   // auto 状态下点击 ⇄ 的可见提示
   const [swapHint, setSwapHint] = useState(false);
   // 离线模型下载/加载进度（offline-mt-status 事件，8秒无更新自动隐藏）
@@ -70,8 +72,24 @@ const TranslatePanel: React.FC<TranslatePanelProps> = ({ pendingText, onConsumed
   useEffect(() => {
     loadLanguages();
     loadEngines();
-    loadNetworkStatus();
   }, []);
+
+  // 离线翻译（本地模型）不检测网络延迟：手动指定或当前翻译源为离线引擎时跳过探测
+  const offlineEngine = selectedEngine
+    ? selectedEngine === "离线翻译"
+    : defaultEngine === "离线翻译";
+
+  // 等"当前翻译源"读出来后再决定是否探测：否则挂载瞬间会先探测一次，
+  // 离线引擎下用户仍会看到无意义的"检测中…/延迟"
+  useEffect(() => {
+    if (!engineResolved) return;
+    if (offlineEngine) {
+      setNetwork(null);
+      return;
+    }
+    loadNetworkStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [engineResolved, offlineEngine]);
 
   // 划词捕获：文本到达后填入并自动翻译一次
   useEffect(() => {
@@ -94,13 +112,19 @@ const TranslatePanel: React.FC<TranslatePanelProps> = ({ pendingText, onConsumed
 
   const loadEngines = async () => {
     try {
-      invoke<any>("get_app_settings")
-        .then((s) => setDefaultEngine(String(s?.current_engine || "")))
-        .catch(() => {});
+      // 先读"当前翻译源"，再决定是否需要探测网络延迟（离线引擎不探测）
+      try {
+        const s = await invoke<any>("get_app_settings");
+        setDefaultEngine(String(s?.current_engine || ""));
+      } catch {
+        /* 读取失败按非离线处理 */
+      }
       const engineList = await invoke<EngineInfo[]>("list_engines");
       setEngines(engineList);
     } catch (e) {
       console.error("加载引擎失败:", e);
+    } finally {
+      setEngineResolved(true);
     }
   };
 
@@ -166,9 +190,17 @@ const TranslatePanel: React.FC<TranslatePanelProps> = ({ pendingText, onConsumed
       <div className="translate-header">
         <h3>翻译测试</h3>
         <div className="status-row">
-          <span className={`net-dot ${network?.is_online ? "online" : "offline"}`}></span>
+          <span
+            className={`net-dot ${
+              !offlineEngine && network?.is_online ? "online" : "offline"
+            }`}
+          ></span>
           <span className="net-text">
-            {network
+            {offlineEngine
+              ? "离线翻译（本地模型）· 不检测网络延迟"
+              : engineUsed === "离线翻译"
+              ? "本地离线引擎（在线引擎不可用，已自动兜底）"
+              : network
               ? network.is_online
                 ? `在线（延迟 ${network.latency}ms）`
                 : "离线"

@@ -156,4 +156,81 @@ describe("App（主框架）", () => {
       await screen.findByRole("heading", { level: 3, name: "翻译测试" })
     ).toBeInTheDocument();
   });
+
+  it("可用性: 有未保存修改时给出可见提示（截图翻译只读已保存配置）", async () => {
+    render(<App />);
+    await screen.findByText("设置菜单");
+    // 初始：草稿 == 已保存，按钮不高亮；也确认旧版文字提示已彻底移除
+    expect(screen.getByRole("button", { name: "保存设置" }).className).not.toContain("dirty");
+    expect(screen.queryByText("● 有未保存的修改")).toBeNull();
+    // 切到"翻译引擎"页（OCR 引擎也在这个 tab），点一下"有道 OCR"整行
+    // 注意：菜单项与"打开时进入的页面"下拉里的 option 同名，必须限定在侧边栏内取
+    const sidebar = screen.getByText("设置菜单").closest<HTMLElement>(".sidebar")!;
+    fireEvent.click(within(sidebar).getByText("翻译引擎"));
+    fireEvent.click(await screen.findByText("有道 OCR"));
+    // 有未保存改动 → 保存按钮高亮（不再用文字提示）
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "保存设置" }).className).toContain("dirty");
+    });
+    expect(screen.queryByText("● 有未保存的修改")).toBeNull();
+    // 保存后不再高亮
+    fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "保存设置" }).className).not.toContain("dirty");
+    });
+  });
+
+  it("功能: 点×隐藏到托盘（main-window-hidden）→ 丢弃未保存的草稿", async () => {
+    render(<App />);
+    await screen.findByText("设置菜单");
+    const sidebar = screen.getByText("设置菜单").closest<HTMLElement>(".sidebar")!;
+    fireEvent.click(within(sidebar).getByText("翻译引擎"));
+    fireEvent.click(await screen.findByText("有道 OCR"));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "保存设置" }).className).toContain("dirty");
+    });
+    // Rust 侧在 hide 之前发 main-window-hidden：草稿立刻回滚到上次保存状态
+    await act(async () => {
+      listeners["main-window-hidden"]({});
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "保存设置" }).className).not.toContain("dirty");
+    });
+  });
+
+  it("功能: startup_menu=hotkeys → 首屏停留在快捷键页", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "get_app_settings")
+        return Promise.resolve({ ...SETTINGS, startup_menu: "hotkeys" });
+      return defaultInvoke(cmd);
+    });
+    render(<App />);
+    expect(
+      await screen.findByRole("heading", { level: 3, name: "快捷键" })
+    ).toBeInTheDocument();
+  });
+
+  it("可用性: 非法 startup_menu 回落基础设置页", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "get_app_settings")
+        return Promise.resolve({ ...SETTINGS, startup_menu: "nope" });
+      return defaultInvoke(cmd);
+    });
+    render(<App />);
+    expect(
+      await screen.findByRole("heading", { level: 3, name: "基础设置" })
+    ).toBeInTheDocument();
+  });
+
+  it("功能: 保存/恢复默认在全部菜单 tab 可用（含关于页）", async () => {
+    render(<App />);
+    await screen.findByText("设置菜单");
+    const sidebar = screen.getByText("设置菜单").closest<HTMLElement>(".sidebar")!;
+    expect(within(sidebar).getByRole("button", { name: "保存设置" })).toBeInTheDocument();
+    fireEvent.click(within(sidebar).getByText("关于"));
+    expect(await screen.findByText("版本: 0.4.20")).toBeInTheDocument();
+    // 此前关于/术语/历史/翻译测试四个 tab 不显示保存栏（用户反馈）
+    expect(within(sidebar).getByRole("button", { name: "保存设置" })).toBeInTheDocument();
+    expect(within(sidebar).getByRole("button", { name: "恢复默认" })).toBeInTheDocument();
+  });
 });

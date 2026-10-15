@@ -165,6 +165,7 @@ input:checked + .toggle-slider:before {
   align-items: center;
   gap: 10px;
   margin-bottom: 10px;
+  cursor: pointer; /* 整行可点：点击文字即可切换，不必精准点中小开关 */
 }
 
 .api-keys {
@@ -704,4 +705,33 @@ input:checked + .toggle-slider:before {
 .hotkey-hint {
   color: #d97706;
   font-size: 12px;
+}
+
+/* 自定义AI 供应商重名：输入框标红 + 行内提示（名称即引擎名，必须唯一） */
+.form-input.input-error {
+  border-color: #dc2626;
+  background: #fef2f2;
+}
+
+.provider-dup {
+  color: #dc2626;
+}
+
+/* 快捷键侧别反馈：录入中显示实时按下的修饰键；已设置时说明左右侧别语义 */
+.hotkey-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+}
+
+.hotkey-feedback {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.hotkey-feedback.live {
+  color: #1976d2;
+  font-weight: 600;
 }
