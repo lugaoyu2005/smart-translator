@@ -916,6 +916,17 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 value={localSettings?.providers?.tencent_secret_key || ""}
                 onChange={(e) => setProviderKey("tencent_secret_key", e.target.value)}
               />
+              <input
+                type="text"
+                className="form-input"
+                placeholder="地域 Region（留空=ap-guangzhou）"
+                value={localSettings?.providers?.tencent_region || ""}
+                onChange={(e) => setProviderKey("tencent_region", e.target.value)}
+              />
+            </div>
+            <div className="form-hint">
+              地域（Region）是 TMT 的必填参数，常用 ap-guangzhou / ap-beijing / ap-shanghai，
+              留空默认 ap-guangzhou。密钥在腾讯云「访问管理 → API 密钥」创建。
             </div>
           </div>
         )}

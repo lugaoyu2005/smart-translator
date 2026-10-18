@@ -36,6 +36,7 @@ pub fn build_manager(settings: &crate::system::AppSettings) -> TranslationManage
         engines.push(Box::new(TencentEngine::new(
             &providers.tencent_secret_id,
             &providers.tencent_secret_key,
+            &providers.tencent_region,
         )));
     }
     if enabled("ali") {

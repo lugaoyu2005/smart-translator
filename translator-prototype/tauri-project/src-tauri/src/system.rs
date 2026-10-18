@@ -204,6 +204,10 @@ pub struct ProviderSettings {
     pub tencent_secret_id: String,
     #[serde(default)]
     pub tencent_secret_key: String,
+    // TMT 的 X-TC-Region 是必填公共参数（缺失会报 MissingParameter）。
+    // 留空时引擎侧回落 ap-guangzhou。
+    #[serde(default)]
+    pub tencent_region: String,
     #[serde(default)]
     pub ali_access_key_id: String,
     #[serde(default)]

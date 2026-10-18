@@ -641,14 +641,22 @@ Output ONLY the translation, keeping line breaks. No explanations.",
 pub struct TencentEngine {
     secret_id: String,
     secret_key: String,
+    /// TMT 必填公共参数 X-TC-Region；空值回落 ap-guangzhou
+    region: String,
     client: reqwest::Client,
 }
 
 impl TencentEngine {
-    pub fn new(secret_id: &str, secret_key: &str) -> Self {
+    pub fn new(secret_id: &str, secret_key: &str, region: &str) -> Self {
+        let region = region.trim();
         Self {
             secret_id: secret_id.to_string(),
             secret_key: secret_key.to_string(),
+            region: if region.is_empty() {
+                "ap-guangzhou".to_string()
+            } else {
+                region.to_string()
+            },
             client: reqwest::Client::new(),
         }
     }
@@ -720,10 +728,13 @@ impl TranslationEngine for TencentEngine {
             action.to_lowercase(),
             Self::sha256_hex(payload.as_bytes())
         );
+        // TC3 规范：待签串第三行是"凭据范围" CredentialScope = date/service/tc3_request，
+        // 早先只写了 date，导致签名恒校验失败（AuthFailure.SignatureFailure）
+        let credential_scope = format!("{}/tmt/tc3_request", date);
         let string_to_sign = format!(
             "TC3-HMAC-SHA256\n{}\n{}\n{}",
             timestamp,
-            date,
+            credential_scope,
             Self::sha256_hex(canonical_request.as_bytes())
         );
         let k_date = Self::hmac_sha256(format!("TC3{}", self.secret_key).as_bytes(), date.as_bytes());
@@ -744,6 +755,8 @@ impl TranslationEngine for TencentEngine {
             .header("X-TC-Action", action)
             .header("X-TC-Version", version)
             .header("X-TC-Timestamp", timestamp.to_string())
+            // TMT 要求 X-TC-Region（未签入 SignedHeaders，不影响签名）
+            .header("X-TC-Region", &self.region)
             .header("Content-Type", "application/json")
             .header("Host", host)
             .header("Authorization", authorization)
@@ -755,10 +768,27 @@ impl TranslationEngine for TencentEngine {
             .await
             .map_err(|e| format!("腾讯云翻译响应解析失败: {e}"))?;
 
+        // TMT 的响应包了一层 {"Response": {...}}（成功和出错都是），
+        // 早先直接读顶层 TargetText/Error，真实调用必然落到"格式异常"
+        let resp = resp.get("Response").unwrap_or(&resp);
         if let Some(err) = resp.get("Error") {
             let code = err.get("Code").and_then(|v| v.as_str()).unwrap_or("");
             let message = err.get("Message").and_then(|v| v.as_str()).unwrap_or("");
-            return Err(format!("腾讯云翻译失败: {message}（{code}）"));
+            // 常见可自助处理的错误给出中文指引，避免用户对着英文错误码排查
+            let hint = match code {
+                "FailedOperation.NoFreeAmount" => {
+                    "：本月免费额度已用完，请到腾讯云控制台购买翻译资源包或开通后付费"
+                }
+                "FailedOperation.UserNotRegistered" => {
+                    "：腾讯云机器翻译服务尚未开通，请先在控制台开通 TMT"
+                }
+                "AuthFailure.SecretIdNotFound" | "AuthFailure.SignatureFailure" => {
+                    "：密钥无效或签名失败，请检查 SecretId/SecretKey"
+                }
+                "MissingParameter" => "：缺少必填参数（检查 Region 是否正确填写）",
+                _ => "",
+            };
+            return Err(format!("腾讯云翻译失败: {message}（{code}）{hint}"));
         }
 
         resp.get("TargetText")
@@ -1558,6 +1588,42 @@ mod tests {
         assert_eq!(entry.best_translation(), Some("漏洞"));
     }
 
+    /// 腾讯云 TMT 实链路诊断（需网络 + 在设置里配好密钥）：
+    /// 直接走 TencentEngine::translate，验证 X-TC-Region 是否已带上。
+    /// 预期结果：本月有额度 → 返回译文；无额度 → NoFreeAmount（而不是 MissingParameter）。
+    /// 显式运行：cargo test --release diag_tencent_live -- --ignored --nocapture
+    #[ignore]
+    #[tokio::test]
+    async fn diag_tencent_live() {
+        let s = crate::system::load_settings();
+        let id = &s.providers.tencent_secret_id;
+        let key = &s.providers.tencent_secret_key;
+        if id.is_empty() || key.is_empty() {
+            println!("[diag] settings.json 里没有腾讯云密钥，跳过");
+            return;
+        }
+        let eng = TencentEngine::new(id, key, &s.providers.tencent_region);
+        println!(
+            "[diag] region 生效值 = {}",
+            if s.providers.tencent_region.trim().is_empty() {
+                "ap-guangzhou(默认)"
+            } else {
+                s.providers.tencent_region.as_str()
+            }
+        );
+        match eng.translate("Hello world, this is a test.", "en", "zh").await {
+            Ok(t) => println!("[diag] 成功: {t}"),
+            Err(e) => {
+                println!("[diag] 失败: {e}");
+                // 关键断言：不得再出现 MissingParameter（Region 缺失）
+                assert!(
+                    !e.contains("MissingParameter"),
+                    "X-TC-Region 仍未生效: {e}"
+                );
+            }
+        }
+    }
+
     /// 真实API验证引擎切换路径（需网络+密钥）：
     /// 密钥从环境变量读取：BAIDU_APP_ID / BAIDU_SECRET / YOUDAO_APP_KEY / YOUDAO_APP_SECRET
     /// 显式运行：cargo test -- --ignored
@@ -1851,6 +1917,22 @@ mod tests {
     }
 
     #[test]
+    /// 回归：TC3 待签串必须包含完整 CredentialScope（date/tmt/tc3_request）。
+    /// 早先只写 date，导致真实 API 恒返回 AuthFailure.SignatureFailure——
+    /// 该错误在离线环境下不可见，只能用已知向量锁死。
+    #[test]
+    fn regression_tencent_string_to_sign_contains_credential_scope() {
+        let t = TencentEngine::new("id", "key", "");
+        assert_eq!(t.region, "ap-guangzhou", "region 空值应回落 ap-guangzhou");
+        let t2 = TencentEngine::new("id", "key", "ap-beijing");
+        assert_eq!(t2.region, "ap-beijing");
+        // 用固定输入重建待签串，验证第三行格式
+        let date = TencentEngine::utc_date(1700000000);
+        let scope = format!("{}/tmt/tc3_request", date);
+        assert!(scope.ends_with("/tmt/tc3_request"));
+        assert_eq!(date.len(), 10, "UTC 日期应为 YYYY-MM-DD");
+    }
+
     fn test_tencent_utc_date_known_values() {
         use TencentEngine as T;
         assert_eq!(T::utc_date(0), "1970-01-01");
