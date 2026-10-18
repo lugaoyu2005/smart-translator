@@ -277,8 +277,9 @@ const ScreenshotWindow: React.FC = () => {
     { text: string; block: number | null; whole: boolean; range: Range }[]
   >([]);
   const [ctrlHeld, setCtrlHeld] = useState(false);
-  // 原文/译文语言对（菜单组件可改，持久化到 settings.default_translation_direction）
-  const [srcLang, setSrcLang] = useState("auto");
+  // 译文语言（菜单可选，持久化到 settings.default_translation_direction）；
+  // 原文语言不再由用户指定，固定 auto 交给引擎自动检测
+  const [, setSrcLang] = useState("auto");
   const [dstLang, setDstLang] = useState("zh");
   const [langMenu, setLangMenu] = useState<null | "src" | "dst">(null);
   // 本次按下的拖拽是否带Ctrl（mousedown时快照，避免先松Ctrl再松鼠标导致误清空）
@@ -335,7 +336,6 @@ const ScreenshotWindow: React.FC = () => {
         const dir = String(s?.default_translation_direction || "auto->zh").split("->");
         setSrcLang(dir[0] || "auto");
         setDstLang(dir[1] || "zh");
-        reverseKeyRef.current = String(s?.hotkeys?.reverse || "Ctrl+Alt+B");
         // 双向绑定：初始选中引擎来自设置的"当前翻译源"
         const configured = (es as EngineInfo[]).filter((e) => e.configured);
         setEngines(configured);
@@ -990,52 +990,6 @@ const ScreenshotWindow: React.FC = () => {
     _i: number,
     r: { x: number; y: number; width: number; height: number }
   ) => r;
-
-  // 应用内快捷键：反转原文/译文（组合键读设置 hotkeys.reverse，ref 持有最新值避免闭包过期）
-  const langPairRef = useRef({ src: "auto", dst: "zh" });
-  const applyLangRef = useRef<(s: string, d: string) => void>(() => {});
-  const reverseKeyRef = useRef("Ctrl+Alt+B");
-  useEffect(() => {
-    langPairRef.current = { src: srcLang, dst: dstLang };
-  }, [srcLang, dstLang]);
-  useEffect(() => {
-    applyLangRef.current = applyLang;
-  });
-  useEffect(() => {
-    const h = (e: KeyboardEvent) => {
-      const raw = reverseKeyRef.current;
-      if (!raw || raw.toLowerCase() === "none") return;
-      const parts = raw.split("+").map((x) => x.trim());
-      const key = parts[parts.length - 1].toLowerCase();
-      const mods = parts.slice(0, -1).map((x) => x.toLowerCase());
-      // 修饰键匹配：LCtrl/RCtrl 等精确到物理侧别（e.code），不带前缀双侧皆可；
-      // 未要求的修饰键必须未按下（与录入语义一致）
-      const modMatch =
-        (mods.includes("lctrl") ? e.code === "ControlLeft"
-          : mods.includes("rctrl") ? e.code === "ControlRight"
-          : mods.includes("ctrl") ? e.ctrlKey
-          : !e.ctrlKey) &&
-        (mods.includes("lalt") ? e.code === "AltLeft"
-          : mods.includes("ralt") ? e.code === "AltRight"
-          : mods.includes("alt") ? e.altKey
-          : !e.altKey) &&
-        (mods.includes("lshift") ? e.code === "ShiftLeft"
-          : mods.includes("rshift") ? e.code === "ShiftRight"
-          : mods.includes("shift") ? e.shiftKey
-          : !e.shiftKey) &&
-        (mods.includes("lwin") ? e.code === "MetaLeft"
-          : mods.includes("rwin") ? e.code === "MetaRight"
-          : mods.includes("win") || mods.includes("meta") || mods.includes("super")
-            ? e.metaKey
-          : !e.metaKey);
-      if (modMatch && e.key.toLowerCase() === key) {
-        e.preventDefault();
-        applyLangRef.current(langPairRef.current.dst, langPairRef.current.src);
-      }
-    };
-    window.addEventListener("keydown", h);
-    return () => window.removeEventListener("keydown", h);
-  }, []);
 
   /** 复制到剪贴板并退出。按当前原/译模式，优先级：Ctrl累积片段 > 原生选区 > 全部段落 */
   const handleCopy = async () => {

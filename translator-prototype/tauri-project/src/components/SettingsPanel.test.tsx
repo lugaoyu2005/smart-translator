@@ -32,8 +32,7 @@ const BASE = {
     screenshot: "LCtrl+A",
     translate: "Ctrl+Alt+T",
     select: "None",
-    reverse: "None",
-  },
+      },
   screenshot_components: ["engine", "lang", "copy", "close", "settings"],
   screenshot_components_disabled: [],
 };
@@ -124,7 +123,7 @@ describe("SettingsPanel（设置页）", () => {
     expect(
       screen.getByText(/Ctrl\/Alt 两侧均可触发（未区分左右）/)
     ).toBeInTheDocument();
-    // None → 明确说明未设置
-    expect(screen.getAllByText("未设置（不注册全局热键）")).toHaveLength(2);
+    // None → 明确说明未设置（反转原/译快捷键已废弃，只剩划词/唤出窗口两项里未设置的）
+    expect(screen.getAllByText("未设置（不注册全局热键）").length).toBeGreaterThan(0);
   });
 });

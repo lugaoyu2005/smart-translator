@@ -241,7 +241,6 @@ impl Default for AppSettings {
         hotkeys.insert("translate".to_string(), "None".to_string());
         hotkeys.insert("screenshot".to_string(), "None".to_string());
         hotkeys.insert("select".to_string(), "None".to_string());
-        hotkeys.insert("reverse".to_string(), "None".to_string());
 
         Self {
             autostart: true,
@@ -403,12 +402,9 @@ fn migrate(settings: &mut AppSettings) {
             .hotkeys
             .insert("select".to_string(), "None".to_string());
     }
-    // 反转原译快捷键（截图会话内生效）
-    if !settings.hotkeys.contains_key("reverse") {
-        settings
-            .hotkeys
-            .insert("reverse".to_string(), "None".to_string());
-    }
+    // 反转原/译快捷键已废弃（原文语言改为自动检测后不再有"反转"概念）：
+    // 旧配置里的残留键直接清掉，避免设置页/前端继续看到它
+    settings.hotkeys.remove("reverse");
     // 快捷键默认值改为 None（无）：升级前使用出厂默认值的旧值一并重置；
     // 用户自定义过的非默认值保留
     let legacy_defaults = [
@@ -421,7 +417,7 @@ fn migrate(settings: &mut AppSettings) {
         "ctrl+alt+x",
         "ctrl+alt+b",
     ];
-    for key in ["translate", "screenshot", "select", "reverse"] {
+    for key in ["translate", "screenshot", "select"] {
         let is_legacy = settings
             .hotkeys
             .get(key)
@@ -932,13 +928,12 @@ fn is_valid_hotkey(s: &str) -> bool {
     true
 }
 
-/// 热键非法时按名回落（translate/screenshot/select 回取出厂默认，reverse 回 None）
+/// 热键非法时按名回落（translate/screenshot/select 回取出厂默认）
 fn sanitize_hotkeys(settings: &mut AppSettings) {
     for (name, default) in [
         ("translate", "Ctrl+Alt+T"),
         ("screenshot", "Ctrl+Alt+S"),
         ("select", "Ctrl+Alt+X"),
-        ("reverse", "None"),
     ] {
         let bad = settings
             .hotkeys
@@ -1296,9 +1291,11 @@ mod tests {
     #[test]
     fn sanity_hotkey_defaults_valid() {
         let s = AppSettings::default();
-        for name in ["translate", "screenshot", "select", "reverse"] {
+        for name in ["translate", "screenshot", "select"] {
             assert!(s.hotkeys.contains_key(name), "默认热键缺失: {name}");
         }
+        // 已废弃的反转热键不应再出现在出厂默认里
+        assert!(!s.hotkeys.contains_key("reverse"));
     }
 
     // ===== 迁移测试（回归：历史遗留配置必须被就地修正） =====
@@ -1469,10 +1466,17 @@ mod tests {
     fn regression_migrate_missing_hotkeys_added() {
         let mut s = AppSettings::default();
         s.hotkeys.remove("select");
-        s.hotkeys.remove("reverse");
         migrate(&mut s);
         assert!(s.hotkeys.contains_key("select"));
-        assert!(s.hotkeys.contains_key("reverse"));
+    }
+
+    /// 反转原/译快捷键已废弃（原文语言改为自动检测）：旧配置里的残留键必须被清掉
+    #[test]
+    fn regression_migrate_drops_deprecated_reverse_hotkey() {
+        let mut s = AppSettings::default();
+        s.hotkeys.insert("reverse".to_string(), "Ctrl+Alt+B".to_string());
+        migrate(&mut s);
+        assert!(!s.hotkeys.contains_key("reverse"), "废弃的 reverse 键应被移除");
     }
 
     #[test]
@@ -1523,13 +1527,13 @@ mod tests {
 
     #[test]
     fn sanitize_rejects_single_key_hotkey() {
-        // 保存路径兜底：单按键非法 → translate 回落默认、reverse 回落 None
+        // 保存路径兜底：单按键非法 → 回落出厂默认
         let mut s = AppSettings::default();
         s.hotkeys.insert("translate".to_string(), "F9".to_string());
-        s.hotkeys.insert("reverse".to_string(), "B".to_string());
+        s.hotkeys.insert("select".to_string(), "B".to_string());
         super::sanitize_hotkeys(&mut s);
         assert_eq!(s.hotkeys.get("translate").unwrap(), "Ctrl+Alt+T");
-        assert_eq!(s.hotkeys.get("reverse").unwrap(), "None");
+        assert_eq!(s.hotkeys.get("select").unwrap(), "Ctrl+Alt+X");
     }
 
     #[test]

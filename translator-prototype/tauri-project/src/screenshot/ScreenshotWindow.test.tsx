@@ -83,7 +83,7 @@ function defaultInvoke(cmd: string) {
         overlay_mode: "dark",
         overlay_expand: false,
         default_translation_direction: "auto->zh",
-        hotkeys: { reverse: "Ctrl+Alt+B" },
+        hotkeys: {},
         current_engine: "百度翻译",
       });
     case "list_engines":

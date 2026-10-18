@@ -1497,16 +1497,6 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         />
       </div>
 
-      <div className="form-group">
-        <label className="form-label">反转原/译语言</label>
-        <HotkeyInput
-          value={localSettings?.hotkeys?.reverse || "Ctrl+Alt+B"}
-          onChange={(v) =>
-            handleSettingChange("hotkeys", { ...localSettings?.hotkeys, reverse: v })
-          }
-        />
-        <div className="form-hint">仅在截图翻译界面内生效</div>
-      </div>
     </div>
   );
 
