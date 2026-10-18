@@ -169,6 +169,13 @@ const TranslatePanel: React.FC<TranslatePanelProps> = ({ pendingText, onConsumed
       window.setTimeout(() => setSwapHint(false), 2200);
       return;
     }
+    if (toLang === "auto") {
+      // 目标为"按原文反向"时没有可交换的具体语种，退化为"原文↔中文"更符合直觉
+      const tmp = fromLang;
+      setFromLang("zh");
+      setToLang(tmp);
+      return;
+    }
     const tmp = fromLang;
     setFromLang(toLang);
     setToLang(tmp);
@@ -265,6 +272,7 @@ const TranslatePanel: React.FC<TranslatePanelProps> = ({ pendingText, onConsumed
           </div>
         )}
         <select value={toLang} onChange={(e) => setToLang(e.target.value)}>
+          <option value="auto">自动（按原文反向）</option>
           {languages
             .filter((l) => l.code !== "auto")
             .map((l) => (

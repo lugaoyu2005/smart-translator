@@ -61,6 +61,10 @@ pub struct AppSettings {
     // 当前翻译源（默认引擎名，与截图翻译菜单双向绑定）
     #[serde(default = "default_current_engine")]
     pub current_engine: String,
+    // 双向自动翻译的语言对（"zh-en" 表示中⇄英）：翻译方向选 "自动→自动" 时，
+    // 按原文语种反向决定目标语言（中文→英文、英文→中文）
+    #[serde(default = "default_bilingual_pair")]
+    pub bilingual_pair: String,
     // 主窗口尺寸：last=记住上次大小（默认）；fixed=固定大小（宽高自定义）
     #[serde(default = "default_window_size_mode")]
     pub window_size_mode: String,
@@ -117,6 +121,10 @@ fn default_offline_model() -> String {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_bilingual_pair() -> String {
+    "zh-en".to_string()
 }
 
 fn default_current_engine() -> String {
@@ -262,6 +270,7 @@ impl Default for AppSettings {
             screenshot_freeze_frame: true,
             select_translate_enabled: true,
             current_engine: default_current_engine(),
+            bilingual_pair: default_bilingual_pair(),
             window_size_mode: default_window_size_mode(),
             window_fixed_width: default_window_fixed_width(),
             window_fixed_height: default_window_fixed_height(),
@@ -311,6 +320,10 @@ fn migrate(settings: &mut AppSettings) {
         if !STARTUP_MENUS.contains(&settings.startup_menu.as_str()) {
             settings.startup_menu = default_startup_menu();
         }
+    }
+    // 双向自动语言对：非法值回落 zh-en
+    if !["zh-en", "zh-ja", "zh-ko", "zh-ru"].contains(&settings.bilingual_pair.as_str()) {
+        settings.bilingual_pair = default_bilingual_pair();
     }
     // NLLB 精度：非法值回落 int8
     if !["int8", "q4"].contains(&settings.nllb_variant.as_str()) {

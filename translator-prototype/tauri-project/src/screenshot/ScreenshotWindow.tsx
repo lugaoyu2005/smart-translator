@@ -31,6 +31,8 @@ interface Block {
   height: number;
   original: string; // 组内原文（\n连接）
   translation: string;
+  /** true = 该块本身就是目标语言，不翻译也不铺覆盖块（保留原样） */
+  skipOverlay?: boolean;
 }
 
 interface EngineInfo {
@@ -747,16 +749,22 @@ const ScreenshotWindow: React.FC = () => {
       const res = await invoke<{
         translations: string[];
         engine_used: string;
+        skipped?: boolean[];
       }>("translate_lines", {
         lines: groupTexts,
-        from: srcLang,
+        from: "auto", // 原文语言一律自动检测（菜单栏已去掉原文选择）
         to: dstLang,
         engine: engineName ?? null,
       });
       if (stale()) return;
 
+      // skipped = 该块本来就是目标语言：不翻译、也不铺覆盖块（保留原样）
       setBlocks(
-        newBlocks.map((b, i) => ({ ...b, translation: res.translations[i] ?? "" }))
+        newBlocks.map((b, i) => ({
+          ...b,
+          translation: res.translations[i] ?? "",
+          skipOverlay: !!res.skipped?.[i],
+        }))
       );
       setNoText(false);
       setOverlayVisible(true);
@@ -867,7 +875,7 @@ const ScreenshotWindow: React.FC = () => {
       await processSelection(selection);
       return;
     }
-    await retranslate(engines[idx]?.name ?? null, srcLang, dstLang);
+    await retranslate(engines[idx]?.name ?? null, "auto", dstLang);
   };
 
   /** 点击引擎按钮：展开引擎菜单 */
@@ -897,28 +905,30 @@ const ScreenshotWindow: React.FC = () => {
   };
 
   /** 应用语言对：持久化设置；结果阶段自动以新语言对重译（译文不能是自动检测） */
-  const applyLang = (nextSrc: string, nextDst: string) => {
-    if (nextSrc === nextDst || nextDst === "auto") return;
-    setSrcLang(nextSrc);
+  /** 只设置译文语言：原文语言一律自动检测，不再由用户指定 */
+  const applyLang = (nextDst: string) => {
     setDstLang(nextDst);
+    setSrcLang("auto");
     void (async () => {
       try {
         const s = await invoke<any>("get_app_settings");
-        s.default_translation_direction = `${nextSrc}->${nextDst}`;
+        s.default_translation_direction = `auto->${nextDst}`;
         await invoke("save_app_settings", { settings: s });
       } catch {}
     })();
     if (blocks.length > 0 && !error) {
-      void retranslate(engines[engineIdx]?.name ?? null, nextSrc, nextDst);
+      void retranslate(engines[engineIdx]?.name ?? null, "auto", nextDst);
     }
   };
 
   const langName = (code: string) =>
-    LANGUAGES.find((l) => l.code === code)?.name || code;
+    code === "auto"
+      ? "自动⇄"
+      : LANGUAGES.find((l) => l.code === code)?.name || code;
 
   const handleLangSelect = (which: "src" | "dst", code: string) => {
-    if (which === "src") applyLang(code, dstLang);
-    else applyLang(srcLang, code);
+    if (which !== "dst") return; // 原文语言不可选
+    applyLang(code);
   };
 
   // 渲染后用真实 DOM 校正字号（用户反馈"文字未完全显示"）：
@@ -1177,7 +1187,8 @@ const ScreenshotWindow: React.FC = () => {
       {phase === "result" &&
         overlayVisible &&
         blocks.map((b, i) => {
-          // 严格对齐模式：译文区域 = 原文矩形 +10%（与其它块重叠时递减至不重叠）
+          // 该块本身就是译文语言 → 不铺覆盖块，保留原样（"只翻译原文部分"）
+          if (b.skipOverlay) return null;
           const rect = expandedRect(i, b);
           const mode = settings.overlay_mode;
           // 菜单栏「原/译」开关同步到覆盖层：选"原"时块内显示原文，便于和底图对照
@@ -1323,41 +1334,15 @@ const ScreenshotWindow: React.FC = () => {
             if (comp === "lang")
               return (
             <div key={comp} className="lang-pair" onMouseDown={(e) => e.stopPropagation()}>
-              <span className="chip-anchor">
-                <button
-                  className={`group-item engine ${
-                    langMenu === "src" ? "chip-expanded" : ""
-                  }`}
-                  onClick={() => toggleLangMenu("src")}
-                  title="选择原文语言（Ctrl+Alt+B 反转原/译）"
-                >
-                  {langName(srcLang)}
-                </button>
-                {langMenu === "src" && (
-                  <div
-                    className="chip-pop"
-                      onMouseDown={(e) => e.stopPropagation()}
-                  >
-                    {LANGUAGES.map((l) => (
-                      <button
-                        key={`s-${l.code}`}
-                        className={`chip-pop-item ${srcLang === l.code ? "active" : ""}`}
-                        onClick={() => handleLangSelect("src", l.code)}
-                      >
-                        {l.name}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </span>
-              <span className="lang-arrow">→</span>
+              {/* 原文语言不再由用户选择：一律交给 OCR 结果 + 引擎自动检测。
+                  只保留"译文语言"一项（用户明确要求）。 */}
               <span className="chip-anchor">
                 <button
                   className={`group-item engine ${
                     langMenu === "dst" ? "chip-expanded" : ""
                   }`}
                   onClick={() => toggleLangMenu("dst")}
-                  title="选择译文语言（Ctrl+Alt+B 反转原/译）"
+                  title="选择译文语言；原文语言由 OCR 自动判断，已是该语言的块不会被翻译"
                 >
                   {langName(dstLang)}
                 </button>
@@ -1366,6 +1351,13 @@ const ScreenshotWindow: React.FC = () => {
                     className="chip-pop"
                       onMouseDown={(e) => e.stopPropagation()}
                   >
+                    <button
+                      className={`chip-pop-item ${dstLang === "auto" ? "active" : ""}`}
+                      onClick={() => handleLangSelect("dst", "auto")}
+                      title="按原文语种反向：中文→英文，英文→中文（中英混排按英文处理）"
+                    >
+                      自动（按原文反向）
+                    </button>
                     {LANGUAGES.filter((l) => l.code !== "auto").map((l) => (
                       <button
                         key={`d-${l.code}`}

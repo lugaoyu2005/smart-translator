@@ -103,6 +103,113 @@ pub struct Language {
     pub native_name: String,
 }
 
+// ============ 双向自动翻译（原文语种决定目标语种） ============
+
+/// 按字符脚本粗判语种：本地启发式，零网络开销。
+/// 只需要区分"这一对语言里的哪一个是原文"，不需要精确的语言识别。
+fn detect_lang_by_script(text: &str) -> &'static str {
+    let (mut han, mut kana, mut hangul, mut cyr, mut latin) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    for c in text.chars() {
+        let u = c as u32;
+        if (0x4E00..=0x9FFF).contains(&u)
+            || (0x3400..=0x4DBF).contains(&u)
+            || (0xF900..=0xFAFF).contains(&u)
+        {
+            han += 1;
+        } else if (0x3040..=0x30FF).contains(&u) {
+            kana += 1;
+        } else if (0xAC00..=0xD7A3).contains(&u) || (0x1100..=0x11FF).contains(&u) {
+            hangul += 1;
+        } else if (0x0400..=0x04FF).contains(&u) {
+            cyr += 1;
+        } else if c.is_ascii_alphabetic() || (0xC0..=0x24F).contains(&u) {
+            latin += 1;
+        }
+    }
+    // 判定优先级（不是"谁字数多"）：
+    // 1. 假名/谚文/西里尔各自的语言专属性强，出现即判定
+    // 2. **拉丁字母优先于汉字**：中英混排（如"这是 MiniMap 测试"）按英文原文处理，
+    //    目标为中文——即用户要求的"有英有中，默认英翻中"。
+    //    纯中文（无任何拉丁字母）才判为中文原文，目标英文。
+    if kana > 0 {
+        return "ja";
+    }
+    if hangul > 0 {
+        return "ko";
+    }
+    if cyr > 0 {
+        return "ru";
+    }
+    if latin > 0 {
+        return "en";
+    }
+    if han > 0 {
+        return "zh";
+    }
+    ""
+}
+
+fn parse_bilingual_pair(pair: &str) -> (String, String) {
+    let mut it = pair
+        .split(['-', ',', '>'])
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+    let a = it.next().unwrap_or("zh").to_string();
+    let b = it.next().unwrap_or("en").to_string();
+    (a, b)
+}
+
+
+/// 该文本是否"已经是目标语言"（用于跳过无需翻译的块）。
+/// 判据是"纯目标语言"：目标语种的字符必须出现，且不含其它语种的字符——
+/// 混排文本（如"这是 MiniMap 测试"）仍需翻译，不算已是目标语言。
+/// 只对能靠字符判定的语种生效（zh/ja/ko/ru/en）；fr/es/de/pt 等一律视为需要翻译。
+fn is_pure_lang(text: &str, lang: &str) -> bool {
+    let (mut han, mut kana, mut hangul, mut cyr, mut latin) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    for c in text.chars() {
+        let u = c as u32;
+        if (0x4E00..=0x9FFF).contains(&u)
+            || (0x3400..=0x4DBF).contains(&u)
+            || (0xF900..=0xFAFF).contains(&u)
+        {
+            han += 1;
+        } else if (0x3040..=0x30FF).contains(&u) {
+            kana += 1;
+        } else if (0xAC00..=0xD7A3).contains(&u) || (0x1100..=0x11FF).contains(&u) {
+            hangul += 1;
+        } else if (0x0400..=0x04FF).contains(&u) {
+            cyr += 1;
+        } else if c.is_ascii_alphabetic() || (0xC0..=0x24F).contains(&u) {
+            latin += 1;
+        }
+    }
+    match lang {
+        "zh" => han > 0 && latin == 0 && kana == 0 && hangul == 0 && cyr == 0,
+        "ja" => kana > 0 && latin == 0 && hangul == 0 && cyr == 0,
+        "ko" => hangul > 0 && latin == 0 && kana == 0 && cyr == 0,
+        "ru" => cyr > 0 && latin == 0 && han == 0 && kana == 0 && hangul == 0,
+        "en" => latin > 0 && han == 0 && kana == 0 && hangul == 0 && cyr == 0,
+        _ => false,
+    }
+}
+
+/// 把目标语种 "auto" 解析成具体语种：原文是 A → 目标 B，原文是 B → 目标 A。
+/// 检测不出（或不在配置的语言对里）时翻成语言对的第一个（默认中文，符合中文用户）。
+pub fn resolve_target_lang(text: &str, to: &str, pair: &str) -> String {
+    if !to.eq_ignore_ascii_case("auto") {
+        return to.to_string();
+    }
+    let (a, b) = parse_bilingual_pair(pair);
+    let detected = detect_lang_by_script(text);
+    if detected == a {
+        b
+    } else if detected == b {
+        a
+    } else {
+        a
+    }
+}
+
 // Tauri命令：翻译文本（先预处理，再走引擎管理器）
 #[tauri::command]
 pub async fn translate_text(
@@ -119,6 +226,10 @@ pub async fn translate_text(
     if processed.is_empty() {
         return Err("请输入要翻译的内容".to_string());
     }
+
+    // 双向自动：目标语种为 auto 时按原文语种反向决定（中文→英文 / 英文→中文）
+    let settings = crate::system::load_settings();
+    let to = resolve_target_lang(&processed, &to, &settings.bilingual_pair);
 
     let mut manager = state.manager.lock().await;
 
@@ -246,6 +357,9 @@ pub async fn set_term_priority(
 pub struct LinesTranslationResult {
     pub translations: Vec<String>,
     pub engine_used: String,
+    /// 与 lines 等长：true = 该组本来就是目标语言，未翻译（前端不铺覆盖块）
+    #[serde(default)]
+    pub skipped: Vec<bool>,
 }
 
 // Tauri命令：批量翻译（截图翻译用）
@@ -272,33 +386,89 @@ pub async fn translate_lines(
         })
         .collect();
 
-    let mut manager = state.manager.lock().await;
-    let (translations, engine_used) = match engine {
-        Some(name) if !name.trim().is_empty() => {
-            manager
-                .translate_batch_with(name.trim(), &processed, &from, &to)
-                .await?
-        }
-        _ => manager.translate_batch(&processed, &from, &to).await?,
+    // ===== 语言决策 =====
+    // 原文语言不再由用户指定（菜单栏已去掉"原文对象"），一律交给引擎自动检测；
+    // 译文语言由用户手选。目标为 "auto" 时按每块原文反向（双默认模式）。
+    let settings = crate::system::load_settings();
+    let fixed_target = if to.eq_ignore_ascii_case("auto") {
+        None
+    } else {
+        Some(to.clone())
     };
+
+    // 逐组决定"翻不翻"以及"翻成什么"：
+    //  - 目标语言固定时：已经是该语言的块直接跳过（只翻译原文部分）
+    //  - 目标为 auto 时：每块按自身语言的相反语种翻（中→英 / 英→中）
+    let mut targets: Vec<String> = Vec::with_capacity(processed.len());
+    let mut skipped: Vec<bool> = vec![false; processed.len()];
+    let mut pending: Vec<usize> = Vec::new();
+    for (i, line) in processed.iter().enumerate() {
+        let tgt = match &fixed_target {
+            Some(t) => t.clone(),
+            None => resolve_target_lang(line, "auto", &settings.bilingual_pair),
+        };
+        // 已是目标语言 → 不翻译（混排块因为不是"纯目标语言"，仍会翻译）
+        if fixed_target.is_some() && is_pure_lang(line, &tgt) {
+            skipped[i] = true;
+            targets.push(tgt);
+            continue;
+        }
+        targets.push(tgt);
+        pending.push(i);
+    }
+
+    let mut translations: Vec<String> = processed.clone();
+    let mut engine_used = String::new();
+    let mut manager = state.manager.lock().await;
+    if !pending.is_empty() {
+        // 同一批里目标语言必须一致才能合并请求；auto 模式下可能不一致，按目标分组翻译
+        let mut batches: Vec<(String, Vec<usize>)> = Vec::new();
+        for &i in &pending {
+            match batches.iter_mut().find(|(t, _)| *t == targets[i]) {
+                Some((_, idxs)) => idxs.push(i),
+                None => batches.push((targets[i].clone(), vec![i])),
+            }
+        }
+        for (tgt, idxs) in batches {
+            let texts: Vec<String> = idxs.iter().map(|&i| processed[i].clone()).collect();
+            let (res, used) = match engine {
+                Some(ref name) if !name.trim().is_empty() => {
+                    manager
+                        .translate_batch_with(name.trim(), &texts, &from, &tgt)
+                        .await?
+                }
+                _ => manager.translate_batch(&texts, &from, &tgt).await?,
+            };
+            if engine_used.is_empty() {
+                engine_used = used;
+            }
+            for (k, &i) in idxs.iter().enumerate() {
+                translations[i] = res.get(k).cloned().unwrap_or_default();
+            }
+        }
+    }
 
     // 术语库使用计数有自动调整时落盘
     if manager.take_term_dirty() {
         let _ = crate::terms::save_term_base(manager.term_base());
     }
 
-    // 记录翻译历史（整批合并为一条）
-    crate::history::record(
-        &from,
-        &to,
-        &lines.join("\n"),
-        &translations.join("\n"),
-        &engine_used,
-    );
+    // 记录翻译历史（整批合并为一条；跳过翻译时用实际目标语言）
+    let history_to = targets.first().cloned().unwrap_or_else(|| to.clone());
+    if !pending.is_empty() {
+        crate::history::record(
+            &from,
+            &history_to,
+            &lines.join("\n"),
+            &translations.join("\n"),
+            &engine_used,
+        );
+    }
 
     Ok(LinesTranslationResult {
         translations,
         engine_used,
+        skipped,
     })
 }
 
@@ -313,6 +483,46 @@ mod tests {
     // ==================================================================
     use super::*;
     use crate::system::AppSettings;
+
+    #[test]
+    fn is_pure_lang_skips_only_unmixed_target_text() {
+        // 纯中文：已是中文目标 → 跳过
+        assert!(is_pure_lang("游戏崩溃了", "zh"));
+        // 中英混排：不算已是中文 → 仍需翻译
+        assert!(!is_pure_lang("这是 MiniMap 测试", "zh"));
+        // 纯英文：目标英文 → 跳过
+        assert!(is_pure_lang("Hello world", "en"));
+        // 英文里夹中文：不算纯英文
+        assert!(!is_pure_lang("Hello 世界", "en"));
+        // 标点数字：两种语言都不算"纯"
+        assert!(!is_pure_lang("12345!!", "zh"));
+        assert!(!is_pure_lang("12345!!", "en"));
+        // 无法靠字符判定的语种（法语）一律需要翻译
+        assert!(!is_pure_lang("Bonjour le monde", "fr"));
+    }
+
+    #[test]
+    fn bilingual_auto_resolves_target_by_source_script() {
+        // 双向自动：中文原文 → 目标英文
+        assert_eq!(resolve_target_lang("你好世界", "auto", "zh-en"), "en");
+        // 英文原文 → 目标中文
+        assert_eq!(resolve_target_lang("Hello world", "auto", "zh-en"), "zh");
+        // 中英混排 → 按英文原文处理 → 目标中文（用户明确要求：有英有中，默认英翻中）
+        assert_eq!(resolve_target_lang("这是 MiniMap 测试", "auto", "zh-en"), "zh");
+        assert_eq!(resolve_target_lang("游戏崩溃了 please restart", "auto", "zh-en"), "zh");
+        // 纯中文（无拉丁字母） → 目标英文
+        assert_eq!(resolve_target_lang("游戏崩溃了", "auto", "zh-en"), "en");
+        // 假名 → 日语，不在 zh-en 对里 → 回落中文
+        assert_eq!(resolve_target_lang("こんにちは", "auto", "zh-en"), "zh");
+        // 非 auto 原样返回
+        assert_eq!(resolve_target_lang("你好", "ja", "zh-en"), "ja");
+        // 其他语言对
+        assert_eq!(resolve_target_lang("中文", "auto", "zh-ja"), "ja");
+        assert_eq!(resolve_target_lang("こんにちは", "auto", "zh-ja"), "zh");
+        assert_eq!(resolve_target_lang("Привет", "auto", "zh-ru"), "zh");
+        // 纯符号/数字：检测不出 → 回落语言对第一个
+        assert_eq!(resolve_target_lang("12345", "auto", "zh-en"), "zh");
+    }
 
     #[test]
     fn integration_default_settings_build_offline_only() {

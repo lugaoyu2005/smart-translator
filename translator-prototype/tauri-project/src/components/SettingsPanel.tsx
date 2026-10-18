@@ -707,20 +707,47 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
         </div>
 
         <div className="form-group">
-          <label className="form-label">默认翻译方向</label>
+          <label className="form-label">默认译文语言</label>
           <select
             className="form-select"
+            aria-label="默认译文语言"
             value={localSettings?.default_translation_direction || "auto->zh"}
             onChange={(e) =>
               handleSettingChange("default_translation_direction", e.target.value)
             }
           >
-            <option value="auto->zh">自动检测 → 中文</option>
-            <option value="zh->en">中文 → 英语</option>
-            <option value="en->zh">英语 → 中文</option>
-            <option value="zh->ja">中文 → 日语</option>
+            <option value="auto->zh">中文</option>
+            <option value="auto->en">英语</option>
+            <option value="auto->ja">日语</option>
+            <option value="auto->ko">韩语</option>
+            <option value="auto->ru">俄语</option>
+            <option value="auto->auto">双向自动（中文⇄英文 按原文反向）</option>
           </select>
+          <div className="form-hint">
+            原文语言不再需要选择：按 OCR 识别结果自动判断（本地字符分析，不消耗接口额度）。
+            已经是目标语言的文字块不会被翻译，也不会覆盖原文——只翻译需要翻译的部分。
+          </div>
         </div>
+
+        {localSettings?.default_translation_direction === "auto->auto" && (
+          <div className="form-group">
+            <label className="form-label">双向语言对</label>
+            <select
+              className="form-select"
+              aria-label="双向语言对"
+              value={localSettings?.bilingual_pair || "zh-en"}
+              onChange={(e) => handleSettingChange("bilingual_pair", e.target.value)}
+            >
+              <option value="zh-en">中文 ⇄ 英语</option>
+              <option value="zh-ja">中文 ⇄ 日语</option>
+              <option value="zh-ko">中文 ⇄ 韩语</option>
+              <option value="zh-ru">中文 ⇄ 俄语</option>
+            </select>
+            <div className="form-hint">
+              原文是前一个语种就翻成后一个，反之亦然（如中⇄英：中文→英文、英文→中文）
+            </div>
+          </div>
+        )}
 
         <div className="form-group">
           <label className="form-label">主窗口大小</label>

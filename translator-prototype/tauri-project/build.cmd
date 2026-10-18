@@ -129,14 +129,32 @@ tasklist /FI "IMAGENAME eq smart-translator.exe" 2>nul | findstr /I "smart-trans
 if not errorlevel 1 (
   echo   检测到应用正在运行，先结束进程...
   taskkill /IM smart-translator.exe /F >nul 2>&1
-  timeout /t 2 /nobreak >nul
 )
+rem 等进程真正退出：exe 被占用时复制会失败（ONNX 会话释放较慢，固定 2 秒不够）
+rem 用标签循环而不是 for 块，避免依赖延迟展开（本脚本是 setlocal 无 /v:on）
+set "WK_TRY=0"
+:waitkill
+tasklist /FI "IMAGENAME eq smart-translator.exe" 2>nul | findstr /I "smart-translator.exe" >nul
+if errorlevel 1 goto :procgone
+set /a WK_TRY+=1
+if %WK_TRY% GEQ 30 ( echo   [!] 进程 30 秒内未退出，仍尝试复制 & goto :procgone )
+ping -n 1 -w 500 127.0.0.1 >nul
+goto :waitkill
+:procgone
 if exist "%ROOT%\smart-translator.exe" (
   copy /Y "%ROOT%\smart-translator.exe" "%ROOT%\smart-translator.exe.v%V_CARGO%.prev.bak" >nul
   echo   已备份旧版本为 smart-translator.exe.v%V_CARGO%.prev.bak
 )
-copy /Y "%REL%\smart-translator.exe" "%ROOT%\smart-translator.exe" >nul
-if errorlevel 1 ( echo   [X] 复制 exe 失败 & goto :fail )
+rem 复制带重试：杀进程后文件句柄可能还要几百毫秒才释放
+set "CP_TRY=0"
+:copyretry
+set /a CP_TRY+=1
+copy /Y "%REL%\smart-translator.exe" "%ROOT%\smart-translator.exe" >nul 2>&1
+if not errorlevel 1 goto :copydone
+if %CP_TRY% GEQ 30 ( echo   [X] 复制 exe 失败（文件持续被占用） & goto :fail )
+ping -n 1 -w 700 127.0.0.1 >nul
+goto :copyretry
+:copydone
 if not exist "%ROOT%\onnxruntime.dll" (
   copy /Y "%ORT_LIB%\onnxruntime.dll" "%ROOT%\onnxruntime.dll" >nul
   echo   已补装 onnxruntime.dll
