@@ -1181,6 +1181,9 @@ pub async fn save_app_settings(
     }
     // 通知截图窗口设置已更新（引擎列表/菜单组件/覆盖样式即时生效）
     let _ = app.emit_to("screenshot", "screenshot-settings-updated", ());
+    // 同时通知主窗口：截图菜单里改的"当前翻译源/语言对/上次原译"也要回到设置页，
+    // 否则设置页留着旧草稿，用户之后再点"保存设置"会把截图窗口的改动覆盖掉。
+    let _ = app.emit_to("main", "app-settings-updated", ());
 
     // 系统集成设置即时生效；失败信息返回给前端提示（文件已保存）
     let mut errs: Vec<String> = Vec::new();

@@ -84,6 +84,29 @@ function App() {
     };
   }, []);
 
+  // 截图菜单改动 → 回填设置页。截图窗口只能改这三项，因此按字段合并，
+  // 而不是整份替换：设置页里尚未保存的其它编辑不会被冲掉。
+  useEffect(() => {
+    const un = listen("app-settings-updated", async () => {
+      try {
+        const fresh = await invoke<any>("get_app_settings");
+        const patch = (o: any) => ({
+          ...o,
+          current_engine: fresh.current_engine,
+          default_translation_direction: fresh.default_translation_direction,
+          overlay_last_mode: fresh.overlay_last_mode,
+        });
+        setSettings((prev: any) => (prev ? patch(prev) : fresh));
+        setLocalSettings((prev: any) => (prev ? patch(prev) : fresh));
+      } catch {
+        /* 静默：同步失败不影响当前编辑 */
+      }
+    });
+    return () => {
+      un.then((f) => f());
+    };
+  }, []);
+
   // 已保存设置的镜像：给下面的事件回调用，避免把订阅绑在 settings 上反复重建
   const savedSettingsRef = useRef<any>(null);
   useEffect(() => {

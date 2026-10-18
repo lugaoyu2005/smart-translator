@@ -1049,6 +1049,7 @@ const SettingsPanel: React.FC<SettingsPanelProps> = ({
             <label className="form-label">当前翻译源（默认引擎）</label>
             <select
               className="form-select"
+              aria-label="当前翻译源"
               value={
                 localSettings?.current_engine ||
                 enabledRealProviders[0]?.engine ||

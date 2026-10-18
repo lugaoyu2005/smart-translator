@@ -180,6 +180,52 @@ describe("App（主框架）", () => {
     });
   });
 
+  it("功能: 截图菜单改引擎（app-settings-updated）→ 回填设置页「当前翻译源」", async () => {
+    // 回归：save_app_settings 此前只 emit 给 screenshot 窗口，主窗口没有监听，
+    // 导致截图菜单里改的引擎/语言永远回不到设置页（还会被设置页旧草稿覆盖）。
+    // baseline：百度+有道都已启用，当前翻译源=百度（有道必须可选，否则 value 对不上）
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "get_app_settings")
+        return Promise.resolve({
+          ...SETTINGS,
+          online_apis: ["baidu", "youdao"],
+          current_engine: "百度翻译",
+        });
+      return defaultInvoke(cmd);
+    });
+    render(<App />);
+    await screen.findByText("设置菜单");
+    const sidebar = screen.getByText("设置菜单").closest<HTMLElement>(".sidebar")!;
+    fireEvent.click(within(sidebar).getByText("翻译引擎"));
+    // 初始：当前翻译源 = 百度翻译
+    const sel0 = screen.getByLabelText("当前翻译源") as HTMLSelectElement;
+    expect(sel0.value).toBe("百度翻译");
+
+    // 前提：主窗口必须真的订阅了这个事件（回归点之一）
+    expect(Object.keys(listeners)).toContain("app-settings-updated");
+    // 模拟：截图窗口把 current_engine 改成「有道智云」并落盘，Rust 发来事件
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "get_app_settings")
+        // 有道必须在该设置里是"已启用"，否则下拉里没有这个选项，value 对不上
+        return Promise.resolve({
+          ...SETTINGS,
+          online_apis: ["baidu", "youdao"],
+          current_engine: "有道智云",
+        });
+      return defaultInvoke(cmd);
+    });
+    await act(async () => {
+      listeners["app-settings-updated"]({});
+    });
+
+    // 设置页草稿应被按字段回填成新引擎（此前这里永远是旧值）
+    await waitFor(() => {
+      expect(
+        (screen.getByLabelText("当前翻译源") as HTMLSelectElement).value
+      ).toBe("有道智云");
+    });
+  });
+
   it("功能: 点×隐藏到托盘（main-window-hidden）→ 丢弃未保存的草稿", async () => {
     render(<App />);
     await screen.findByText("设置菜单");
