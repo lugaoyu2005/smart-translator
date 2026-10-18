@@ -518,10 +518,19 @@ pub fn load_settings() -> AppSettings {
     let path = settings_path();
     if path.exists() {
         if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Ok(mut settings) = serde_json::from_str::<AppSettings>(&content) {
+            // 容忍 UTF-8 BOM：记事本等编辑器保存时会加 BOM，而 serde_json 不接受，
+            // 去掉前若不处理会**静默回落到默认设置**（用户会看到配置"全没了"，
+            // 而且退出时默认值可能覆盖掉原文件）。
+            let content = content.trim_start_matches('\u{feff}');
+            if let Ok(mut settings) = serde_json::from_str::<AppSettings>(content) {
                 migrate(&mut settings);
                 return settings;
             }
+            // 解析失败不要静默：留痕便于排查（仍回落默认，保证能启动）
+            eprintln!(
+                "[settings] {} 解析失败，已回落到默认设置（文件保持原样，请检查 JSON 格式）",
+                path.display()
+            );
         }
     }
     let mut settings = AppSettings::default();
@@ -1308,6 +1317,26 @@ mod tests {
         s.offline_engine = "argos".to_string();
         migrate(&mut s);
         assert_eq!(s.offline_engine, "marian");
+    }
+
+    /// 回归：带 UTF-8 BOM 的 settings.json 必须能正常解析（否则用户用某些编辑器
+    /// 改过设置后，应用会静默回落默认值，看起来像"配置全丢了"）。
+    #[test]
+    fn regression_load_settings_tolerates_utf8_bom() {
+        // 用完整默认配置生成合法 JSON，再在开头加 BOM（模拟记事本保存）
+        let mut base = AppSettings::default();
+        base.current_engine = "离线翻译".to_string();
+        let json = serde_json::to_string(&base).expect("序列化默认设置");
+        let with_bom = format!("\u{feff}{}", json);
+
+        // serde 本身不接受 BOM
+        assert!(serde_json::from_str::<AppSettings>(&with_bom).is_err());
+        // 去掉 BOM 后应能正常解析，且不丢字段
+        let stripped = with_bom.trim_start_matches('\u{feff}');
+        let parsed: AppSettings = serde_json::from_str(stripped).expect("去 BOM 后应能解析");
+        assert_eq!(parsed.current_engine, "离线翻译");
+        assert_eq!(parsed.offline_model, base.offline_model);
+        assert_eq!(parsed.bilingual_pair, base.bilingual_pair);
     }
 
     #[test]

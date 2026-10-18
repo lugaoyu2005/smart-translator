@@ -1337,12 +1337,21 @@ fn models_ready_for(model: &str, hops: &[(&str, &str)]) -> bool {
     })
 }
 
+/// 是否需要启动预热。
+/// 判据：离线翻译已启用 **且** 它是"当前翻译源"。
+/// 反例（为什么加这条）：当前翻译源是百度翻译时，离线只是兜底，
+/// 却仍会在启动时把 NLLB-200 的 870MB 权重常驻内存（实测 idle RSS 1.5GB）。
+/// 这类场景改为首次真正用到离线时懒加载，代价只有那一次 1-3 秒加载。
+fn should_warmup(settings: &crate::system::AppSettings) -> bool {
+    settings.offline_engine != "disabled" && settings.current_engine == "离线翻译"
+}
+
 /// 启动预热：把当前默认方向已下载的模型会话提前加载进进程缓存
 /// （OPUS-MT 会话加载 1-3 秒，懒加载时首次框选翻译明显卡顿）。
 /// 由 main.rs 启动后台线程延迟调用；失败静默，不影响正常使用
 pub async fn warmup() {
     let settings = crate::system::load_settings();
-    if settings.offline_engine == "disabled" {
+    if !should_warmup(&settings) {
         return;
     }
     let model = settings.offline_model.clone();
@@ -1474,6 +1483,22 @@ impl TranslationEngine for OfflineMtEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 回归：只有"当前翻译源 = 离线翻译"时才预热。
+    /// 否则当前翻译源是百度翻译这类在线引擎时，NLLB-200 的 870MB 权重会白白常驻
+    /// （实测 idle RSS 从 ~600MB 涨到 1.5GB）。
+    #[test]
+    fn regression_warmup_only_when_offline_is_current_engine() {
+        let mut s = crate::system::AppSettings::default();
+        s.offline_engine = "marian".to_string();
+        s.current_engine = "百度翻译".to_string();
+        assert!(!should_warmup(&s), "在线引擎为主时不应预热离线模型");
+        s.current_engine = "离线翻译".to_string();
+        assert!(should_warmup(&s), "离线为当前翻译源时必须预热");
+        s.current_engine = "离线翻译".to_string();
+        s.offline_engine = "disabled".to_string();
+        assert!(!should_warmup(&s), "离线被禁用时不预热");
+    }
 
     #[test]
     fn test_detect_lang() {
