@@ -274,7 +274,7 @@ describe("App（主框架）", () => {
     const sidebar = screen.getByText("设置菜单").closest<HTMLElement>(".sidebar")!;
     expect(within(sidebar).getByRole("button", { name: "保存设置" })).toBeInTheDocument();
     fireEvent.click(within(sidebar).getByText("关于"));
-    expect(await screen.findByText("版本: 0.4.20")).toBeInTheDocument();
+    expect(await screen.findByText("版本: 0.4.21")).toBeInTheDocument();
     // 此前关于/术语/历史/翻译测试四个 tab 不显示保存栏（用户反馈）
     expect(within(sidebar).getByRole("button", { name: "保存设置" })).toBeInTheDocument();
     expect(within(sidebar).getByRole("button", { name: "恢复默认" })).toBeInTheDocument();
