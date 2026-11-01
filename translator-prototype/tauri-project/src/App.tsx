@@ -84,6 +84,19 @@ function App() {
     };
   }, []);
 
+  // 划词翻译取不到文本时（例如目标窗口以管理员运行），把原因告诉用户
+  useEffect(() => {
+    const un = listen<string>("selection-capture-failed", (e) => {
+      const msg = String(e.payload || "").trim();
+      if (msg) {
+        window.alert(`划词翻译未取到文本\n\n${msg}`);
+      }
+    });
+    return () => {
+      un.then((f) => f());
+    };
+  }, []);
+
   // 截图菜单改动 → 回填设置页。截图窗口只能改这三项，因此按字段合并，
   // 而不是整份替换：设置页里尚未保存的其它编辑不会被冲掉。
   useEffect(() => {

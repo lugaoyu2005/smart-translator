@@ -240,7 +240,8 @@ impl Default for AppSettings {
         let mut hotkeys = HashMap::new();
         hotkeys.insert("translate".to_string(), "None".to_string());
         hotkeys.insert("screenshot".to_string(), "None".to_string());
-        hotkeys.insert("select".to_string(), "None".to_string());
+        // 划词翻译给出厂默认快捷键（用户要求"增加快捷键"；None 表示不注册全局热键）
+        hotkeys.insert("select".to_string(), "Ctrl+Alt+D".to_string());
 
         Self {
             autostart: true,
@@ -933,7 +934,7 @@ fn sanitize_hotkeys(settings: &mut AppSettings) {
     for (name, default) in [
         ("translate", "Ctrl+Alt+T"),
         ("screenshot", "Ctrl+Alt+S"),
-        ("select", "Ctrl+Alt+X"),
+        ("select", "Ctrl+Alt+D"),
     ] {
         let bad = settings
             .hotkeys
@@ -1055,9 +1056,20 @@ pub fn register_hotkeys(app: &AppHandle, settings: &AppSettings) -> Result<(), S
                 "select" => {
                     let app = app.clone();
                     std::thread::spawn(move || {
-                        if let Some(text) = crate::selection::capture_selected_text() {
-                            show_main_window(&app);
-                            let _ = app.emit_to("main", "translate-selection", text);
+                        let result = crate::selection::capture_selection();
+                        match result.text {
+                            Some(text) => {
+                                show_main_window(&app);
+                                let _ = app.emit_to("main", "translate-selection", text);
+                            }
+                            // 取不到选中文本：把原因带给前端（例如目标窗口以管理员运行）
+                            None => {
+                                let _ = app.emit_to(
+                                    "main",
+                                    "selection-capture-failed",
+                                    result.reason.unwrap_or_default(),
+                                );
+                            }
                         }
                     });
                 }
@@ -1533,7 +1545,7 @@ mod tests {
         s.hotkeys.insert("select".to_string(), "B".to_string());
         super::sanitize_hotkeys(&mut s);
         assert_eq!(s.hotkeys.get("translate").unwrap(), "Ctrl+Alt+T");
-        assert_eq!(s.hotkeys.get("select").unwrap(), "Ctrl+Alt+X");
+        assert_eq!(s.hotkeys.get("select").unwrap(), "Ctrl+Alt+D");
     }
 
     #[test]

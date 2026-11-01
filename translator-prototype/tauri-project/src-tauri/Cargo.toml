@@ -1,6 +1,6 @@
 [package]
 name = "smart-translator"
-version = "0.4.21"
+version = "0.4.22"
 description = "智能翻译软件 - 支持离线翻译、在线翻译、截图翻译"
 edition = "2021"
 
@@ -43,6 +43,8 @@ windows = { version = "0.61", features = [
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Accessibility",
+    "Win32_System_Com",
     "Win32_UI_Input_KeyboardAndMouse",
     "Media_Ocr",
     "Graphics_Imaging",
