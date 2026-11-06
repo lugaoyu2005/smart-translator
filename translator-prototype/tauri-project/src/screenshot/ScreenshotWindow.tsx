@@ -744,18 +744,40 @@ const ScreenshotWindow: React.FC = () => {
       // 窗口已恢复可见（截图完成后），只需切换到翻译阶段文案
       setProcStage("translate");
 
-      // 逐组翻译（百度合并\n一次请求，按行拆分重组）
+      // 逐**行**翻译（不是逐组）。
+      // 关键原因：整组文本里只要混有中文，百度会把整段判成"中文"并原样返回，
+      // 导致英文部分完全不翻译（实测 4 组里有 2 组整组没翻）。
+      // 拆成单行后每行独立判定语种，英文行才会被正确翻成中文。
       const engineName = engines[engineIdx]?.name;
-      const res = await invoke<{
+      const flatLines: string[] = [];
+      const groupSpans: Array<{ start: number; count: number }> = [];
+      for (const g of groupTexts) {
+        const parts = g.split("\n");
+        groupSpans.push({ start: flatLines.length, count: parts.length });
+        flatLines.push(...parts);
+      }
+      const flatRes = await invoke<{
         translations: string[];
         engine_used: string;
         skipped?: boolean[];
+        all_already_target?: boolean;
       }>("translate_lines", {
-        lines: groupTexts,
-        from: "auto", // 原文语言一律自动检测（菜单栏已去掉原文选择）
+        lines: flatLines,
+        from: "auto", // 原文语言一律自动检测
         to: dstLang,
         engine: engineName ?? null,
       });
+      // 按原分组把译文拼回
+      const res = {
+        translations: groupSpans.map((sp) =>
+          flatRes.translations.slice(sp.start, sp.start + sp.count).join("\n")
+        ),
+        engine_used: flatRes.engine_used,
+        skipped: groupSpans.map((sp) =>
+          flatRes.skipped?.slice(sp.start, sp.start + sp.count).every(Boolean) ?? false
+        ),
+        all_already_target: flatRes.all_already_target,
+      };
       if (stale()) return;
 
       // skipped = 该块本来就是目标语言：不翻译、也不铺覆盖块（保留原样）
@@ -770,6 +792,13 @@ const ScreenshotWindow: React.FC = () => {
       setOverlayVisible(true);
       groupDragged.current = false;
       setPhase("result");
+      // 整批文本本来就都是译文语言 → 结果等于没翻译，明确告诉用户原因
+      if (res.all_already_target) {
+        setError(
+          `这段文字本来就是「${langName(dstLang)}」，无需翻译。\n` +
+            `如果期望翻成其它语言，请点菜单栏的语言按钮切换译文语言`
+        );
+      }
       await moveOnScreen();
     } catch (e: any) {
       if (stale()) return; // 已退出：不再弹窗显示过期报错
@@ -974,9 +1003,14 @@ const ScreenshotWindow: React.FC = () => {
         guard += 1;
       }
       if (measure() > rect.height) {
-        // 缩到下限仍装不下：放开固定高度，让色块向下生长（不丢字优先）
-        el.style.height = "auto";
+        // 缩到下限仍装不下：**绝不放开块高**——那会让色块向下疯长、压住下方块，
+        // 这正是用户反馈"各个翻译板块重叠"的根因。
+        // 改为：块保持原尺寸，内容在块内滚动。既不遮挡其它块，也不丢字
+        // （鼠标滚轮/拖动即可读完；复制按钮始终能取到完整译文）。
+        el.style.height = `${rect.height}px`;
         el.style.alignItems = "flex-start";
+        el.style.overflowY = "auto";
+        el.style.overflowX = "hidden";
       }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -360,6 +360,10 @@ pub struct LinesTranslationResult {
     /// 与 lines 等长：true = 该组本来就是目标语言，未翻译（前端不铺覆盖块）
     #[serde(default)]
     pub skipped: Vec<bool>,
+    /// 整批文本本来就都是目标语言（翻译结果≈原文）：
+    /// 通常意味着"译文语言"被设成了与原文相同的语言，前端可提示用户改设置
+    #[serde(default)]
+    pub all_already_target: bool,
 }
 
 // Tauri命令：批量翻译（截图翻译用）
@@ -407,7 +411,11 @@ pub async fn translate_lines(
             Some(t) => t.clone(),
             None => resolve_target_lang(line, "auto", &settings.bilingual_pair),
         };
-        // 已是目标语言 → 不翻译（混排块因为不是"纯目标语言"，仍会翻译）
+        // 已是目标语言 → 跳过。
+        // 但**整批都不需要翻译时，仍走正常翻译**：用户把译文语言设成英语时，
+        // 英文原文会被判为"已是目标语言"而全部跳过，用户看到的就是原文原样
+        // （实测百度 auto->en 对英文原文原样返回，不会出错，代价只是一次请求）。
+        // 这个兜底放在下面统一判断，避免"选了英语就什么都翻译不了"。
         if fixed_target.is_some() && is_pure_lang(line, &tgt) {
             skipped[i] = true;
             targets.push(tgt);
@@ -415,6 +423,20 @@ pub async fn translate_lines(
         }
         targets.push(tgt);
         pending.push(i);
+    }
+
+    // 记录"整批原本都被判定已是目标语言"——这时翻译结果等价于没翻译，
+    // 前端可据此提示用户：译文语言可能设成了与原文相同的语言。
+    let all_already_target = pending.is_empty() && !processed.is_empty();
+
+    // 兜底：整批都被判定"已是目标语言"时，不要直接返回原文。
+    // 用户的意图是"翻译"，宁可多发一次请求（引擎对同语种会原样返回，不报错），
+    // 也不要让界面看起来像"什么都没做"（v0.4.22 报告的核心问题）。
+    if pending.is_empty() && !processed.is_empty() {
+        skipped.iter_mut().for_each(|v| *v = false);
+        for i in 0..processed.len() {
+            pending.push(i);
+        }
     }
 
     let mut translations: Vec<String> = processed.clone();
@@ -469,6 +491,7 @@ pub async fn translate_lines(
         translations,
         engine_used,
         skipped,
+        all_already_target,
     })
 }
 
@@ -502,6 +525,49 @@ mod tests {
     }
 
     #[test]
+
+    /// 诊断：用用户实际截图里的文本验证语言决策（v0.4.22 报告"英文块没被翻译"）
+    #[test]
+
+    /// 诊断：模拟截图翻译的真实入参，看 translate_lines 的分组/跳过是否正确
+    #[test]
+    fn diag_translate_lines_mixed_content() {
+        // 图片 1 的真实 OCR 结果（英文标题 + 英文描述 + 中文标签 + 数字/站点名）
+        let lines = vec![
+            "Tektopia Harvestcraft Compat".to_string(),
+            "其他 this mod makes it so the tektopians from tektopia eat the food from harvestcraft".to_string(),
+            "56 万 7 年前 CurseForge".to_string(),
+            "Tektopia Tinker".to_string(),
+            "This mod that adds a village tinker for TekTopia.".to_string(),
+        ];
+        let settings = crate::system::load_settings();
+        let pair = &settings.bilingual_pair;
+        println!("[tl] bilingual_pair = {pair}");
+        println!("[tl] default_direction = {}", settings.default_translation_direction);
+        for (i, l) in lines.iter().enumerate() {
+            let tgt = resolve_target_lang(l, "auto", pair);
+            let skip = is_pure_lang(l, &tgt);
+            println!("[tl] #{i} 目标={tgt:?} 跳过={skip} 文本={:?}", l.chars().take(50).collect::<String>());
+        }
+    }
+
+    fn diag_user_screenshot_language_decisions() {
+        let samples = [
+            "Tektopia Harvestcraft Compat",
+            "this mod makes it so the tektopians from tektopia eat the food from harvestcraft",
+            "Curse Forge",
+            "This mod that adds a village tinker for TekTopia.",
+            "其他",
+            "冒险 实用 游戏机制",
+            "TekTopia",
+        ];
+        for t in samples {
+            let tgt = resolve_target_lang(t, "auto", "zh-en");
+            let skip = is_pure_lang(t, &tgt);
+            println!("[lang] {:?} -> 目标={:?} 跳过={:?}", t, tgt, skip);
+        }
+    }
+
     fn bilingual_auto_resolves_target_by_source_script() {
         // 双向自动：中文原文 → 目标英文
         assert_eq!(resolve_target_lang("你好世界", "auto", "zh-en"), "en");

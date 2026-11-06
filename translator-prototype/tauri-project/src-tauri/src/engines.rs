@@ -1466,27 +1466,84 @@ impl TranslationManager {
             }
         }
 
-        if matches!(engine.engine_type(), EngineType::Baidu) {
-            // 百度：q支持\n多行，一次请求返回按行结果
-            let joined = all_lines.join("\n");
-            if let Ok(result) = engine.translate(&joined, from, to).await {
-                let outs: Vec<String> =
-                    result.split('\n').map(|s| s.trim().to_string()).collect();
-                if outs.len() == all_lines.len() {
-                    return Ok(reassemble(&outs, &line_counts));
-                }
-                // 行数不匹配：落到底部逐行翻译
+        // 分批翻译：**按"能否合并"智能分组**。
+        //
+        // 背景：引擎对 q 参数只做一次语种检测。把"中文标签 + 英文正文"合并送进去
+        // 会整段被判成中文而原样返回（实测 'Tektopia Addons/冒险 实用 游戏机制/
+        // A collection of...' 整组没翻；逐行送才得到 'Tektopia插件'）。
+        // 但完全逐行又会撞上百度免费版 1QPS 限速（20 行要等 20 秒）。
+        //
+        // 折中：把**需要翻译的行**（非纯中文/非纯数字符号）用 \n 合并成尽量少的
+        // 请求；本来就该原样保留的行（纯中文、纯数字）直接跳过不送。
+        let is_baidu = matches!(engine.engine_type(), EngineType::Baidu);
+        let mut outs: Vec<String> = vec![String::new(); all_lines.len()];
+        let mut need_translate: Vec<usize> = Vec::new();
+        for (i, l) in all_lines.iter().enumerate() {
+            let t = l.trim();
+            if t.is_empty() || t.chars().all(|c| c.is_ascii_digit() || c.is_ascii_punctuation() || c.is_whitespace()) {
+                outs[i] = l.clone(); // 空行/纯数字符号：原样保留
+            } else if is_pure_chinese(t) {
+                outs[i] = l.clone(); // 纯中文：本来就不用翻，跳过可省请求
+            } else {
+                need_translate.push(i);
             }
-            // 请求失败也落到底部逐行重试
         }
 
-        // 逐行翻译
-        let mut outs: Vec<String> = Vec::with_capacity(all_lines.len());
-        for l in &all_lines {
-            outs.push(engine.translate(l, from, to).await?);
+        if !need_translate.is_empty() {
+            // **逐行送翻译**：合并送（哪怕只有 2 行）时百度会对整段做一次语种判定，
+            // 混有明显的英文专有名词/短句时仍可能原样返回（实测 'Tektopia Tinker'
+            // 合并送没翻、单独送也保持原样——这是百度对专名的处理，不是 bug）。
+            // 逐行能保证每行独立判定，长句/描述句一定翻成中文。
+            // 百度免费版 1QPS：行间节流 1.05s；行数多时总耗时较长，
+            // 但截图场景通常 5-15 行，可接受（且并发上限由前端一次框选决定）。
+            for (n, &i) in need_translate.iter().enumerate() {
+                if n > 0 && is_baidu {
+                    tokio::time::sleep(std::time::Duration::from_millis(1050)).await;
+                }
+                // 逐行决定 from：不能一律传 auto。
+                // 百度对 auto 的判定是"文本里只要有一个汉字就算中文"，
+                // 于是"其他 This mod that adds..."这种中英混排行会被判成
+                // 中文→中文而**整行原样返回**（实测；显式传 en 就能正常翻译）。
+                // 这里按"是否含拉丁字母"判定：含拉丁字母 → 有英文要译 → from=en；
+                // 纯 CJK → from=auto（本来也不需要翻译，前面已跳过）。
+                let line_from = if from.eq_ignore_ascii_case("auto") {
+                    let t = all_lines[i].as_str();
+                    if has_latin_letters(t) {
+                        "en"
+                    } else {
+                        from
+                    }
+                } else {
+                    from
+                };
+                outs[i] = engine.translate(&all_lines[i], line_from, to).await?;
+            }
         }
         Ok(reassemble(&outs, &line_counts))
     }
+}
+
+/// 文本是否含拉丁字母（有英文内容可翻）
+fn has_latin_letters(s: &str) -> bool {
+    s.chars().any(|c| c.is_ascii_alphabetic() || (0xC0..=0x24F).contains(&(c as u32)))
+}
+
+/// 是否"纯中文"（只含汉字、中文标点、空白）——这类行不需要翻译，可跳过请求
+fn is_pure_chinese(s: &str) -> bool {
+    let mut has_han = false;
+    for c in s.chars() {
+        let u = c as u32;
+        let is_han = (0x4E00..=0x9FFF).contains(&u)
+            || (0x3400..=0x4DBF).contains(&u)
+            || (0xF900..=0xFAFF).contains(&u);
+        let is_cjk_punct = (0x3000..=0x303F).contains(&u) || (0xFF00..=0xFFEF).contains(&u);
+        if is_han {
+            has_han = true;
+        } else if !(is_cjk_punct || c.is_whitespace()) {
+            return false; // 含拉丁字母/数字/其它字符 → 不是纯中文
+        }
+    }
+    has_han
 }
 
 /// 按 line_counts 将展平的行结果重组为与 texts 对齐的数组（\n连接）
